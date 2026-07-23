@@ -17,7 +17,10 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
@@ -28,11 +31,20 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common.data_io import load_bars  # noqa: E402
+
 
 DATA_CSV_DEFAULT = "data/TSLA_5m_60d.csv"
+EVENTS_DIR_DEFAULT = "outputs/zigzag"
 SWING_THRESHOLDS = [0.005, 0.01]  # 0.5%, 1%
 X_GRID = [0.01, 0.02, 0.03, 0.05]
 Y_GRID = [0.01, 0.02, 0.03]
+
+# One physical V event == one (peak_t, trough_t) pair. The X/Y (and swing_th)
+# grids are nested, so the same swing sequence is detected by many combos;
+# distribution stats must be computed on the deduplicated set.
+UNIQUE_KEY = ["peak_t", "trough_t"]
 
 
 @dataclass
@@ -57,12 +69,7 @@ class VEvent:
 
 
 def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, parse_dates=["Datetime"])
-    df = df.set_index("Datetime")
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    df = df.sort_index()
-    return df
+    return load_bars(path)
 
 
 def zigzag_swings(close: pd.Series, threshold: float) -> List[SwingPoint]:
@@ -150,7 +157,7 @@ def detect_v_events(swings: List[SwingPoint], x: float, y: float, swing_threshol
 
 def volatility_regime(close: pd.Series, window: int = 78) -> pd.Series:
     rets = close.pct_change()
-    vol = rets.rolling(window).std() * np.sqrt(252 * (78 * 5))  # annualize approx
+    vol = rets.rolling(window).std() * np.sqrt(252 * 78)  # annualize: 78 five-minute bars/day
     quantiles = vol.quantile([1 / 3, 2 / 3])
     def label(v):
         if np.isnan(v):
@@ -199,27 +206,38 @@ def summarize(events: List[VEvent], df: pd.DataFrame) -> dict:
         )
     ev_df = pd.DataFrame(rows)
     if ev_df.empty:
-        return {"events_df": ev_df}
+        return {"events_df": ev_df, "events_unique": ev_df}
 
-    ev_df["date"] = ev_df["trough_t"].dt.tz_convert("America/New_York").dt.date
-    ev_df["week"] = ev_df["trough_t"].dt.to_period("W").dt.start_time
-    ev_df["month"] = ev_df["trough_t"].dt.to_period("M").dt.start_time
+    # Deduplicate to physical events: the swing_th/X/Y grids are nested, so the
+    # same (peak_t, trough_t) appears under many parameter combos. All
+    # daily/weekly/monthly, drop/rebound and regime stats below use this
+    # deduplicated set (representative row = loosest combo that detected it).
+    uniq = ev_df.sort_values(UNIQUE_KEY + ["swing_th", "X", "Y"]).copy()
+    n_combos = uniq.groupby(UNIQUE_KEY).size().rename("n_param_combos")
+    uniq = uniq.drop_duplicates(subset=UNIQUE_KEY, keep="first")
+    uniq = uniq.merge(n_combos, left_on=UNIQUE_KEY, right_index=True)
+    uniq = uniq.sort_values("peak_t").reset_index(drop=True)
 
-    daily = ev_df.groupby(["date"]).size()
-    weekly = ev_df.groupby(["week"]).size()
-    monthly = ev_df.groupby(["month"]).size()
+    uniq["date"] = uniq["trough_t"].dt.tz_convert("America/New_York").dt.date
+    uniq["week"] = uniq["trough_t"].dt.to_period("W").dt.start_time
+    uniq["month"] = uniq["trough_t"].dt.to_period("M").dt.start_time
 
-    drop_stats = ev_df["drop_pct"].describe(percentiles=[0.1, 0.5, 0.9])
-    reb_stats = ev_df["rebound_pct"].describe(percentiles=[0.1, 0.5, 0.9])
-    avg_bars = ev_df["bars_to_rebound"].mean()
+    daily = uniq.groupby(["date"]).size()
+    weekly = uniq.groupby(["week"]).size()
+    monthly = uniq.groupby(["month"]).size()
 
-    # volatility regime
+    drop_stats = uniq["drop_pct"].describe(percentiles=[0.1, 0.5, 0.9])
+    reb_stats = uniq["rebound_pct"].describe(percentiles=[0.1, 0.5, 0.9])
+    avg_bars = uniq["bars_to_rebound"].mean()
+
+    # volatility regime (reindex is NaN-safe if a trough timestamp is missing)
     regime = volatility_regime(df["Close"])
-    ev_df["regime"] = ev_df["trough_t"].map(lambda t: regime.loc[t])
-    regime_counts = ev_df.groupby("regime").size()
+    uniq["regime"] = regime.reindex(uniq["trough_t"]).to_numpy()
+    regime_counts = uniq.groupby("regime").size()
 
     return {
         "events_df": ev_df,
+        "events_unique": uniq,
         "daily": daily,
         "weekly": weekly,
         "monthly": monthly,
@@ -241,21 +259,23 @@ def best_combo_equity(ev_df: pd.DataFrame) -> Tuple[pd.Series, dict]:
     return curve, {"swing_th": th, "X": x, "Y": y, "final_return": curve.iloc[-1] - 1, "trades": len(curve)}
 
 
-def plots(ev_df: pd.DataFrame, df: pd.DataFrame, outdir: Path) -> None:
+def plots(ev_uniq: pd.DataFrame, ev_grid: pd.DataFrame, df: pd.DataFrame, outdir: Path) -> None:
+    """Distribution plots use the deduplicated physical events (ev_uniq);
+    the per-combo equity curve uses the full grid table (ev_grid)."""
     outdir.mkdir(parents=True, exist_ok=True)
-    # Histogram of drop and rebound
+    # Histogram of drop and rebound (deduplicated physical events)
     plt.figure(figsize=(8, 4))
-    plt.hist(ev_df["drop_pct"], bins=40, alpha=0.6, label="drop_pct")
-    plt.hist(ev_df["rebound_pct"], bins=40, alpha=0.6, label="rebound_pct")
+    plt.hist(ev_uniq["drop_pct"], bins=40, alpha=0.6, label="drop_pct")
+    plt.hist(ev_uniq["rebound_pct"], bins=40, alpha=0.6, label="rebound_pct")
     plt.legend()
-    plt.title("V magnitude distribution")
+    plt.title("V magnitude distribution (deduped physical events)")
     plt.xlabel("pct")
     plt.tight_layout()
     plt.savefig(outdir / "v_magnitude_hist.png", dpi=150)
     plt.close()
 
     # Time-of-day heatmap (ET, trough time)
-    et_times = ev_df["trough_t"].dt.tz_convert("America/New_York")
+    et_times = ev_uniq["trough_t"].dt.tz_convert("America/New_York")
     tod = et_times.dt.hour * 12 + et_times.dt.minute // 5  # 5m slots 0-287
     counts = tod.value_counts().sort_index()
     hours = np.arange(24)
@@ -272,13 +292,13 @@ def plots(ev_df: pd.DataFrame, df: pd.DataFrame, outdir: Path) -> None:
     plt.colorbar(label="V count")
     plt.xlabel("Minute within hour")
     plt.ylabel("Hour of day (ET)")
-    plt.title("Time-of-day heatmap of V occurrences (trough time)")
+    plt.title("Time-of-day heatmap of V occurrences (trough time, deduped)")
     plt.tight_layout()
     plt.savefig(outdir / "v_time_of_day_heatmap.png", dpi=150)
     plt.close()
 
-    # Equity curve for best combo
-    curve, meta = best_combo_equity(ev_df)
+    # Equity curve for best combo (per-combo grid, no cross-combo duplication)
+    curve, meta = best_combo_equity(ev_grid)
     plt.figure(figsize=(8, 4))
     plt.plot(curve.index, curve.values)
     plt.title(f"Idealized equity curve (best combo th={meta['swing_th']}, X={meta['X']}, Y={meta['Y']})")
@@ -291,10 +311,34 @@ def plots(ev_df: pd.DataFrame, df: pd.DataFrame, outdir: Path) -> None:
     meta_path.write_text(str(meta))
 
 
+def write_meta(events_dir: Path, df: pd.DataFrame, input_csv: str, n_grid: int, n_unique: int) -> None:
+    """Sidecar metadata so consumers (layered_backtest) can verify that the
+    events file and the price cache cover the same period."""
+    meta = {
+        "source_csv": input_csv,
+        "data_start": df.index.min().isoformat(),
+        "data_end": df.index.max().isoformat(),
+        "n_bars": int(len(df)),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dedup_key": UNIQUE_KEY,
+        "note": (
+            "zigzag_events.csv holds deduplicated physical events (one row per "
+            "(peak_t, trough_t); representative params = loosest combo, "
+            "n_param_combos = combos that detected it). Full per-combo grid in "
+            "zigzag_events_grid.csv — filter it on (swing_th, X, Y) for "
+            "single-parameter-group consumption."
+        ),
+        "n_events_grid_rows": n_grid,
+        "n_events_unique": n_unique,
+    }
+    (events_dir / "zigzag_events_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_csv", default=DATA_CSV_DEFAULT)
     parser.add_argument("--output_dir", default="figures/zigzag")
+    parser.add_argument("--events_dir", default=EVENTS_DIR_DEFAULT)
     args = parser.parse_args()
 
     df = load_data(args.input_csv)
@@ -303,19 +347,28 @@ def main():
     ev_df = summary["events_df"]
 
     outdir = Path(args.output_dir)
+    events_dir = Path(args.events_dir)
     if not ev_df.empty:
-        ev_df.to_csv("zigzag_events.csv", index=False, date_format="%Y-%m-%dT%H:%M:%S%z")
-        summary["daily"].to_csv("zigzag_daily.csv", date_format="%Y-%m-%d")
-        summary["weekly"].to_csv("zigzag_weekly.csv", date_format="%Y-%m-%d")
-        summary["monthly"].to_csv("zigzag_monthly.csv", date_format="%Y-%m-%d")
-        summary["regime_counts"].to_csv("zigzag_regime_counts.csv")
-        plots(ev_df, df, outdir)
+        ev_uniq = summary["events_unique"]
+        events_dir.mkdir(parents=True, exist_ok=True)
+        date_fmt = "%Y-%m-%dT%H:%M:%S%z"
+        # zigzag_events.csv = deduplicated physical events (backtest input);
+        # zigzag_events_grid.csv = full parameter grid (one row per combo hit).
+        ev_uniq.to_csv(events_dir / "zigzag_events.csv", index=False, date_format=date_fmt)
+        ev_df.to_csv(events_dir / "zigzag_events_grid.csv", index=False, date_format=date_fmt)
+        summary["daily"].to_csv(events_dir / "zigzag_daily.csv", date_format="%Y-%m-%d")
+        summary["weekly"].to_csv(events_dir / "zigzag_weekly.csv", date_format="%Y-%m-%d")
+        summary["monthly"].to_csv(events_dir / "zigzag_monthly.csv", date_format="%Y-%m-%d")
+        summary["regime_counts"].to_csv(events_dir / "zigzag_regime_counts.csv")
+        write_meta(events_dir, df, args.input_csv, len(ev_df), len(ev_uniq))
+        plots(ev_uniq, ev_df, df, outdir)
 
         curve, meta = best_combo_equity(ev_df)
+        print(f"Events: grid rows={len(ev_df)}, deduped physical={len(ev_uniq)} -> {events_dir}/zigzag_events.csv")
         print(f"Best combo: th={meta['swing_th']}, X={meta['X']}, Y={meta['Y']}, final_return={meta['final_return']:.2%}, trades={meta['trades']}")
-        print(f"Avg bars to rebound: {summary['avg_bars']:.2f}")
-        print("Drop pct stats:\n", summary["drop_stats"])
-        print("Rebound pct stats:\n", summary["rebound_stats"])
+        print(f"Avg bars to rebound (deduped): {summary['avg_bars']:.2f}")
+        print("Drop pct stats (deduped):\n", summary["drop_stats"])
+        print("Rebound pct stats (deduped):\n", summary["rebound_stats"])
     else:
         print("No events detected.")
 

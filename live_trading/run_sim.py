@@ -1,8 +1,12 @@
 """
 End-to-end simulation wiring using existing 5m dataset as feed:
-- Build 1H bars from 5m (offset 30min).
-- Generate signals from previous 1H close-to-close move.
-- Execute next 5m bar with TP/SL using high/low/close (conservative path).
+- Build 1H bars from 5m via src.common.data_io (bucket-START labels, no
+  cross-day buckets, partial buckets dropped).
+- Generate signals from the previous 1H intraday close-to-close move
+  (overnight gap excluded).
+- Execute inside the NEXT 1H bucket's 5m bars; TP/SL settle through the
+  shared pessimistic bracket model (gap-through stops, strict-cross TP,
+  SL priority, per-side fees).
 This is a dry-run scaffold for real-time deployment.
 """
 
@@ -13,7 +17,6 @@ from pathlib import Path
 import sys
 
 import pandas as pd
-import numpy as np
 
 # ensure project root on path when run as script
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,92 +25,97 @@ if str(ROOT) not in sys.path:
 
 from live_trading.bar_builder import resample_1h
 from live_trading.config import Config, load_config
-from live_trading.execution import simulate_bar
 from live_trading.signal import compute_trigger
+from src.common.data_io import load_bars
+from src.common.execution import CostModel, entry_fill, settle_bracket
 
-
-def load_feed(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, parse_dates=["Datetime"]).set_index("Datetime")
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    return df[["Open", "High", "Low", "Close", "Volume"]].sort_index()
+BUCKET = pd.Timedelta(minutes=60)
 
 
 def run_sim(cfg: Config, feed_path: str, outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
-    df = load_feed(feed_path)
-    bars1h = resample_1h(df, offset_minutes=cfg.offset_minutes)
-    bars1h["ret_prev"] = bars1h["Close"].pct_change()
-    bars1h["ret_std"] = bars1h["ret_prev"].rolling(cfg.std_window).std()
+    df = load_bars(feed_path)
+    bars1h = resample_1h(df)  # bucket-START labelled, Close_ret is overnight-free
+    bars1h["ret_prev"] = bars1h["Close_ret"]
+    # ret_prev is NaN on each day's first bucket (overnight gap removed); allow
+    # the rolling std to tolerate those NaNs instead of returning all-NaN
+    bars1h["ret_std"] = bars1h["ret_prev"].rolling(
+        cfg.std_window, min_periods=max(2, int(cfg.std_window * 0.7))
+    ).std()
+
+    cost = CostModel(fee_bp=cfg.fee_bp, slippage_bp=cfg.slip_bp)
 
     trades = []
     equity = cfg.capital
-
-    # iterate over 1H bars, execute on next lower-bar (here using the next 5m bar)
+    peak_equity = equity
     tz = cfg.tz
+
+    # account-level risk state
+    cur_day = None
+    day_start_equity = equity
+    day_blocked = False
+    global_stop_hit = False
+
+    # iterate over 1H buckets: signal = bucket i-1, execution = bucket i's 5m bars
     for i in range(1, len(bars1h)):
         prev = bars1h.iloc[i - 1]
         if cfg.trigger_std is not None:
             thr = cfg.trigger_std * prev["ret_std"]
-            direction = 0 if pd.isna(thr) or abs(prev["ret_prev"]) < thr else (1 if prev["ret_prev"] > 0 else -1)
+            direction = 0 if pd.isna(thr) or pd.isna(prev["ret_prev"]) or abs(prev["ret_prev"]) < thr \
+                else (1 if prev["ret_prev"] > 0 else -1)
         else:
             direction = compute_trigger(prev, cfg.trigger)
         if direction == 0:
             continue
 
-        # time filter based on bar end (right label)
-        bar_end = bars1h.index[i]
-        hour_et = bar_end.tz_convert(tz).hour
-        if hour_et not in cfg.allowed_hours:
+        window_start = bars1h.index[i]
+        # execution bucket must immediately follow the signal bucket (same day)
+        if window_start - bars1h.index[i - 1] != BUCKET:
             continue
 
-        # execution window: all lower-bars in this 1H; enter at first bar open, then walk forward to find TP/SL
-        window_start = bars1h.index[i - 1]
-        window_end = bars1h.index[i]
-        window = df.loc[(df.index > window_start) & (df.index <= window_end)]
+        # time filter: ET hour of the execution bucket START
+        et_start = window_start.tz_convert(tz)
+        if et_start.hour not in cfg.allowed_hours:
+            continue
+
+        # account risk: reset daily tracking on new ET day
+        if et_start.date() != cur_day:
+            cur_day = et_start.date()
+            day_start_equity = equity
+            day_blocked = False
+
+        # pre-entry checks: global drawdown stop, then daily loss stop
+        if (equity - peak_equity) / peak_equity <= -cfg.global_stop:
+            global_stop_hit = True
+            break
+        if day_blocked:
+            continue
+
+        # execution window: all 5m bars inside the next 1H bucket
+        window = df.loc[(df.index >= window_start) & (df.index < window_start + BUCKET)]
         if window.empty:
             continue
 
-        first_bar = window.iloc[0]
-        entry_price = first_bar["Open"] * (1 + cfg.slip_bp / 10_000 * direction)
+        entry_price = entry_fill(float(window.iloc[0]["Open"]), direction, cost)
         tp_px = entry_price * (1 + cfg.tp * direction)
         sl_px = entry_price * (1 - cfg.sl * direction)
 
-        hit = "close"
-        exit_px = window["Close"].iloc[-1]
-        exit_time = window.index[-1]
+        res = settle_bracket(window, direction, entry_price, tp_px, sl_px, cost)
 
-        for ts, row in window.iterrows():
-            high, low, close = row["High"], row["Low"], row["Close"]
-            if direction == 1:
-                tp_hit = high >= tp_px
-                sl_hit = low <= sl_px
-            else:
-                tp_hit = low <= tp_px
-                sl_hit = high >= sl_px
-
-            if sl_hit:
-                hit = "sl"
-                exit_px = sl_px
-                exit_time = ts
-                break
-            if tp_hit:
-                hit = "tp"
-                exit_px = tp_px
-                exit_time = ts
-                break
-
-        ret = direction * (exit_px - entry_price) / entry_price - cfg.fee_bp / 10_000 * 2
+        ret = res.ret
         eq_before = equity
         equity *= (1 + ret)
+        peak_equity = max(peak_equity, equity)
+        if (equity - day_start_equity) / day_start_equity <= -cfg.daily_loss_stop:
+            day_blocked = True
         trades.append(
             {
                 "entry_time": window.index[0],
-                "exit_time": exit_time,
+                "exit_time": res.exit_time,
                 "direction": direction,
-                "hit": hit,
+                "hit": res.hit,
                 "entry": entry_price,
-                "exit": exit_px,
+                "exit": res.exit_px,
                 "ret": ret,
                 "eq_before": eq_before,
                 "eq_after": equity,
@@ -126,6 +134,8 @@ def run_sim(cfg: Config, feed_path: str, outdir: Path):
     else:
         total_return = 0.0
         summary = "No trades generated."
+    if global_stop_hit:
+        summary += " | GLOBAL STOP HIT"
     (outdir / "summary.txt").write_text(summary, encoding="utf-8")
     print(summary)
     return trades_df, total_return
@@ -142,8 +152,6 @@ def parse_args():
     ap.add_argument("--fee_bp", type=float, default=None, help="Override fee bp per side.")
     ap.add_argument("--trigger_std", type=float, default=None, help="Use k * rolling std of 1H returns.")
     ap.add_argument("--std_window", type=int, default=None, help="Rolling window for std trigger.")
-    ap.add_argument("--mode", choices=["path5m", "bar_hl"], default="path5m",
-                    help="path5m: intrabar 5m path TP/SL; bar_hl: use 1H high/low like backtest.")
     ap.add_argument("--no_report", action="store_true", help="Skip writing detailed report.txt")
     return ap.parse_args()
 

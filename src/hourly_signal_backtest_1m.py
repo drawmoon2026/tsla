@@ -2,10 +2,20 @@
 1-minute intrabar replay for the 1H breakout-follow strategy (no lookahead on direction).
 
 Differences vs hourly_signal_backtest:
-- Uses real 1m path inside each 1H bar to decide TP/SL touch order.
-- Data fetch: yfinance 1m (Yahoo限制约30天)，默认 TSLA period=30d.
-- Signal: previous 1H close-to-close abs return >= trigger -> enter next bar at its opening minute.
-- Exit: scan 1m bars within the holding 1H window in time order; first touch of TP/SL exits; else exit at that hour's close.
+- Uses real 1m path inside each 1H bar to decide TP/SL touch order (settled
+  through src.common.execution.settle_bracket with pessimistic fills + costs).
+- Data fetch: yfinance 1m, live (not cached).
+- Signal: PREVIOUS completed 1H bar's intraday close-to-close abs return >=
+  trigger -> enter at the next 1H bucket's first minute open. Overnight gaps
+  never generate signals; signals are not carried across days.
+- Exit: settle_bracket over the 1m bars of the holding hour [bucket_start,
+  bucket_start + 1h); exit at that hour's last 1m close if no TP/SL touch.
+
+SAMPLE-PERIOD WARNING: Yahoo caps 1m history at ~7-8 days per request (~30
+days lookback), so the default --period=7d covers a far shorter window than
+the 60-day 5m dataset behind hourly_signal_backtest. Default trigger/tp/sl
+match the 5m version's grid for parameter comparability, but results are NOT
+directly comparable across the two scripts unless you align the time windows.
 
 Outputs: trades CSV, report.txt, equity.png in outputs/hourly_signal_1m/.
 """
@@ -13,6 +23,7 @@ Outputs: trades CSV, report.txt, equity.png in outputs/hourly_signal_1m/.
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
@@ -24,6 +35,14 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import yfinance as yf  # noqa: E402
+
+# ensure project root on path when run as script
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.common.data_io import ET, intraday_returns, resample_bars  # noqa: E402
+from src.common.execution import CostModel, entry_fill, settle_bracket  # noqa: E402
 
 
 @dataclass
@@ -50,15 +69,9 @@ def fetch_1m(symbol: str, period: str) -> pd.DataFrame:
             df = df.xs(symbol, axis=1, level=-1, drop_level=True)
         else:
             df.columns = ["_".join(map(str, c)).strip() for c in df.columns.to_flat_index()]
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    return df
-
-
-def resample_1h(df1m: pd.DataFrame) -> pd.DataFrame:
-    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-    bars = df1m.resample("1h", offset="30min", label="right", closed="right").agg(agg)
-    return bars.dropna()
+    # same convention as src.common.data_io.load_bars: tz-aware UTC, sorted
+    df.index = pd.to_datetime(df.index, utc=True)
+    return df.sort_index()
 
 
 def simulate_intrabar(
@@ -67,76 +80,52 @@ def simulate_intrabar(
     trigger: float,
     tp: float,
     sl: float,
+    cost: CostModel,
     capital: float = 10_000.0,
 ) -> Tuple[List[Trade], float]:
-    ret_prev = bars1h["Close"].pct_change()
+    ret = intraday_returns(bars1h["Close"])
+    sig = ret.shift(1)  # signal = previous COMPLETED 1H bar's return
+    et_date = bars1h.index.tz_convert(ET).date
     trades: List[Trade] = []
     eq = capital
 
     for i in range(1, len(bars1h)):
-        prev_r = ret_prev.iloc[i]
+        prev_r = sig.iloc[i]
         if pd.isna(prev_r) or abs(prev_r) < trigger:
             continue
+        if et_date[i] != et_date[i - 1]:
+            # signal bar belongs to the previous trading day: stale, skip
+            continue
 
-        direction = 1 if prev_r > 0 else -1
-        bar_end = bars1h.index[i]
-        bar_start = bar_end - pd.Timedelta(hours=1) + pd.Timedelta(minutes=1)  # first minute after previous bar end
-
-        bar1m = df1m.loc[(df1m.index >= bar_start) & (df1m.index <= bar_end)]
+        # bars1h labels are bucket-START times: holding window = [start, start+1h)
+        bar_start = bars1h.index[i]
+        bar_end = bar_start + pd.Timedelta(hours=1)
+        bar1m = df1m.loc[(df1m.index >= bar_start) & (df1m.index < bar_end)]
         if bar1m.empty:
             continue
 
-        entry = bar1m["Open"].iloc[0]
-        tp_price = entry * (1 + tp * direction)
-        sl_price = entry * (1 - sl * direction)
+        direction = 1 if prev_r > 0 else -1
+        raw_open = float(bar1m["Open"].iloc[0])
+        entry_px = entry_fill(raw_open, direction, cost)
+        tp_px = entry_px * (1 + tp * direction)
+        sl_px = entry_px * (1 - sl * direction)
 
-        exit_price = bar1m["Close"].iloc[-1]
-        exit_time = bar1m.index[-1]
-        hit = "close"
+        res = settle_bracket(bar1m, direction, entry_px, tp_px, sl_px, cost)
 
-        # step through 1m bars to find first touch
-        for _, row in bar1m.iterrows():
-            high = row["High"]
-            low = row["Low"]
-            ts = row.name
-            if direction == 1:
-                tp_hit = high >= tp_price
-                sl_hit = low <= sl_price
-            else:
-                tp_hit = low <= tp_price
-                sl_hit = high >= sl_price
-
-            if sl_hit and tp_hit:
-                exit_price = sl_price
-                hit = "sl"
-                exit_time = ts
-                break
-            elif sl_hit:
-                exit_price = sl_price
-                hit = "sl"
-                exit_time = ts
-                break
-            elif tp_hit:
-                exit_price = tp_price
-                hit = "tp"
-                exit_time = ts
-                break
-
-        ret_trade = direction * (exit_price - entry) / entry
         eq_before = eq
-        eq_after = eq * (1 + ret_trade)
+        eq_after = eq * (1 + res.ret)
         pnl_dollar = eq_after - eq_before
         eq = eq_after
 
         trades.append(
             Trade(
                 entry_time=bar1m.index[0],
-                exit_time=exit_time,
+                exit_time=res.exit_time,
                 direction=direction,
-                entry=entry,
-                exit=exit_price,
-                ret=ret_trade,
-                hit=hit,
+                entry=entry_px,
+                exit=res.exit_px,
+                ret=res.ret,
+                hit=res.hit,
                 eq_before=eq_before,
                 eq_after=eq_after,
                 pnl_dollar=pnl_dollar,
@@ -147,7 +136,7 @@ def simulate_intrabar(
     return trades, total_return
 
 
-def make_report(trades: List[Trade], total_return: float, capital: float, params: dict) -> str:
+def make_report(trades: List[Trade], total_return: float, capital: float, params: dict, cost: CostModel, period: str) -> str:
     if not trades:
         return "无交易生成。"
     rets = np.array([t.ret for t in trades])
@@ -160,7 +149,9 @@ def make_report(trades: List[Trade], total_return: float, capital: float, params
 
     lines = []
     lines.append("1m 重播版本（1H 信号，1m 执行）回测报告")
+    lines.append(f"样本期: yfinance period={period}（Yahoo 1m 上限约 7-8 天/次；与 60 天 5m 版样本期不同，结果不可直接对比）")
     lines.append(f"参数: trigger={params['trigger']:.3f}, tp={params['tp']:.3f}, sl={params['sl']:.3f}")
+    lines.append(f"成本假设: 单边手续费 {cost.fee_bp:.1f}bp + 不利滑点 {cost.slippage_bp:.1f}bp（入场与止损出场）")
     lines.append(f"起始本金: ${capital:,.0f}")
     lines.append(f"交易笔数: {len(trades)}")
     lines.append(f"总收益: {total_return*100:.2f}%  (期末本金: ${capital*(1+total_return):,.0f})")
@@ -190,11 +181,17 @@ def plot_equity(trades: List[Trade], outpath: Path):
 def parse_args():
     ap = argparse.ArgumentParser(description="1m intrabar replay for 1H signal strategy")
     ap.add_argument("--symbol", default="TSLA")
-    ap.add_argument("--period", default="7d", help="yfinance period for 1m (<=8d recommended by Yahoo)")
+    ap.add_argument(
+        "--period",
+        default="7d",
+        help="yfinance period for 1m (Yahoo allows ~7-8d per request; NOT comparable to the 60d 5m backtest)",
+    )
     ap.add_argument("--trigger", type=float, default=0.01)
     ap.add_argument("--tp", type=float, default=0.02)
     ap.add_argument("--sl", type=float, default=0.01)
     ap.add_argument("--capital", type=float, default=10_000.0)
+    ap.add_argument("--fee_bp", type=float, default=1.0, help="Per-side fee in basis points (default 1).")
+    ap.add_argument("--slippage_bp", type=float, default=2.0, help="Adverse slippage in basis points (default 2).")
     ap.add_argument("--output_dir", default="outputs/hourly_signal_1m")
     return ap.parse_args()
 
@@ -205,9 +202,10 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     df1m = fetch_1m(args.symbol, args.period)
-    bars1h = resample_1h(df1m)
+    bars1h = resample_bars(df1m, 60)
+    cost = CostModel(fee_bp=args.fee_bp, slippage_bp=args.slippage_bp)
 
-    trades, tot = simulate_intrabar(bars1h, df1m, args.trigger, args.tp, args.sl, capital=args.capital)
+    trades, tot = simulate_intrabar(bars1h, df1m, args.trigger, args.tp, args.sl, cost, capital=args.capital)
 
     trades_path = outdir / "trades_1m.csv"
     report_path = outdir / "report.txt"
@@ -220,6 +218,8 @@ def main():
             tot,
             args.capital,
             {"trigger": args.trigger, "tp": args.tp, "sl": args.sl},
+            cost,
+            args.period,
         ),
         encoding="utf-8",
     )

@@ -21,7 +21,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_events(tf: str, events_dir: Path) -> pd.DataFrame:
-    path = events_dir / f"v_events_{tf}.csv"
+    """Load the deduplicated physical-event table (one row per (peak_t, trough_t)).
+
+    Prefers v_events_{tf}_unique.csv written by v_stats.py; falls back to
+    deduplicating the full parameter-grid file so daily counts are never
+    inflated by the same physical event being detected under many parameter
+    combos.
+    """
+    unique_path = events_dir / f"v_events_{tf}_unique.csv"
+    grid_path = events_dir / f"v_events_{tf}.csv"
+    path = unique_path if unique_path.exists() else grid_path
     if not path.exists():
         raise FileNotFoundError(f"Missing events file: {path}")
     df = pd.read_csv(
@@ -34,6 +43,14 @@ def load_events(tf: str, events_dir: Path) -> pd.DataFrame:
             df[col] = df[col].dt.tz_localize("UTC")
         else:
             df[col] = df[col].dt.tz_convert("UTC")
+    if path == grid_path:
+        df = df.sort_values(["peak_t", "trough_t"]).drop_duplicates(subset=["peak_t", "trough_t"])
+    # Event tables now also contain timeout triggers (outcome="timeout",
+    # survivorship-bias fix in v_stats.py). All plots here are about
+    # completed V shapes (daily counts keyed by rebound date, rebound-time
+    # histograms), so keep only successful events.
+    if "outcome" in df.columns:
+        df = df[df["outcome"] == "rebounded"].copy()
     return df
 
 
@@ -64,6 +81,7 @@ def plot_hist(series: pd.Series, title: str, xlabel: str, outpath: Path, bins: i
 
 
 def compute_daily_counts(events: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Daily counts of deduplicated physical events (one per (peak_t, trough_t))."""
     rows: List[Dict] = []
     ny = "America/New_York"
     for tf, df in events.items():

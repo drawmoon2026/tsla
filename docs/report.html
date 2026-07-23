@@ -187,6 +187,7 @@ footer code { font-size: 12px; }
 <nav class="toc" aria-label="目录">
   <div class="toc-title">目录</div>
   <a href="#verdict">总判断</a>
+  <a href="#progress">执行进度</a>
   <a href="#roadmap">路线图</a>
   <a href="#src">src/ 审查</a>
   <a href="#live">live_trading/ 审查</a>
@@ -208,6 +209,44 @@ footer code { font-size: 12px; }
     <p>再叠加<strong>全样本网格选优、无验证集</strong>（60 天数据 × 27 组参数取最大值），报告收益是「噪声上界的上界」。</p>
   </div>
   <p>好消息：策略框架（V 形反转统计 + 规则触发）本身是合理的研究方向，问题集中在实现与方法论，全部可修。修复后的诚实基线预期会大幅缩水甚至转负——<em>这是校准，不是退步</em>。</p>
+</section>
+
+<section id="progress">
+  <h2>执行进度<span class="sec-note">2026-07-23 顺序执行，全部修复经回归验证</span></h2>
+  <div class="verdict good">
+    <p><strong>Phase 0–4 已完成</strong>（数据深度一项等待 Alpaca key）。审查发现的全部 P0/P1 问题已修复；修复前后的收益对比精确印证了审查判断——旧数字几乎全是 bug 贡献的。</p>
+  </div>
+
+  <h3>诚实基线：修复前 vs 修复后</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th>回测</th><th class="num">修复前</th><th class="num">修复后</th><th>差异来源</th></tr>
+    <tr><td>1H 信号网格最佳</td><td class="num">+288.31%（118 笔）</td><td class="num">+5.56%（16 笔）</td><td>信号前视 + 隔夜跳空伪信号 + 右标签泄漏</td></tr>
+    <tr><td>"完美捕捉"上界</td><td class="num">+96.78%</td><td class="num">+9.96%</td><td>残桶/隔夜剔除；已标注 NOT TRADABLE</td></tr>
+    <tr><td>run_sim（1H 跟随）</td><td class="num">+11.90%（28 笔）</td><td class="num">+5.91%（10 笔）</td><td>悲观成交 + 隔夜信号剔除 + 风控前置</td></tr>
+    <tr><td>马丁网格</td><td class="num">+6.74%</td><td class="num">+0.22%</td><td>仓位美元化（旧模型把 $667 小仓收益当满仓复利）</td></tr>
+    <tr><td>分层建仓（layered）</td><td class="num">显著为正</td><td class="num">−6.18%</td><td>事件去重 + 同期数据（旧版实际在跑空数据）</td></tr>
+    <tr><td>1h V 事件日计数</td><td class="num">最大 27/日</td><td class="num">最大 1/日</td><td>27 套参数重复计同一事件，已按 (peak_t, trough_t) 去重</td></tr>
+    <tr><td>walk-forward 样本外</td><td class="num">（无此概念）</td><td class="num">+1.66%（4 笔）</td><td>训练 +3.84% → 样本外近腰斩；60 天仅 1 折</td></tr>
+  </table></div>
+
+  <h3>深数据阶段（Alpaca 2 年数据接入后）</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th>项目</th><th>60 天 yfinance</th><th>2 年 Alpaca（501 交易日）</th></tr>
+    <tr><td>walk-forward</td><td class="num">1 折 / 4 笔，+1.66%</td><td class="num">24 折 / 164 笔，+1.31% —— <strong>1H 动量跟随扣费后无 edge</strong>，正式放弃该方向的调参</td></tr>
+    <tr><td>auto_opt 候选</td><td>邻域塌方，判为噪声</td><td><strong>首个通过全部检验的候选</strong>：trigger=1.73%/tp=2.85%/sl=1.48%（验证集 7 个月 +4.34%、回撤 −0.53%、±10% 邻域稳定）</td></tr>
+    <tr><td>GBDT 过滤器</td><td class="num">AUC 0.485 = 无信号</td><td class="num"><strong>OOF AUC 0.602</strong>，8 折全部 &gt;0.55（std 0.033），precision 随阈值单调升 0.510→0.610 —— 真实但弱的信号迹象</td></tr>
+    <tr><td>幸存者偏差</td><td>事件表只录成功反弹</td><td>已修复：timeout 触发落表（5m 占比 13.1%），确认旧正例率虚高 4-5pp</td></tr>
+  </table></div>
+  <p>GBDT 信号的克制解读：AUC 0.602 属弱信号，precision 提升未扣交易成本，且 2024–2026 只覆盖 TSLA 单一高波动 regime。下一步是<strong>按概率分层的成本后回测</strong>，不是继续调模型。</p>
+
+  <h3>关键交付</h3>
+  <ul class="tight">
+    <li><strong>公共模块</strong>：<code>src/common/data_io.py</code>（统一 UTC 加载 + 正确重采样，7 处副本收敛）与 <code>src/common/execution.py</code>（悲观成交结算，全部模拟器共用）。</li>
+    <li><strong>方法论</strong>：<code>hourly_signal_backtest --walkforward</code>；auto_opt 重建为「训练/验证切分 + min_trades 门槛 + ±10% 邻域扰动」——首跑即自动判定当前最优参数为噪声并拒绝推荐。</li>
+    <li><strong>新架构</strong>：<code>trading/</code> 包（backtest/shadow/paper/live 统一 Runner、状态机、SQLite journal）；一致性验收 3 组参数 × 108 笔交易与旧回测器逐笔一致（差异 &lt; 1e-15）。<code>python -m trading.run --mode backtest</code> 可用，shadow 冒烟通过。</li>
+    <li><strong>GBDT 过滤器管线</strong>：<code>research/ml_filter.py</code>（防泄漏特征 + purged walk-forward）。60 天数据结论：OOF AUC 0.485 = 无信号；且发现 v_stats 事件表存在幸存者偏差（只录成功反弹），深数据重跑前需修。</li>
+    <li><strong>Alpaca 数据接入</strong>：<code>src/alpaca_data.py</code> 就绪，等 key 写入 <code>.env</code> 后一条命令拉 2 年分钟数据。</li>
+  </ul>
 </section>
 
 <section id="roadmap">

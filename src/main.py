@@ -1,45 +1,23 @@
+"""Print basic statistics for the cached/downloaded TSLA 5m data.
+
+Thin wrapper over data_fetch so the whole project shares one fetch convention
+(America/New_York, auto_adjust=True) instead of a second divergent copy.
+"""
+
+import sys
+from pathlib import Path
+
 import pandas as pd
-import pytz
-import yfinance as yf
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-def fetch_intraday(ticker: str = "TSLA", period: str = "5d", interval: str = "5m") -> pd.DataFrame:
-    """
-    Download intraday data for the given ticker.
-    5m bars are limited by Yahoo to recent history; default 5d keeps it small and reliable.
-    """
-    df = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        auto_adjust=False,
-        progress=False,
-        threads=True,
-        group_by="column",  # keep flat columns even if one ticker
-    )
-    if df.empty:
-        raise RuntimeError("No data returned from yfinance. Try a shorter period or check ticker.")
-
-    # yfinance provides a timezone-aware index; convert to US/Eastern for readability.
-    eastern = pytz.timezone("US/Eastern")
-    if df.index.tz is None:
-        df.index = df.index.tz_localize(pytz.utc).tz_convert(eastern)
-    else:
-        df.index = df.index.tz_convert(eastern)
-
-    # If columns are multi-index (e.g., when multiple tickers are passed),
-    # keep only the requested ticker and drop the ticker level.
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.xs(ticker, axis=1, level=1, drop_level=True)
-
-    return df
+from src.data_fetch import build_output_path, fetch_data, load_cached, save_data
 
 
 def basic_stats(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute summary statistics for key numeric columns.
-    """
-    numeric_cols = [c for c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
+    numeric_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     return df[numeric_cols].describe().T
 
 
@@ -47,18 +25,22 @@ def main() -> None:
     pd.set_option("display.width", 120)
     pd.set_option("display.max_columns", 10)
 
-    print("Downloading TSLA 5-minute data (last 5 days)...")
-    df = fetch_intraday()
+    symbol, period, interval = "TSLA", "60d", "5m"
+    path = build_output_path(symbol, interval, period)
+    df = load_cached(path, max_age_days=3.0)
+    if df is None:
+        print(f"Downloading {symbol} {interval} data ({period})...")
+        df = fetch_data(symbol, period, interval)
+        save_data(df, path)
+
     print(f"Rows: {len(df)}, Columns: {list(df.columns)}")
-    print(f"Time range (US/Eastern): {df.index.min()} -> {df.index.max()}")
+    print(f"Time range (ET): {df['time_et'].min()} -> {df['time_et'].max()}")
 
-    stats = basic_stats(df)
     print("\nSummary statistics (5m bars):")
-    print(stats.round(2))
+    print(basic_stats(df).round(2))
 
-    # Simple additional aggregates
     latest_close = float(df["Close"].iloc[-1])
-    daily_volume = df["Volume"].groupby(df.index.date).sum()
+    daily_volume = df["Volume"].groupby(df["time_et"].dt.date).sum()
 
     print(f"\nLatest close: {latest_close:.2f}")
     print("Volume by day (shares):")

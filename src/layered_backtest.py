@@ -174,7 +174,7 @@ def metrics(events: pd.DataFrame, slices: pd.DataFrame) -> dict:
 
 def main():
     price = load_price("data/TSLA_5m_60d.csv")
-    events = load_events("zigzag_events.csv")
+    events = load_events("outputs/zigzag/zigzag_events.csv")
     slices, ev = simulate(price, events)
     m = metrics(ev, slices)
 

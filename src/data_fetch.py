@@ -62,14 +62,22 @@ def fetch_data(symbol: str, period: str, interval: str) -> pd.DataFrame:
     return df
 
 
-def load_cached(path: Path) -> Optional[pd.DataFrame]:
+def load_cached(path: Path, max_age_days: float) -> Optional[pd.DataFrame]:
+    """Return the cached frame, or None if missing or its last bar is older
+    than `max_age_days` (a rolling-period cache like "60d" never expires by
+    filename, so staleness must be checked against the data itself)."""
     if not path.exists():
         return None
-    df = pd.read_csv(path, index_col=0, parse_dates=True)
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    if "time_et" not in df.columns:
-        df["time_et"] = df.index.tz_convert("America/New_York")
+    df = pd.read_csv(path, index_col=0)
+    df.index = pd.to_datetime(df.index, utc=True)
+    if "time_et" in df.columns:
+        df = df.drop(columns=["time_et"])
+    df["time_et"] = df.index.tz_convert("America/New_York")
+
+    age = pd.Timestamp.now(tz="UTC") - df.index.max()
+    if age > pd.Timedelta(days=max_age_days):
+        print(f"Cache is stale (last bar {df.index.max()}, {age.days}d old) — re-downloading.")
+        return None
     return df
 
 
@@ -84,6 +92,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--period", default="60d", help='Period to request, e.g., "60d"')
     parser.add_argument("--interval", default="5m", help='Bar interval, e.g., "5m"')
     parser.add_argument("--refresh", action="store_true", help="Force re-download even if CSV exists")
+    parser.add_argument(
+        "--max_age_days", type=float, default=3.0,
+        help="Auto re-download when the cache's last bar is older than this (default: 3)",
+    )
     return parser.parse_args()
 
 
@@ -92,7 +104,7 @@ def main() -> None:
     output_path = build_output_path(args.symbol, args.interval, args.period)
 
     if not args.refresh:
-        cached = load_cached(output_path)
+        cached = load_cached(output_path, args.max_age_days)
     else:
         cached = None
 

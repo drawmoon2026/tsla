@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from live_trading.config import load_config, Config
+from src.common.execution import CostModel, entry_fill, settle_bracket
 
 
 def load_feed(path: str) -> pd.DataFrame:
@@ -38,14 +39,15 @@ def run(cfg: Config, feed: str, outdir: Path, drop_pct: float):
 
     trades = []
     equity = cfg.capital
-    slip = cfg.slip_bp / 10_000
+    cost = CostModel(fee_bp=cfg.fee_bp, slippage_bp=cfg.slip_bp)
 
     for date, day in df.groupby(et.date):
         high_so_far = None
         pending_entry = False
         for i, (ts, row) in enumerate(day.iterrows()):
             close = row["Close"]
-            high_so_far = close if high_so_far is None else max(high_so_far, close)
+            # track the intraday high with bar Highs, not Closes
+            high_so_far = row["High"] if high_so_far is None else max(high_so_far, row["High"])
             draw = (high_so_far - close) / high_so_far if high_so_far else 0
             if draw >= drop_pct:
                 pending_entry = True
@@ -53,28 +55,16 @@ def run(cfg: Config, feed: str, outdir: Path, drop_pct: float):
                 # enter next bar open
                 nxt = day.iloc[i + 1]
                 entry_time = day.index[i + 1]
-                entry = nxt["Open"] * (1 + slip)
+                entry = entry_fill(float(nxt["Open"]), 1, cost)
                 tp_px = entry * (1 + cfg.tp)
                 sl_px = entry * (1 - cfg.sl)
-                hit = "day_close"
-                exit_px = day.iloc[-1]["Close"]
-                exit_time = day.index[-1]
-                # walk forward to find TP/SL
-                for j in range(i + 1, len(day)):
-                    bar = day.iloc[j]
-                    ts2 = day.index[j]
-                    high, low = bar["High"], bar["Low"]
-                    if low <= sl_px:
-                        hit = "sl"
-                        exit_px = sl_px
-                        exit_time = ts2
-                        break
-                    if high >= tp_px:
-                        hit = "tp"
-                        exit_px = tp_px
-                        exit_time = ts2
-                        break
-                ret = (exit_px - entry) / entry - cfg.fee_bp / 10_000 * 2
+                # settle TP/SL via the shared pessimistic bracket model
+                # (gap-through stops fill at the open, strict-cross TP, SL priority)
+                res = settle_bracket(day.iloc[i + 1:], 1, entry, tp_px, sl_px, cost)
+                hit = "day_close" if res.hit == "close" else res.hit
+                exit_px = res.exit_px
+                exit_time = res.exit_time
+                ret = res.ret
                 eq_before = equity
                 equity *= (1 + ret)
                 trades.append(

@@ -14,65 +14,57 @@ ATR 自适应 ZigZag 波段检测与统计
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import List, Tuple
 
 import pandas as pd
 import numpy as np
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, parse_dates=["Datetime"]).set_index("Datetime")
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    return df.sort_index()
+from src.common.data_io import load_bars
 
 
-def zigzag_atr(close: pd.Series, atr_pct: float) -> List[Tuple[pd.Timestamp, float, str]]:
+def zigzag_atr(close: pd.Series, thresholds: pd.Series) -> List[Tuple[pd.Timestamp, float, str]]:
     """
-    ATR 自适应 ZigZag：当价格相对上一 pivot 涨跌超过 atr_pct 触发反转。
+    ATR 自适应 ZigZag：极值 (extreme) 与已确认 pivot 分离追踪。
+    thresholds 是逐 bar 的反转阈值（百分比），NaN 处沿用趋势不反转。
     返回 [(ts, price, 'H'/'L'), ...]
     """
     prices = close.to_numpy()
+    thr_arr = thresholds.to_numpy()
     idx = close.index
-    pivots = []
-    last_pivot_idx = 0
-    last_pivot_price = prices[0]
-    trend = 0  # 1 up, -1 down
+    pivots: List[Tuple[pd.Timestamp, float, str]] = []
+    trend = 1  # start assuming up; first confirmed reversal fixes it
+    ext_idx = 0
+    ext_price = prices[0]
 
     for i in range(1, len(prices)):
-        move = (prices[i] - last_pivot_price) / last_pivot_price
-        if trend >= 0:  # up or undefined
-            if move >= 0:
-                continue
-            if move <= -atr_pct:
-                pivots.append((idx[last_pivot_idx], last_pivot_price, "H"))
+        p = prices[i]
+        thr = thr_arr[i]
+        if trend >= 0:
+            if p > ext_price:
+                ext_idx, ext_price = i, p
+            elif not np.isnan(thr) and (ext_price - p) / ext_price >= thr:
+                pivots.append((idx[ext_idx], ext_price, "H"))
                 trend = -1
-                last_pivot_idx = i
-                last_pivot_price = prices[i]
-        else:  # down
-            if move <= 0:
-                continue
-            if move >= atr_pct:
-                pivots.append((idx[last_pivot_idx], last_pivot_price, "L"))
+                ext_idx, ext_price = i, p
+        else:
+            if p < ext_price:
+                ext_idx, ext_price = i, p
+            elif not np.isnan(thr) and (p - ext_price) / ext_price >= thr:
+                pivots.append((idx[ext_idx], ext_price, "L"))
                 trend = 1
-                last_pivot_idx = i
-                last_pivot_price = prices[i]
-        # update best extreme within current trend
-        if trend >= 0 and prices[i] > last_pivot_price:
-            last_pivot_idx = i
-            last_pivot_price = prices[i]
-        if trend <= 0 and prices[i] < last_pivot_price:
-            last_pivot_idx = i
-            last_pivot_price = prices[i]
+                ext_idx, ext_price = i, p
 
-    # add last pivot
-    pivots.append((idx[last_pivot_idx], last_pivot_price, "H" if trend >= 0 else "L"))
-    # ensure首尾交替
-    cleaned = []
+    pivots.append((idx[ext_idx], ext_price, "H" if trend >= 0 else "L"))
+    # 相邻同类 pivot 合并，保留更极端者
+    cleaned: List[Tuple[pd.Timestamp, float, str]] = []
     for ts, p, k in pivots:
         if cleaned and cleaned[-1][2] == k:
-            # keep more extreme
             if (k == "H" and p > cleaned[-1][1]) or (k == "L" and p < cleaned[-1][1]):
                 cleaned[-1] = (ts, p, k)
             continue
@@ -113,15 +105,20 @@ def main():
     outdir = Path(args.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    df = load_data(args.input)
-    df["tr"] = df["High"].combine(df["Low"], lambda h, l: h - l)
-    df["atr"] = df["tr"].rolling(args.atr_window).mean()
-    df = df.dropna()
+    df = load_bars(args.input)
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat(
+        [df["High"] - df["Low"], (df["High"] - prev_close).abs(), (df["Low"] - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(args.atr_window).mean()
 
     close = df["Close"]
-    atr_pct = (df["atr"] / close).mean() * args.atr_mult
+    # 逐 bar 滚动阈值，shift(1) 保证 bar i 的阈值只用 i-1 及之前的信息
+    thresholds = (atr / close).shift(1) * args.atr_mult
 
-    pivots = zigzag_atr(close, atr_pct)
+    pivots = zigzag_atr(close, thresholds)
+    atr_pct = float(thresholds.mean())  # 仅用于 summary 展示
     piv_df = pd.DataFrame(pivots, columns=["ts", "price", "kind"])
     seg_df = build_segments(pivots)
 
