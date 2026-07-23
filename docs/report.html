@@ -237,7 +237,17 @@ footer code { font-size: 12px; }
     <tr><td>GBDT 过滤器</td><td class="num">AUC 0.485 = 无信号</td><td class="num"><strong>OOF AUC 0.602</strong>，8 折全部 &gt;0.55（std 0.033），precision 随阈值单调升 0.510→0.610 —— 真实但弱的信号迹象</td></tr>
     <tr><td>幸存者偏差</td><td>事件表只录成功反弹</td><td>已修复：timeout 触发落表（5m 占比 13.1%），确认旧正例率虚高 4-5pp</td></tr>
   </table></div>
-  <p>GBDT 信号的克制解读：AUC 0.602 属弱信号，precision 提升未扣交易成本，且 2024–2026 只覆盖 TSLA 单一高波动 regime。下一步是<strong>按概率分层的成本后回测</strong>，不是继续调模型。</p>
+  <h3>概率分层成本后回测（OOF 概率，悲观成交，1410 笔基线）</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th>层</th><th class="num">笔数</th><th class="num">胜率</th><th class="num">单笔均值</th><th class="num">总收益</th><th class="num">最大回撤</th></tr>
+    <tr><td>基线（全信号）</td><td class="num">1410</td><td class="num">60.3%</td><td class="num">−5.1bp</td><td class="num">−53.0%</td><td class="num">−56.6%</td></tr>
+    <tr><td>prob ≥ 0.5</td><td class="num">980</td><td class="num">62.0%</td><td class="num">−4.8bp</td><td class="num">−38.9%</td><td class="num">−45.1%</td></tr>
+    <tr><td>prob ≥ 0.6</td><td class="num">692</td><td class="num">62.1%</td><td class="num">−5.5bp</td><td class="num">−32.8%</td><td class="num">−41.3%</td></tr>
+    <tr><td>prob ≥ 0.7</td><td class="num">410</td><td class="num">64.2%</td><td class="num">−3.4bp</td><td class="num">−13.8%</td><td class="num">−27.5%</td></tr>
+  </table></div>
+  <div class="verdict">
+    <p><strong>AUC 0.602 未能在成本后存活。</strong>过滤器的方向性完全有效（胜率、回撤、亏损全部随阈值单调改善），但 +0.5%/−1% 的不对称障碍结构注定亏损：扣费后止盈 ~44bp、止损 ~106bp，打平需 70.7% 胜率，最高层只有 64.2%。<em>问题在交易结构，不在模型</em>——若要继续，方向是重新设计障碍结构（对称或 TP&gt;SL）并重训重验，但这是新假设，须警惕在同一份数据上反复挖掘。</p>
+  </div>
 
   <h3>关键交付</h3>
   <ul class="tight">
