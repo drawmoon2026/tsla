@@ -1,0 +1,498 @@
+<title>TSLA 量化项目体检报告与路线图</title>
+<style>
+:root {
+  --paper: #f5f7f8;
+  --panel: #ffffff;
+  --ink: #16232a;
+  --muted: #5b6d75;
+  --line: #dce4e7;
+  --accent: #14607a;
+  --accent-soft: #e3eef3;
+  --crit: #b3362c;
+  --crit-soft: #f9ebe9;
+  --warn: #a4680f;
+  --warn-soft: #f8f0e2;
+  --ok: #2e7d5b;
+  --ok-soft: #e7f2ed;
+  --code-bg: #eef2f4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #10181c;
+    --panel: #17232a;
+    --ink: #e4ecef;
+    --muted: #8fa3ac;
+    --line: #263640;
+    --accent: #52a8c9;
+    --accent-soft: #1a2f38;
+    --crit: #e0695e;
+    --crit-soft: #33201e;
+    --warn: #d39c40;
+    --warn-soft: #302818;
+    --ok: #5cb890;
+    --ok-soft: #1a2e26;
+    --code-bg: #1d2b33;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #10181c; --panel: #17232a; --ink: #e4ecef; --muted: #8fa3ac;
+  --line: #263640; --accent: #52a8c9; --accent-soft: #1a2f38;
+  --crit: #e0695e; --crit-soft: #33201e; --warn: #d39c40; --warn-soft: #302818;
+  --ok: #5cb890; --ok-soft: #1a2e26; --code-bg: #1d2b33;
+}
+:root[data-theme="light"] {
+  --paper: #f5f7f8; --panel: #ffffff; --ink: #16232a; --muted: #5b6d75;
+  --line: #dce4e7; --accent: #14607a; --accent-soft: #e3eef3;
+  --crit: #b3362c; --crit-soft: #f9ebe9; --warn: #a4680f; --warn-soft: #f8f0e2;
+  --ok: #2e7d5b; --ok-soft: #e7f2ed; --code-bg: #eef2f4;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+.layout { display: grid; grid-template-columns: 200px 1fr; gap: 48px; align-items: start; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; gap: 0; } .toc { display: none; } }
+
+header.masthead { border-bottom: 3px double var(--line); padding: 44px 0 28px; margin-bottom: 36px; }
+.eyebrow {
+  font-size: 12px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--accent); font-weight: 600; margin-bottom: 10px;
+}
+h1 {
+  font-family: "Songti SC", "Noto Serif CJK SC", Georgia, serif;
+  font-size: 34px; font-weight: 700; line-height: 1.3; margin: 0 0 14px;
+  text-wrap: balance;
+}
+.masthead p.lede { max-width: 42em; color: var(--muted); margin: 0; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.stat {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px 18px; min-width: 120px;
+}
+.stat .num {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 24px; font-weight: 700; line-height: 1.2;
+}
+.stat .num.crit { color: var(--crit); }
+.stat .num.warn { color: var(--warn); }
+.stat .num.ok { color: var(--ok); }
+.stat .lbl { font-size: 12px; color: var(--muted); }
+
+.toc { position: sticky; top: 24px; font-size: 13px; }
+.toc .toc-title { font-size: 11px; letter-spacing: .15em; color: var(--muted); text-transform: uppercase; margin-bottom: 10px; }
+.toc a { display: block; color: var(--muted); text-decoration: none; padding: 5px 0 5px 12px; border-left: 2px solid var(--line); }
+.toc a:hover, .toc a:focus-visible { color: var(--accent); border-left-color: var(--accent); outline: none; }
+
+main section { margin-bottom: 56px; scroll-margin-top: 24px; }
+h2 {
+  font-family: "Songti SC", "Noto Serif CJK SC", Georgia, serif;
+  font-size: 24px; font-weight: 700; margin: 0 0 6px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--line);
+}
+h2 .sec-note { font-family: "PingFang SC", sans-serif; font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 10px; }
+h3 { font-size: 16px; font-weight: 600; margin: 28px 0 10px; }
+p { margin: 10px 0; max-width: 48em; }
+main a { color: var(--accent); }
+
+.verdict {
+  background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--crit);
+  border-radius: 6px; padding: 18px 22px; margin: 18px 0; max-width: none;
+}
+.verdict strong { color: var(--crit); }
+.verdict.good { border-left-color: var(--ok); }
+.verdict.good strong { color: var(--ok); }
+
+.chip {
+  display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .05em;
+  padding: 1px 8px; border-radius: 999px; vertical-align: 2px; margin-right: 8px;
+}
+.chip.p0 { background: var(--crit-soft); color: var(--crit); }
+.chip.p1 { background: var(--warn-soft); color: var(--warn); }
+.chip.p2 { background: var(--accent-soft); color: var(--accent); }
+.chip.ok { background: var(--ok-soft); color: var(--ok); }
+
+.finding {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 16px 20px; margin: 12px 0;
+}
+.finding.sev-p0 { border-left: 4px solid var(--crit); }
+.finding.sev-p1 { border-left: 4px solid var(--warn); }
+.finding.sev-p2 { border-left: 4px solid var(--accent); }
+.finding h4 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.finding .loc {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+  color: var(--muted); margin-bottom: 8px; word-break: break-all;
+}
+.finding p { font-size: 14px; margin: 6px 0; max-width: none; color: var(--ink); }
+.finding p .k { font-weight: 600; color: var(--muted); }
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .88em;
+  background: var(--code-bg); border-radius: 4px; padding: 1px 5px;
+}
+pre {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 14px 18px; overflow-x: auto; font-size: 13px; line-height: 1.6;
+}
+pre code { background: none; padding: 0; }
+
+.tbl-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; background: var(--code-bg); }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+
+.phase { display: grid; grid-template-columns: 96px 1fr; gap: 18px; padding: 16px 0; border-bottom: 1px dashed var(--line); }
+.phase:last-child { border-bottom: none; }
+.phase .ph-id {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 700;
+  color: var(--accent); font-size: 14px;
+}
+.phase .ph-id small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
+.phase h4 { margin: 0 0 6px; font-size: 15px; }
+.phase ul { margin: 6px 0; padding-left: 20px; font-size: 14px; }
+.phase li { margin: 3px 0; }
+
+ul.tight { padding-left: 20px; }
+ul.tight li { margin: 5px 0; max-width: 46em; }
+
+.arch-diagram { font-size: 12.5px; }
+footer { border-top: 1px solid var(--line); margin-top: 24px; padding: 20px 0 48px; font-size: 13px; color: var(--muted); }
+footer code { font-size: 12px; }
+</style>
+
+<div class="wrap">
+<header class="masthead">
+  <div class="eyebrow">TSLA 量化项目 · 全面体检 · 2026-07-23</div>
+  <h1>代码审查、AI 算法调研与升级路线图</h1>
+  <p class="lede">三个并行分析代理（Claude Fable 5）对 <code>src/</code> 研究管线、<code>live_trading/</code> 交易脚手架的深度审查，2025–2026 年 AI 交易算法的网络调研，以及面向「回测 → 模拟 → 实盘」的统一架构设计。</p>
+  <div class="stats">
+    <div class="stat"><div class="num crit">7</div><div class="lbl">P0 / 严重问题</div></div>
+    <div class="stat"><div class="num warn">40+</div><div class="lbl">发现总数</div></div>
+    <div class="stat"><div class="num">6</div><div class="lbl">路线图阶段</div></div>
+    <div class="stat"><div class="num ok">4</div><div class="lbl">值得引入的 AI 方法</div></div>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="toc" aria-label="目录">
+  <div class="toc-title">目录</div>
+  <a href="#verdict">总判断</a>
+  <a href="#roadmap">路线图</a>
+  <a href="#src">src/ 审查</a>
+  <a href="#live">live_trading/ 审查</a>
+  <a href="#ai">AI 算法调研</a>
+  <a href="#arch">架构设计</a>
+</nav>
+
+<main>
+
+<section id="verdict">
+  <h2>总判断</h2>
+  <div class="verdict">
+    <p><strong>当前所有回测与寻优数字都不可信。</strong>三类根因叠加，每一类单独都足以让收益报告失效：</p>
+    <ul class="tight">
+      <li><strong>前视偏差</strong> —— 信号用当根 K 线收盘价确认，却回到当根开盘价进场（等于免费吃整根大动量 K 线）；1H 重采样边界错位，收盘价泄漏 5 分钟未来。</li>
+      <li><strong>假交易与语义陷阱</strong> —— std 触发模式下无信号也会记一笔纯扣手续费的交易；历史命令里 <code>--trigger -0.02</code> 实际含义是「每个合规小时无条件开仓」。</li>
+      <li><strong>乐观执行假设</strong> —— 止损假设精确成交、无跳空穿价处理；出场零滑点；网格模拟未扣手续费；马丁格尔仓位无量纲化，满层爆仓风险被系统性低估。</li>
+    </ul>
+    <p>再叠加<strong>全样本网格选优、无验证集</strong>（60 天数据 × 27 组参数取最大值），报告收益是「噪声上界的上界」。</p>
+  </div>
+  <p>好消息：策略框架（V 形反转统计 + 规则触发）本身是合理的研究方向，问题集中在实现与方法论，全部可修。修复后的诚实基线预期会大幅缩水甚至转负——<em>这是校准，不是退步</em>。</p>
+</section>
+
+<section id="roadmap">
+  <h2>升级路线图<span class="sec-note">按依赖顺序，前置阶段未完成时后置结论无效</span></h2>
+
+  <div class="phase">
+    <div class="ph-id">Phase 0<small>半天</small></div>
+    <div>
+      <h4>止血：几行就能修的 bug</h4>
+      <ul>
+        <li>假交易 bug（<code>run_sim.py:50-56</code>）与 groupby 长度崩溃（<code>run_sim_intraday_drop.py:33-42</code>）</li>
+        <li>参数校验：<code>trigger ≥ 0</code>、<code>0 &lt; sl &lt; tp</code>，杜绝负阈值静默变义</li>
+        <li>陈旧数据防护：layered 回测 skipped 计数 + 超阈值报错（当前实际在跑空数据）；清理根目录 2025-11 旧产物</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="ph-id">Phase 1<small>1–2 周</small></div>
+    <div>
+      <h4>让回测数字可信</h4>
+      <ul>
+        <li>统一数据加载：<code>pd.to_datetime(utc=True)</code> 单一入口，7 处副本收敛为 1 处（防 DST 崩溃）</li>
+        <li>修信号前视（<code>iloc[i-1]</code>、波动率阈值 <code>shift(1)</code>）与重采样边界（closed=left、按交易日分桶、残桶过滤）</li>
+        <li>悲观成交模型：跳空穿价按开盘成交、出入场对称滑点、统一手续费、成本敏感性四档（0/2/5/10bp）</li>
+        <li>马丁仓位美元化：逐层记录股数与成本，「满层 + 止损」最坏损失断言</li>
+        <li>V 事件按 <code>(peak_t, trough_t)</code> 去重——当前日计数被跨参数重复放大最多 27 倍</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="ph-id">Phase 2<small>1 周</small></div>
+    <div>
+      <h4>方法论：过拟合防线</h4>
+      <ul>
+        <li>Walk-forward：40 天选参 / 20 天验证滚动，报告只认验证集成绩</li>
+        <li>auto_opt 重建：去掉「达标即停」，综合目标（收益/回撤 + 最少交易数门槛），参数邻域扰动测试</li>
+        <li><strong>数据深度</strong>：yfinance 只有 60 天 5m 数据，撑不起 27 路网格——接入 Polygon / Alpaca 历史分钟数据（2 年以上）</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="ph-id">Phase 3<small>2–3 周</small></div>
+    <div>
+      <h4>架构重构（见<a href="#arch">架构设计</a>）</h4>
+      <ul>
+        <li>core 类型 + Feed 协议 + bar_builder → 策略纯函数化 + RiskManager + 持仓状态机</li>
+        <li>SimBroker（Phase 1 成交模型迁入）+ SQLite 持久化 + 统一 Runner</li>
+        <li>验收：同一策略在旧 run_sim 与新 Runner 上交易流对齐</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="ph-id">Phase 4<small>可并行</small></div>
+    <div>
+      <h4>AI 增强（见<a href="#ai">调研结论</a>）</h4>
+      <ul>
+        <li>GBDT 信号过滤器（LightGBM + purged walk-forward），输出挂到 <code>SignalIntent.confidence</code></li>
+        <li>Regime 开关（波动率分档起步，HMM 备选）；滚动重估参数替代静态网格</li>
+        <li>明确不做：多代理 LLM 框架、端到端强化学习、零样本时序大模型</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="ph-id">Phase 5<small>上线</small></div>
+    <div>
+      <h4>Shadow → Paper → 小仓位实盘</h4>
+      <ul>
+        <li>Shadow 影子对账：实时信号 vs 回测重放逐笔 diff，为零才有资格进 paper</li>
+        <li>Alpaca paper trading 跑 2–4 周，验证断线恢复、状态机、对账</li>
+        <li>小仓位实盘（paper → live 只换 broker key）；每周复盘真实滑点 vs 模型假设</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="src">
+  <h2>src/ 核心管线审查<span class="sec-note">代理 A · 详见 review-2026-07-23/src-review.md</span></h2>
+
+  <h3>正确性（不修则全部结论作废）</h3>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">A1 · 严重前视</span>信号用当根收盘，却在当根开盘进场</h4>
+    <div class="loc">src/hourly_signal_backtest.py:54-61, 126-135 · hourly_signal_backtest_1m.py:77-89</div>
+    <p><span class="k">问题</span>：<code>prev_r = ret_prev.iloc[i]</code> 依赖 bar i 收盘价，入场价却是 bar i 的 Open——信号 bar 往往正是大动量 bar，等于免费吃到整根方向性收益。docstring 声称的「上一根触发、下一根执行」并未实现。</p>
+    <p><span class="k">修复</span>：改用 <code>iloc[i-1]</code>；<code>simulate_dyn</code> 的波动率阈值同样要 <code>shift(1)</code>。</p>
+  </div>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">A2 · 边界泄漏</span>重采样 closed/label="right" 与 yfinance 时间戳约定不符</h4>
+    <div class="loc">src/v_stats.py:78 · hourly_signal_backtest.py:30 · hourly_signal_backtest_1m.py:60 · hourly_mv_backtest.py:35</div>
+    <p><span class="k">问题</span>：yfinance 时间戳是 bar <em>起始</em>时刻。当前配置下每天产生一根只含 5 分钟数据的「9:30 小时 bar」和一根 25 分钟残根；正常小时 bar 的 Close 是<em>下一小时</em>第一根 5m 的收盘——收盘价泄漏 5 分钟未来，与 A1 叠加进一步夸大收益。</p>
+    <p><span class="k">修复</span>：统一 <code>closed="left", label="left", offset="30min"</code>，过滤 bar 数不足的残桶。</p>
+  </div>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">A3 · 时区脆弱</span>缓存 CSV 加载跨 DST 必崩，7 处副本各不相同</h4>
+    <div class="loc">src/v_stats.py:52-57 等 7 处</div>
+    <p><span class="k">问题</span>：新版 yfinance 缓存是 ET 偏移时间戳；60 天窗口一旦跨 3 月/11 月夏令时切换，混合偏移会让索引解析成 object dtype，随后 <code>df.index.tz</code> 直接 AttributeError；或更糟——naive 索引被误标 UTC，所有时段统计静默错 4–5 小时。</p>
+    <p><span class="k">修复</span>：全部收敛为单一 <code>pd.to_datetime(utc=True)</code> 加载函数。</p>
+  </div>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">A4 · 静默空跑</span>layered 回测的事件文件与价格缓存不同期，KeyError 被吞</h4>
+    <div class="loc">src/layered_backtest.py:77-82</div>
+    <p><span class="k">问题</span>：当前仓库就是活例子——根目录 <code>zigzag_events.csv</code> 是 2025-11 旧数据，价格缓存已刷到 2026-04~07，<strong>所有事件被静默丢弃</strong>，回测在空数据上输出「结果」。</p>
+    <p><span class="k">修复</span>：skipped 计数超 5% 直接 raise；事件文件写入数据源时间范围指纹。</p>
+  </div>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">A5 · 重复计数</span>同一物理 V 事件按 27 套参数重复入库</h4>
+    <div class="loc">src/v_stats.py:187-194, 272 · v_plots.py:66-78 · zigzag_v.py:170-219 · layered_backtest.py:70</div>
+    <p><span class="k">问题</span>：「每日 V 次数」被放大最多 27 倍且放大不均匀；summary Top10 多为同一事件的多参数副本；layered 回测同一 V 被交易多次，收益与资金占用成倍虚增。</p>
+    <p><span class="k">修复</span>：<code>(peak_t, trough_t)</code> 唯一键去重；分布统计只在单一参数组内做。</p>
+  </div>
+  <div class="finding sev-p1">
+    <h4><span class="chip p1">A6 · 算法 bug</span>swing_generic 的 ZigZag 极值更新逻辑不可达</h4>
+    <div class="loc">src/swing_generic.py:43-67, 117, 122</div>
+    <p><span class="k">问题</span>：<code>if move &gt;= 0: continue</code> 恰好跳过唯一能成立的更新分支，pivot 记录的是上次反转点而非趋势内极值——波段划分整体错误。附带：TR 缺隔夜 gap 项使 ATR 偏低；<code>atr_pct</code> 取全样本均值（前视 + 非自适应）。</p>
+    <p><span class="k">修复</span>：删除此实现，复用 <code>zigzag_v.py:68-123</code> 的正确版本。</p>
+  </div>
+  <div class="finding sev-p1">
+    <h4><span class="chip p1">A7/A8 · 隐性前视</span>V 事件定义与 layered 成交假设的多重不可实现性</h4>
+    <div class="loc">src/v_stats.py:89-173 · layered_backtest.py:88-150</div>
+    <p><span class="k">问题</span>：峰/谷用 3 根未来 bar 确认，但反弹搜索从确认之前就开始——实时不可复制；peak→trough 配对无时间上限、可跨周末；layered 假设在 swing 峰值买入、按反弹最高点结清（均为事后确认点），且事件样本本身只含「最终成功反弹」的幸存者。多事件重叠期总敞口无资金约束。</p>
+    <p><span class="k">修复</span>：加确认时刻列并以其为最早可行动点；逐 bar 重放替代插值成交；统一资金账本。</p>
+  </div>
+  <div class="finding sev-p1">
+    <h4><span class="chip p1">B1/B2 · 方法论</span>无样本外验证 + 零成本假设</h4>
+    <div class="loc">src/hourly_signal_backtest.py:288-300 · zigzag_v.py:233-241 · 所有 simulate 函数</div>
+    <p><span class="k">问题</span>：60 天单标的、1H 仅约 470 根 bar，27 路多重比较取最大值写进「实盘可执行信号回测报告」；同时无佣金、无滑点、无借券费，tp 1–2% / sl 0.5–1% 的策略对 2–5bp 往返成本高度敏感。</p>
+    <p><span class="k">修复</span>：walk-forward + block bootstrap 显著性检验；<code>--fee_bps --slippage_bps</code> 参数化并报告成本敏感性。</p>
+  </div>
+  <div class="finding sev-p2">
+    <h4><span class="chip p2">性能与结构</span>可向量化与应合并的重复</h4>
+    <div class="loc">src/v_stats.py:83-127 · hourly_signal_backtest.py:179-197 · 全局</div>
+    <p><span class="k">要点</span>：极值检测被 81 次重算（只依赖 lookback/lookforward，可算一次共享，且可用 rolling max 向量化）；trough 无界搜索 worst-case O(n²)；1m 重播逐分钟 iterrows 可用 searchsorted + argmax 向量化。结构上：CSV 加载 7 份副本、resample 3 份、TP/SL 判定 4 份、两套 ZigZag 并存——修一个 bug 要改四处，极易漏改。缓存键 <code>60d</code> 永不过期也在此列。</p>
+  </div>
+</section>
+
+<section id="live">
+  <h2>live_trading/ 脚手架审查<span class="sec-note">代理 B · 详见 review-2026-07-23/live-trading-review.md</span></h2>
+  <div class="verdict">
+    <p>总体判断：这是一个<strong>回测/模拟脚手架，距离「半实盘」还有本质差距</strong>——没有订单状态机、状态持久化、异常处理和日志体系；在修复 P0 问题并重建执行假设之前，任何回测/寻优结果都不具备指导真金白银的效力。</p>
+  </div>
+
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">P0-1</span>std 模式下无信号不跳过，产生大量虚假止损交易</h4>
+    <div class="loc">live_trading/run_sim.py:50-56</div>
+    <p><span class="k">问题</span>：<code>if direction == 0: continue</code> 只写在非 std 分支。std 模式下 direction=0 时继续执行，tp=sl=entry 几乎必然记为一笔「止损」，纯扣手续费——每个合规小时一笔假交易，胜率/笔数/收益全部失真。</p>
+  </div>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">P0-2</span>groupby 键与过滤后长度不匹配，遇盘前盘后数据必崩</h4>
+    <div class="loc">live_trading/run_sim_intraday_drop.py:33-42</div>
+    <p><span class="k">问题</span>：时区索引在 RTH 过滤前计算，过滤后长度不匹配。当前只因 yfinance 数据恰好全在盘中才侥幸不崩，换数据源即 <code>ValueError</code>。</p>
+  </div>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">P0-3</span>马丁格尔仓位与权益复利脱节，爆仓风险被系统性低估</h4>
+    <div class="loc">live_trading/run_sim_grid.py:37, 57-82, 161-166 · config.py:23-24</div>
+    <p><span class="k">问题</span>：<code>grid_mults=(1,2,4,8)</code> 满层 15 个单位，但收益按「相对均价百分比」直接对权益复利——只成交 1 层和成交全部 15 层对权益影响相同；杠杆检查量纲混乱（无量纲乘数÷美元本金）形同虚设；<code>equity</code> 参数从未被使用。马丁策略的核心风险「满层加仓后打止损的真实美元亏损」当前模型根本反映不出来。</p>
+    <p><span class="k">修复</span>：每层美元化定义、逐层记录股数与成本、按当前权益查杠杆，并断言最坏单笔损失 ≤ 权益上限。</p>
+  </div>
+  <div class="finding sev-p0">
+    <h4><span class="chip p0">P0-4/5</span>1H 合成边界错 5 分钟；隔夜跳空混入「1H 动量」触发开盘信号</h4>
+    <div class="loc">live_trading/bar_builder.py:12-14 · run_sim.py:40-67</div>
+    <p><span class="k">问题</span>：resample 约定与 bar 起始时间戳语义错位，小时边界整体右移 5 分钟；15:30 后的桶只有 30 分钟数据、早间桶只含 1 根 5m bar 也照常发信号；<code>pct_change()</code> 跨日使每天首根「1H 收益」实为隔夜跳空——恰好触发在滑点最大的开盘时段。</p>
+  </div>
+  <div class="finding sev-p1">
+    <h4><span class="chip p1">P1-6</span><code>--trigger -0.02</code> 的真实含义是「每小时无条件开仓」</h4>
+    <div class="loc">live_trading/signal.py:12 · run.txt</div>
+    <p><span class="k">问题</span>：<code>abs(ret) &lt; trigger</code> 在负阈值下恒 False，等价阈值 0。<strong>历史跑过的这些模拟实际是无条件逐小时开仓</strong>，与预期策略语义完全不同；tp=0.1（1 小时 10%）基本不可能触发，实际退化为持有到窗口结束。</p>
+  </div>
+  <div class="finding sev-p1">
+    <h4><span class="chip p1">P1-8/9/10</span>执行假设全面乐观：跳空穿价、滑点、手续费、bar 内顺序</h4>
+    <div class="loc">run_sim.py:89-100 · run_sim_grid.py:47-131 · execution.py:17-48</div>
+    <p><span class="k">问题</span>：四处止损全部假设精确成交在止损价——TSLA 高波动下开盘跳空穿价是最致命场景；滑点只加在入场；grid 全程未扣手续费；同 bar 内「先补仓后判止损」对马丁是乐观方向。另 <code>--mode</code> 参数定义了但从未读取，<code>execution.py</code> 整个是死代码。</p>
+    <p><span class="k">修复</span>：止损 <code>min(open, sl_px) − slippage</code>，止盈严格穿越，出入场对称计费，提供悲观模式区间估计。</p>
+  </div>
+  <div class="finding sev-p1">
+    <h4><span class="chip p1">P1-7/12/16</span>无状态机、无账户级风控、无持久化/日志/缺口检测</h4>
+    <div class="loc">run_sim.py 全文 · config.py:8</div>
+    <p><span class="k">问题</span>：每笔 100% 权益满仓复利，无仓位上限/日亏上限/回撤熔断；无 Position/Order 对象，连续两小时都触发信号时行为未定义；零 try/except、零 logging、零状态落盘——崩溃重启后持仓信息全部丢失。<code>provider='alpaca_paper'</code> 配置无任何对接代码。</p>
+    <p><span class="k">修复</span>：见<a href="#arch">架构设计</a>——状态机、RiskManager、SQLite 持久化是重构主体。</p>
+  </div>
+  <div class="finding sev-p1">
+    <h4><span class="chip p1">P1-19</span>auto_opt 是教科书式过拟合流程</h4>
+    <div class="loc">live_trading/auto_opt.py:32-56</div>
+    <p><span class="k">问题</span>：同一份 60 天数据上随机采样、按同数据总收益选优、「抽到 10% 就停」（对随机结果择优发表）、只看总收益不看笔数/回撤；底层模拟器的漏洞会被优化器主动放大。<code>best_summary.txt</code> 的参数上实盘几乎必然远差于回测——这是除马丁风险外最大的资金陷阱。</p>
+  </div>
+</section>
+
+<section id="ai">
+  <h2>AI 交易算法调研<span class="sec-note">代理 C · 2025–2026 · 详见 review-2026-07-23/ai-algo-survey.md</span></h2>
+  <div class="verdict good">
+    <p><strong>共识性发现是反直觉的</strong>：在收益预测上，梯度提升树 + 严格 walk-forward 验证仍然打败绝大多数「大模型」方案；LLM 的可靠价值在信息处理（新闻/情绪特征），不在交易决策本身。对本项目的最优路径是「规则触发 + ML 信号过滤 + regime 开关 + 滚动重估」，而不是推倒重来。</p>
+  </div>
+
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:110px">评级</th><th>方法</th><th>依据</th></tr>
+    <tr>
+      <td><span class="chip ok">值得做</span></td>
+      <td><strong>GBDT 信号过滤器</strong>（LightGBM/XGBoost）</td>
+      <td>规则触发不变，模型对每次 V 信号打「反弹成功概率」，只交易高分信号。文献实证最扎实（ML4T 第12章；MNQ 日内 walk-forward 研究 arXiv:2605.17724 给出诚实数字：准确率 54.8%——edge 存在但薄）。单机 CPU、几天工作量，<strong>必须配 purged walk-forward</strong>。</td>
+    </tr>
+    <tr>
+      <td><span class="chip ok">值得做</span></td>
+      <td><strong>Regime 感知 + 滚动重估</strong></td>
+      <td>波动率分档/HMM 做趋势-震荡开关（hmmlearn 即可）；滚动窗口重估阈值替代一次性全样本网格——顺带消除「参数全样本调优」这一隐性前视。</td>
+    </tr>
+    <tr>
+      <td><span class="chip p2">谨慎试验</span></td>
+      <td>Kronos 微调 · LLM 情绪特征</td>
+      <td>Kronos（清华，NeurIPS 2025，开放权重）是唯一 K 线专用基础模型，可作 GBDT 对照基线，但 RankIC ≠ 扣费后收益。LLM 给「急跌是否一次性情绪冲击」打标逻辑上成立，但只能前向使用——模型「记得」历史新闻，历史段打标不可信。</td>
+    </tr>
+    <tr>
+      <td><span class="chip p0">不值得跟</span></td>
+      <td>多代理 LLM 框架（TradingAgents 系）</td>
+      <td>系统综述 arXiv:2605.19337 审查 77 项研究：合格的 19 项中仅 2 项有干净时序划分、仅 1 项建模交易成本、无一控制生存者偏差；参数化前视（预训练语料记得历史行情）无法靠检查代码排除；决策频率与 5 分钟统计套利不匹配，API 成本吃掉散户级 edge。</td>
+    </tr>
+    <tr>
+      <td><span class="chip p0">不值得跟</span></td>
+      <td>端到端强化学习 · 零样本时序大模型</td>
+      <td>DRL：论文结论互相矛盾（PPO 时赢时输），无可信散户实盘证据；FinRL 竞赛头部方案实际在退回「GBDT + 因子工程」。TSFM：多项独立实证显示 TimesFM/Chronos 零样本跑不过 GBDT 甚至 20 年前的 HAR 模型，且基准污染争议未决（精度虚高 47–184%）。</td>
+    </tr>
+  </table></div>
+
+  <h3>开源项目速览（2026-07 实测星数）</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th>项目</th><th class="num">Star</th><th>定位</th></tr>
+    <tr><td>TradingAgents</td><td class="num">94.2k</td><td>多代理 LLM，热度极高但偏研究 demo，官方自己修过前视 bug</td></tr>
+    <tr><td>Qlib（微软）</td><td class="num">46.5k</td><td>最成熟的 AI 量化平台——其时序交叉验证与成本建模思路值得借鉴</td></tr>
+    <tr><td>Kronos</td><td class="num">32.8k</td><td>金融 K 线基础模型，开放权重，研究向</td></tr>
+    <tr><td>FinGPT / FinRL</td><td class="num">20.9k / 15.8k</td><td>金融 LLM 与 DRL 教学生态</td></tr>
+  </table></div>
+  <p style="color:var(--muted);font-size:13px">注：star 数与实盘可用性基本无关——TradingAgents 星数是 Qlib 两倍，工程可靠性远低于后者。</p>
+</section>
+
+<section id="arch">
+  <h2>架构设计：回测 / 模拟 / 实盘统一框架<span class="sec-note">详见 architecture.md（含完整接口定义）</span></h2>
+  <p>核心原则一句话：<strong>策略代码不知道自己在回测还是实盘</strong>。四种运行形态共用同一个 Runner，装配时只注入不同的 DataFeed 和 Broker 实现——paper 跑通后切实盘，真的只是换一个 broker key。</p>
+
+  <div class="tbl-scroll"><table>
+    <tr><th>形态</th><th>DataFeed</th><th>Broker</th><th>用途</th></tr>
+    <tr><td><code>backtest</code></td><td>HistoricalFeed（CSV 回放）</td><td>SimBroker（悲观成交模型）</td><td>策略研究、参数寻优</td></tr>
+    <tr><td><code>shadow</code></td><td>LiveFeed（实时订阅）</td><td>NullBroker（只记录）</td><td>影子对账：实时信号 vs 回测预期逐笔 diff</td></tr>
+    <tr><td><code>paper</code></td><td>LiveFeed</td><td>AlpacaBroker(paper=True)</td><td>验证整条下单链路</td></tr>
+    <tr><td><code>live</code></td><td>LiveFeed</td><td>AlpacaBroker(paper=False)</td><td>小仓位实盘</td></tr>
+  </table></div>
+
+  <h3>模块与数据流</h3>
+  <pre class="arch-diagram"><code>DataFeed ──bars()──▶ BarBuilder ──▶ Strategy.on_bar(bar, ctx) ──意图──▶ RiskManager.size()
+（回放/订阅可换）    （时间戳语义     （纯函数，ctx 只能回看，        （美元化仓位、熔断、
+                     在类型层写死）    前视在架构上不可能）             马丁最坏损失断言）
+                                                                          │ Order
+      Persistence（SQLite：orders/fills/equity，先落盘再下单）◀───────────┤
+      崩溃恢复：load_open_state() → broker.positions() 对账               ▼
+                                                              PositionStateMachine
+                                                    FLAT → PENDING_ENTRY → HOLDING → PENDING_EXIT
+                                                    （连续信号、日终强平、反手规则有确定行为）
+                                                                          │
+                                                                          ▼
+                                                              Broker（submit / 回调 on_fill）
+                                                    SimBroker | NullBroker | AlpacaBroker(paper|live)</code></pre>
+
+  <h3>关键设计决策（每条都对应一个审查发现）</h3>
+  <ul class="tight">
+    <li><strong>Bar 类型写死时间戳语义</strong>（start = bar 起始，UTC）+ 唯一的 bar_builder：跨交易日永不合桶、残桶标记 <code>complete=False</code> ——A2/P0-4/P0-5 类边界错位从此在类型层被封死。</li>
+    <li><strong>Strategy 纯函数化</strong>：<code>on_bar(bar, ctx) → [SignalIntent]</code>，ctx 只提供 <code>history()</code> 回看接口——前视偏差（A1）靠架构杜绝而非 code review；GBDT 过滤器作为装饰器挂 <code>confidence</code> 字段，不侵入策略。</li>
+    <li><strong>意图与订单分离</strong>：策略输出不含仓位大小，sizing 是 RiskManager 的职责——仓位 = 单笔风险预算 ÷ 止损距离，全部美元化（修 P0-3）；熔断是前置检查 + 持久化状态，重启后仍生效。</li>
+    <li><strong>悲观成交模型集中在 SimBroker</strong>：STOP 单按 <code>min(open, stop) − slippage</code> 成交（跳空穿价）、LIMIT 止盈需严格穿越、市价单 1 bar 延迟、同 bar 触及 TP+SL 默认先判 SL——所有执行假设一处可审计（修 P1-8/9/10、B2）。</li>
+    <li><strong>先落盘再下单 + 幂等订单 ID</strong>：网络超时重试不会双重下单；启动时与 broker 对账，不一致拒绝启动。</li>
+    <li><strong>回测与实盘写同一套持久化表</strong>：复盘分析代码只写一份。</li>
+  </ul>
+
+  <h3>迁移路径</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th>现有代码</th><th>去向</th></tr>
+    <tr><td>signal.py + run_sim.py 信号逻辑</td><td>strategy/v_reversal.py（修 P0-1、P1-6 后迁入）</td></tr>
+    <tr><td>bar_builder.py</td><td>data/bar_builder.py（按新约定重写）</td></tr>
+    <tr><td>execution.py + 各 run_sim 成交判定</td><td>broker/sim.py 的 FillModel（悲观假设集中）</td></tr>
+    <tr><td>run_sim_grid.py 马丁逻辑</td><td>策略 + RiskManager worst-case 检查（美元化）</td></tr>
+    <tr><td>auto_opt.py</td><td>research/optimize.py，底层调 backtest Runner，强制 walk-forward</td></tr>
+    <tr><td>src/ 统计脚本（v_stats、zigzag 等）</td><td>research/（与交易链路解耦，共用 data 层）</td></tr>
+  </table></div>
+  <p>实施顺序：<strong>先修现有代码 P0（Phase 0–1，让回测数字先可信），再搭骨架迁移（Phase 3）</strong>；迁移完成标志——同一策略配置在新旧回测器上产出一致交易流。</p>
+</section>
+
+<footer>
+  报告源文件（供 git 与后续会话引用）：<code>docs/review-2026-07-23/</code> 下三份审查/调研 md · <code>docs/architecture.md</code>（含完整 Python 接口定义）· <code>docs/roadmap.md</code>。
+  由 Claude Fable 5 三代理并行分析生成，2026-07-23。
+</footer>
+</main>
+</div>
+</div>
