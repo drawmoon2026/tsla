@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# 数据缓存与生成产物
+data/
+outputs/
+figures/
+summary.md
+daily_v_count.csv
+v_events_*.csv
+v_summary.csv
+zigzag_*.csv

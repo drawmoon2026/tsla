@@ -1,0 +1,2 @@
+.venv/bin/python live_trading/run_sim.py --trigger -0.02 --tp 0.1 --sl 0.02
+.venv/bin/python live_trading/run_sim.py --trigger -0.02 --tp 0.02 --sl 0.01
