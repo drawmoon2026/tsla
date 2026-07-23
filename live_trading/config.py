@@ -10,7 +10,7 @@ class Config:
     trigger: float = 0.015
     tp: float = 0.03
     sl: float = 0.01
-    trigger_std: float = None  # k * rolling std of 1H returns
+    trigger_std: float | None = None  # k * rolling std of 1H returns
     std_window: int = 20
     capital: float = 10000.0
     offset_minutes: int = 30
@@ -31,6 +31,22 @@ class Config:
     alpaca_key: str = os.getenv('ALPACA_KEY_ID','')
     alpaca_secret: str = os.getenv('ALPACA_SECRET_KEY','')
     alpaca_base: str = os.getenv('ALPACA_BASE_URL','https://paper-api.alpaca.markets')
+
+    def __post_init__(self):
+        self.validate()
+
+    def validate(self):
+        # 负 trigger 会让 abs(ret) < trigger 恒 False，静默变成"每小时无条件开仓"
+        if self.trigger < 0:
+            raise ValueError(f"trigger must be >= 0, got {self.trigger} (negative trigger means 'always trade')")
+        if not (0 < self.sl < 1):
+            raise ValueError(f"sl must be in (0, 1), got {self.sl}")
+        if not (0 < self.tp < 1):
+            raise ValueError(f"tp must be in (0, 1), got {self.tp}")
+        if self.trigger_std is not None and self.trigger_std <= 0:
+            raise ValueError(f"trigger_std must be > 0 when set, got {self.trigger_std}")
+        if not (0 < self.grid_tp < 1) or not (0 < self.grid_stop < 1):
+            raise ValueError("grid_tp and grid_stop must be in (0, 1)")
 
 def load_config():
     return Config()

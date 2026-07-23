@@ -34,6 +34,7 @@ def run(cfg: Config, feed: str, outdir: Path, drop_pct: float):
     rth = (et.hour > 9) | ((et.hour == 9) & (et.minute >= 30))
     rth &= (et.hour < 16)
     df = df[rth]
+    et = df.index.tz_convert(cfg.tz)
 
     trades = []
     equity = cfg.capital

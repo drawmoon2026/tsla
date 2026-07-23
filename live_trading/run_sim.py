@@ -47,13 +47,13 @@ def run_sim(cfg: Config, feed_path: str, outdir: Path):
     tz = cfg.tz
     for i in range(1, len(bars1h)):
         prev = bars1h.iloc[i - 1]
-        if cfg.trigger_std:
+        if cfg.trigger_std is not None:
             thr = cfg.trigger_std * prev["ret_std"]
             direction = 0 if pd.isna(thr) or abs(prev["ret_prev"]) < thr else (1 if prev["ret_prev"] > 0 else -1)
         else:
             direction = compute_trigger(prev, cfg.trigger)
-            if direction == 0:
-                continue
+        if direction == 0:
+            continue
 
         # time filter based on bar end (right label)
         bar_end = bars1h.index[i]
@@ -214,6 +214,7 @@ def main():
         cfg.trigger_std = args.trigger_std
     if args.std_window is not None:
         cfg.std_window = args.std_window
+    cfg.validate()
     trades_df, _ = run_sim(cfg, args.feed, outdir)
     if not args.no_report:
         write_report(trades_df, cfg.capital, outdir)

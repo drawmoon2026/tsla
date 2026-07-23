@@ -66,6 +66,7 @@ def load_events(path: str) -> pd.DataFrame:
 def simulate(price: pd.Series, events: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     slice_rows: List[SliceResult] = []
     event_rows: List[EventResult] = []
+    skipped = 0
 
     for _, r in events.iterrows():
         peak_t, trough_t, rebound_t = r["peak_t"], r["trough_t"], r["rebound_t"]
@@ -79,6 +80,7 @@ def simulate(price: pd.Series, events: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
             p_trough = price.loc[trough_t]
             p_reb = price.loc[rebound_t]
         except KeyError:
+            skipped += 1
             continue
 
         drop = (p_peak - p_trough) / p_peak
@@ -132,6 +134,14 @@ def simulate(price: pd.Series, events: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
             )
         )
 
+    total = len(events)
+    if skipped:
+        print(f"WARNING: skipped {skipped}/{total} events not found in price index")
+    if total and skipped / total > 0.05:
+        raise ValueError(
+            f"{skipped}/{total} events missing from price data — "
+            "events file and price cache cover different periods; regenerate events first"
+        )
     return pd.DataFrame(slice_rows), pd.DataFrame(event_rows)
 
 
