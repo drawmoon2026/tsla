@@ -6,13 +6,23 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
 暗色默认 + 亮色（尊重 prefers-color-scheme，页内可切换）、宋体衬线板块题
 + 等宽序号、标定环表盘 + 三灯信号组、军事地图旗标、T0-T3 色深+形状双编码。
 
+视图（顶部标的标签栏之下切换，hash 记忆）：
+  实时值班 = 下列全部板块（默认）；
+  模拟探测（历史推演）= N3-H 考场（2023-07→2026-07）逐日回放播放器——
+     价格曲线光标推进 + 两腿指标面板同步 + 触发日自动暂停弹日记卡
+     （trigger_diary.md：看到什么→决定→之后 20 日实际→判对/错）+
+     「使用指标」固定卡（两腿定义/冻结参数/证据等级/walk-forward 口径）+
+     失明期灰显；播放数据预计算内嵌 JSON（精简字段控体积）。
+
 板块（等宽序号按实际渲染顺序编排）：
   顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
      （>30 分钟标红）+ 主题切换；<meta refresh> 每 5 分钟自动重载
   01 今日合议（每日决策卡：现价 · S2 开关读数（距 252 日高回撤，E11 冻结口径）·
      探测器状态与标定倒计时 · 策略线 shadow 健康 · 规则合成的综合一句话）
   02 态势总览（detector_state：标定环表盘（标定倒计时）+ 态势陈述 +
-     两腿读数卡（含数据龄徽章）+ 证据等级行 + 三灯信号组 + 假想单判分；
+     两腿读数卡（含数据龄徽章）+ 证据等级行 + 三灯信号组 + 假想单判分 +
+     等待板（已有信息 / 在等信息（下期 FINRA 发布推算、标定期满日）/
+     条件行动手册 IF→THEN——由当前状态动态生成，注明 N3-H/N6/E11 依据）；
      表缺失整面板隐藏）
   03 战场走势（标的视图：TSLA 日线收盘（yfinance 增量补到最新，失败降级
      + STALE 徽章）对数坐标折线 + 1/3/8 年时间刷 + 可开关图层——图例分
@@ -62,6 +72,16 @@ except Exception:  # noqa: BLE001
     CALIB_BDAYS, COST_LINE = 20, -0.0006
     LOOKBACK_BDAYS, PERSIST_BDAYS, SHORT_JUMP_PCT = 20, 20, 10.0
 
+try:  # 标定常量与拆股防护阈值同源引用；失败退回写死值
+    from intel.detector import DENSE_QUANTILE, DENSE_REF_COUNT as DENSE_REF
+except Exception:  # noqa: BLE001
+    DENSE_REF, DENSE_QUANTILE = 65, 0.8789
+try:
+    from intel.splits import SPLIT_GUARD_PCT as SPLIT_GUARD_PCT_V
+except Exception:  # noqa: BLE001
+    SPLIT_GUARD_PCT_V = 50.0
+DENSE_QUANT_TXT = f"{DENSE_QUANTILE:.4f}"
+
 OUT_PATH = DB_PATH.parent / "dashboard.html"
 
 STALE_S = 30 * 60  # 最后轮询距今超过此秒数 → 顶栏标红
@@ -72,6 +92,8 @@ BARS_CSV = PROJECT_ROOT / "data" / "TSLA_1h_alpaca.csv"
 STATES_CSV = PROJECT_ROOT / "outputs" / "n3h_deduction" / "daily_states.csv"
 PITS_CSV = PROJECT_ROOT / "outputs" / "n4_golden_pit" / "pits_catalog.csv"
 FORM4_CSV = PROJECT_ROOT / "data" / "intel" / "edgar_form4.csv"
+DIARY_MD = PROJECT_ROOT / "outputs" / "n3h_deduction" / "trigger_diary.md"
+FINRA_CSV = PROJECT_ROOT / "data" / "intel" / "finra_short.csv"
 
 # 视图盒尺寸（viewBox 单位；渲染时宽度 100% 自适应）
 _VB_W, _VB_H = 1040, 400
@@ -571,6 +593,131 @@ def load_musk_buys() -> list[dict] | None:
         return None
 
 
+# ------------------------------------------- replay & waitboard · data pulls
+
+def load_replay_days() -> list[dict] | None:
+    """daily_states.csv 全行（N3-H 考场逐日）；缺失/坏行 → None（回放页降级）。"""
+    try:
+        out = []
+        with STATES_CSV.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                out.append(
+                    {
+                        "date": date.fromisoformat(row["date"].strip()),
+                        "off": (row.get("state") or "").strip().lower() == "risk_off",
+                        "tweets": _ffloat(row.get("prev_day_tweets")),
+                        "thr": _ffloat(row.get("dense_thr")),
+                        "trig": (row.get("trigger") or "").strip() == "True",
+                        "blind": (row.get("tweet_data_blind") or "").strip() == "True",
+                        "reason": (row.get("reason") or "").strip(),
+                    }
+                )
+        return out or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_finra_releases() -> list[dict] | None:
+    """finra_short.csv（拆股修正后主文件）：按发布时刻升序的空头利益发布。"""
+    try:
+        out = []
+        with FINRA_CSV.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if (row.get("type") or "").strip() != "short_interest":
+                    continue
+                try:
+                    pl = json.loads(row.get("payload") or "{}")
+                    pub = datetime.fromisoformat(row["event_time_utc"])
+                except (ValueError, KeyError):
+                    continue
+                chg = _ffloat(pl.get("change_pct"))
+                if chg is None:
+                    continue
+                out.append(
+                    {
+                        "pub_utc": pub,
+                        "pub_date": pub.astimezone(ET).date(),
+                        "settle": (pl.get("settlement_date") or "").strip(),
+                        "chg": chg,
+                        "si": pl.get("short_interest"),
+                        "dtc": _ffloat(pl.get("days_to_cover")),
+                    }
+                )
+        out.sort(key=lambda r: r["pub_utc"])
+        return out or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_trigger_cards() -> dict[str, dict] | None:
+    """trigger_diary.md → {触发日: 日记卡}（看到什么/决定/之后实际/判定）。
+
+    解析按行进行、对格式漂移容错：Episode 头行开新组，触发行归组，
+    组尾的 决定/之后实际/判定 行回填给组内全部触发日。
+    """
+    try:
+        text = DIARY_MD.read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+    cards: dict[str, dict] = {}
+    ep_title, ep_dates = "", []
+    ep_no = 0
+
+    def _strip_md(s: str) -> str:
+        return s.replace("**", "").strip()
+
+    for line in text.splitlines():
+        line = line.rstrip()
+        if line.startswith("## "):
+            ep_no += 1
+            ep_title, ep_dates = _strip_md(line[3:]), []
+            continue
+        m = line.strip()
+        if m.startswith("- **触发 "):
+            head, _, body = m[2:].partition("：")
+            d = _strip_md(head).replace("触发", "").strip()
+            cards[d] = {"ep": ep_no, "ep_title": ep_title,
+                        "seen": _strip_md(body), "decide": "", "after": "",
+                        "ok": None, "verdict": ""}
+            ep_dates.append(d)
+        elif m.startswith("- 决定："):
+            for d in ep_dates:
+                cards[d]["decide"] = _strip_md(m[len("- 决定："):])
+        elif m.startswith("- 之后实际："):
+            for d in ep_dates:
+                cards[d]["after"] = _strip_md(m[len("- 之后实际："):])
+        elif m.startswith("- 判定："):
+            v = _strip_md(m[len("- 判定："):])
+            ok = v.startswith("对")
+            for d in ep_dates:
+                cards[d]["ok"] = ok
+                cards[d]["verdict"] = v
+    return cards or None
+
+
+def _roll_back_weekday(d: date) -> date:
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def next_short_period(latest_settle: date) -> tuple[date, date]:
+    """按 FINRA 结算日规则（每月 15 日与月末，遇周末前移）推算下一期。
+
+    返回 (下一结算日, 预计发布日)；发布 ≈ 结算 + 9 交易日 16:00 ET
+    （与 finra_short.csv publication_rule 同口径，busday 近似不剔假日）。
+    """
+    y, m = latest_settle.year, latest_settle.month
+    cands: list[date] = []
+    for k in range(3):
+        yy, mm = y + (m - 1 + k) // 12, (m - 1 + k) % 12 + 1
+        last_day = (date(yy + (mm == 12), mm % 12 + 1, 1) - timedelta(days=1))
+        cands.append(_roll_back_weekday(date(yy, mm, 15)))
+        cands.append(_roll_back_weekday(last_day))
+    nxt = min(c for c in cands if c > latest_settle)
+    return nxt, add_bdays(nxt, 9)
+
+
 # ------------------------------------------------- symbol view · rendering
 
 def _fmt_pct_pt(v: float | None) -> str:
@@ -1021,6 +1168,25 @@ def render_symbol_tabs(symbols: tuple[tuple[str, bool], ...] = (("TSLA", True),)
     return f'<div class="sym-tabs" aria-label="标的">{tabs}<span class="sym-hint">多标的预留位</span></div>'
 
 
+def render_view_tabs() -> str:
+    """视图切换（标的标签栏之下）：实时值班（默认，全部现有板块）｜模拟探测（历史推演）。
+
+    切换纯前端显隐（JS），location.hash 记忆视图，meta refresh 后不丢。
+    """
+    return (
+        '<div class="viewbar">'
+        '<div class="viewtabs" role="tablist" aria-label="视图">'
+        '<button class="vt act" type="button" data-view="live" role="tab" '
+        'aria-selected="true">实时值班</button>'
+        '<button class="vt" type="button" data-view="replay" role="tab" '
+        'aria-selected="false">模拟探测（历史推演）</button>'
+        '<a class="vt vt-link" href="playbook.html">棋谱预案 ↗</a>'
+        "</div>"
+        '<span class="sym-hint">模拟探测 = N3-H 考场逐日回放（walk-forward，'
+        "探测器未见过的历史段）</span></div>"
+    )
+
+
 def render_symbol_view(
     symbol: str,
     dates: list[date],
@@ -1150,7 +1316,6 @@ def render_symbol_view(
     return f"""
 <section>
   <h2><span class="sec-no">__NO__</span>战场走势<span class="h-sub">{esc(symbol)} 日线收盘（ET 交易日聚合） · 对数刻度 · {esc(str(dates[0]))} → {esc(str(last))}</span>{fresh_badge}</h2>
-  {render_symbol_tabs()}
   <div class="card chartcard" id="tv">
     <div class="tv-bar legendrow">
       <div class="tv-ranges" role="group" aria-label="时间范围">{range_btns}</div>
@@ -1179,6 +1344,459 @@ def render_symbol_view(
     {esc(foot_extra)}价格轴为对数刻度；悬停标记看明细，悬停曲线看逐日收盘。</p>
   </div>
   <script type="application/json" id="tv-data">{data_json}</script>
+</section>"""
+
+
+# ------------------------------------------------------- 等待板（值班台账）
+
+def _wb_cell(k: str, v: str, ref: str, cls: str = "") -> str:
+    return (
+        f'<div class="cx-cell{cls}"><div class="cx-k">{k}</div>'
+        f'<div class="cx-v num">{v}</div>'
+        f'<div class="cx-ref">{ref}</div></div>'
+    )
+
+
+def _pb_row(cond: str, act: str, src: str) -> str:
+    return (
+        '<div class="pb-row"><span class="pb-chip if">IF</span>'
+        f'<span class="pb-cond">{cond}</span>'
+        '<span class="pb-chip then">THEN</span>'
+        f'<span class="pb-act">{act}</span>'
+        f'<span class="pb-src">{esc(src)}</span></div>'
+    )
+
+
+def render_waitboard(det: dict | None, px: dict | None,
+                     finra: list[dict] | None, now: datetime) -> str:
+    """等待板：已有信息 / 在等信息 / 条件行动手册（全部由当前状态动态生成）。
+
+    数据源：detector_state 最新行（两腿读数、标定进度）+ finra_short.csv
+    修正后主文件（最新期数值与发布日、下一期推算）+ 价格上下文 S2。
+    任一源缺失对应格降级显示，不炸。
+    """
+    if det is None:
+        return ""
+    cur = det["cur"]
+    state = cur.get("state")
+    calibrating = state == "CALIBRATING"
+    baseline_days = int(cur.get("baseline_days") or 0)
+    s2 = (px or {}).get("s2")
+
+    # ---- 已有信息 ----
+    latest = finra[-1] if finra else None
+    if latest:
+        si_txt = (f"{latest['si'] / 1e6:.1f}M 股" if latest.get("si") else "—")
+        mismatch = ""
+        if cur.get("short_settlement") and cur["short_settlement"] != latest["settle"]:
+            mismatch = (f" · <b class=\"warn-text\">与 detector_state 记录"
+                        f"（{esc(cur['short_settlement'])}）不一致</b>")
+        cell_short = _wb_cell(
+            "空头最新期（FINRA 双周）",
+            f"{latest['chg']:+.2f}%",
+            f"{si_txt} · 结算 {esc(latest['settle'])} · 发布 {esc(str(latest['pub_date']))} "
+            + age_badge(latest["pub_date"], now, 14, "发布龄") + mismatch,
+        )
+    elif cur.get("short_chg_pct") is not None:
+        cell_short = _wb_cell(
+            "空头最新期（FINRA 双周）",
+            f"{cur['short_chg_pct']:+.2f}%",
+            f"结算 {esc(cur.get('short_settlement') or '—')} · "
+            "finra_short.csv 不可读，退回 detector_state 记录", " crit",
+        )
+    else:
+        cell_short = _wb_cell("空头最新期（FINRA 双周）", "无数据",
+                              "finra_short.csv 与 detector_state 均无记录", " crit")
+
+    mc = cur.get("musk_count")
+    try:
+        musk_d = date.fromisoformat(str(cur.get("musk_count_day")))
+    except (TypeError, ValueError):
+        musk_d = None
+    cell_musk = _wb_cell(
+        "Musk 昨日计数（nitter 口径）",
+        f"{_fmt_count(mc)} 帖" if mc is not None else "无数据",
+        f"口径日 {esc(cur.get('musk_count_day') or '—')} · post+RT，无 reply "
+        + age_badge(musk_d, now, 2),
+    )
+
+    if s2:
+        cell_s2 = _wb_cell(
+            "S2 今日读数（距 252 日高回撤）",
+            f"{s2['drawdown_pct']:+.1f}%",
+            (f"已触发，超线 {abs(s2['margin_pp']):.1f} pp" if s2["triggered"]
+             else f"未触发，距 −20% 线余量 {s2['margin_pp']:.1f} pp")
+            + f" · 252 日高 {s2['high']:,.2f}（{esc(str(s2['high_date']))}）",
+            " crit" if s2["triggered"] else "",
+        )
+    else:
+        cell_s2 = _wb_cell("S2 今日读数（距 252 日高回撤）", "无法计算",
+                           "取价失败或序列不足——缺口不是安全", " crit")
+
+    thr = cur.get("dense_thr")
+    cell_calib = _wb_cell(
+        "标定基线进度",
+        f"{baseline_days} / {CALIB_BDAYS} 交易日",
+        (f"标定期内不出信号 · 阈值未生效（历史参考 {DENSE_REF}帖/日，Sprinklr 口径）"
+         if calibrating
+         else f"标定完成 · 当日密集阈值 {_fmt_count(thr)} 帖/日（nitter 基线分位映射）"),
+    )
+
+    # ---- 在等信息 ----
+    today_et = now.astimezone(ET).date()
+    if latest or cur.get("short_settlement"):
+        try:
+            base_settle = date.fromisoformat(
+                str(latest["settle"] if latest else cur["short_settlement"]))
+            nxt_settle, nxt_pub = next_short_period(base_settle)
+            n_bd = bdays_between(today_et, nxt_pub)
+            cell_next = _wb_cell(
+                "下期 FINRA 空头发布",
+                nxt_pub.strftime("%m-%d"),
+                f"结算 {nxt_settle} · 预计发布 {nxt_pub}（结算 + 9 交易日 16:00 ET 口径，"
+                + (f"还差约 {n_bd} 个交易日）" if n_bd > 0 else "已到期，等采集）"),
+            )
+        except (TypeError, ValueError):
+            cell_next = _wb_cell("下期 FINRA 空头发布", "无法推算", "最新结算日不可解析", " crit")
+    else:
+        cell_next = _wb_cell("下期 FINRA 空头发布", "无法推算", "无最新期结算日", " crit")
+
+    eta = calib_eta(str(cur.get("state_date")), baseline_days)
+    remain = max(0, CALIB_BDAYS - baseline_days)
+    cell_eta = _wb_cell(
+        "标定期满日",
+        str(eta) if eta else "—",
+        ("期满起出正式信号（CALIBRATING → RISK_ON/OFF）" if calibrating
+         else "已期满，正常值班"),
+    )
+    cell_remain = _wb_cell(
+        "nitter 基线缺口",
+        f"还差 {remain} 交易日" if remain else "已集齐",
+        f"基线 = 扩张窗日计数，阈值取其 {DENSE_QUANT_TXT} 分位（65 帖/日的历史分位映射）",
+    )
+
+    # ---- 条件行动手册（动态分支）----
+    thr_txt = (f"密集阈值 {_fmt_count(thr)} 帖/日" if thr is not None
+               else "密集阈值（标定期满后由基线分位映射生效）")
+    latest_chg = latest["chg"] if latest else cur.get("short_chg_pct")
+    calib_note = (
+        f"；<b class=\"warn-text\">标定期内（至 {eta}）仅记录不触发</b>" if calibrating and eta
+        else "；<b class=\"warn-text\">标定期内仅记录不触发</b>" if calibrating else ""
+    )
+    rows = [
+        _pb_row(
+            f"下期空头 change ≥ +{SHORT_JUMP_PCT:.0f}%（信息A）<b>且</b>"
+            f"当日 Musk 发帖 &gt; {esc(thr_txt) if thr is None else thr_txt}（信息B）",
+            f"RISK_OFF {PERSIST_BDAYS} 交易日（重叠触发顺延）+ 假想减仓单"
+            f"（记 detector_trades，价格快照判分）{calib_note}",
+            "N3-H 冻结规则",
+        ),
+        _pb_row(
+            "只有 A 无 B（空头跳升但 Musk 不密集）/ 只有 B 无 A（密集但无 up-jump 发布）",
+            "不触发，detector_state 逐日记录在案——两腿必须同窗命中且发布时刻早于密集日结束",
+            "N3-H 冻结规则",
+        ),
+        _pb_row(
+            f"下期空头 change ≥ +{SPLIT_GUARD_PCT_V:.0f}%",
+            "拆股防护：<b>不自动触发</b>，发 detector_split_guard 人工复核事件"
+            "（确认真实跳变后人工处置；历史上 +345.8%/+202.2% 均为拆股伪影）",
+            "N6 SPLIT_GUARD",
+        ),
+    ]
+    if s2:
+        dd = s2["drawdown_pct"]
+        if s2["triggered"]:
+            rows.append(_pb_row(
+                f"S2 当前 {dd:+.1f}%（已触发），若回撤修复至 −20% 以内",
+                "E8-A 买入侧恢复发信号资格（shadow 白跑恢复出单）",
+                "E11 S2",
+            ))
+            rows.append(_pb_row(
+                f"S2 当前 {dd:+.1f}%，若进一步恶化",
+                "维持停用——E8-A 崩盘段系统性反选，S2 是唯一压测通过的截断",
+                "E11 S2",
+            ))
+        else:
+            rows.append(_pb_row(
+                f"S2 当前 {dd:+.1f}%（未触发），若回撤跌破 −20% 线"
+                f"（现余量 {s2['margin_pp']:.1f} pp）",
+                "E8-A 买入侧停用发信号资格（S2 开关关闸，只记录不出买入）",
+                "E11 S2",
+            ))
+            rows.append(_pb_row(
+                f"S2 当前 {dd:+.1f}%，若维持在 −20% 以内",
+                "E8-A 买入侧保持发信号资格（gate+几何冻结口径照常出单）",
+                "E11 S2",
+            ))
+    else:
+        rows.append(_pb_row(
+            "S2 读数缺席（取价失败）",
+            "今天没人替你算 S2——需人工核对回撤后再谈 E8-A 发信号资格",
+            "E11 S2",
+        ))
+
+    return f"""
+  <div class="card waitboard">
+    <div class="wb-head"><h3><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>等待板 · 值班台账</h3>
+    <span class="h-sub">已有信息 / 在等信息 / 条件行动手册 —— 由当前 detector_state · finra_short · S2 实时合成</span></div>
+    <div class="wb-sec">已有信息</div>
+    <div class="wb-grid">{cell_short}{cell_musk}{cell_s2}{cell_calib}</div>
+    <div class="wb-sec">在等信息</div>
+    <div class="wb-grid three">{cell_next}{cell_eta}{cell_remain}</div>
+    <div class="wb-sec">条件行动手册（IF → THEN，每条注明依据）</div>
+    <div class="playbook">{"".join(rows)}</div>
+    <p class="footnote">推算口径：下期发布日按「结算 + 9 交易日」busday 近似（不剔美股假日，可能偏移 ~1 日）；
+    最新空头 change_pct {f"{latest_chg:+.2f}%" if latest_chg is not None else "—"} 未达 +{SHORT_JUMP_PCT:.0f}% 时腿 A 未命中，手册首条分支等的是<b>下一期</b>发布。
+    行动手册全部为假想推演口径（不碰真钱）；分支依据：N3-H 冻结规则（intel/detector.py）·
+    N6 SPLIT_GUARD（intel/splits.py，阈值 +{SPLIT_GUARD_PCT_V:.0f}%）· E11 S2（models/e8a/meta.json s2_switch）。</p>
+  </div>"""
+
+
+# ------------------------------------------- 模拟探测（历史推演）· rendering
+
+_RP_VB_H = 360  # 回放图视框高
+
+
+def _replay_segs(days: list[dict], key: str) -> list[tuple[date, date]]:
+    segs: list[tuple[date, date]] = []
+    run = prev = None
+    for r in days:
+        if r[key]:
+            if run is None:
+                run = r["date"]
+            prev = r["date"]
+        elif run is not None:
+            segs.append((run, prev))
+            run = prev = None
+    if run is not None:
+        segs.append((run, prev))
+    return segs
+
+
+def render_replay_view(days: list[dict] | None, price_dates: list[date],
+                       price_closes: list[float],
+                       finra: list[dict] | None,
+                       cards: dict[str, dict] | None) -> str:
+    """模拟探测页：N3-H 考场逐日回放播放器 + 指标面板 + 触发日记卡。
+
+    数据全部预计算内嵌 JSON；daily_states/价格任一缺失 → 降级空态卡。
+    """
+    price_map = dict(zip(price_dates, price_closes))
+    rows: list[dict] = []
+    if days:
+        last_c = None
+        for r in days:
+            c = price_map.get(r["date"], last_c)
+            if c is None:
+                continue  # 价格起点之前
+            last_c = c
+            rows.append({**r, "close": c})
+    if not rows:
+        return """
+<section>
+  <h2><span class="sec-no">R</span>模拟探测<span class="h-sub">N3-H 考场逐日回放（2023-07 → 2026-07）</span></h2>
+  <div class="card"><p class="empty">daily_states.csv 或价格数据不可读——回放页降级为空。</p></div>
+</section>"""
+
+    d0, d1 = rows[0]["date"], rows[-1]["date"]
+    n = len(rows)
+    n_trig = sum(r["trig"] for r in rows)
+    n_blind = sum(r["blind"] for r in rows)
+
+    # ---- 空头发布对齐：每日「当日可见的最新一期」索引（walk-forward，只看发布日 <= 当日）
+    rels = [r for r in (finra or []) if r["pub_date"] <= d1]
+    si_idx: list[int] = []
+    j = -1
+    for r in rows:
+        while j + 1 < len(rels) and rels[j + 1]["pub_date"] <= r["date"]:
+            j += 1
+        si_idx.append(j)
+
+    # ---- SVG（几何同战场走势：对数 y，日期 x）----
+    d0o, d1o = d0.toordinal(), d1.toordinal()
+    dspan = max(1, d1o - d0o)
+    pw, ph = _VB_W - _ML - _MR, _RP_VB_H - _MT - _MB
+    closes = [r["close"] for r in rows]
+    llo, lhi = math.log10(min(closes)), math.log10(max(closes))
+    pad = 0.06 * ((lhi - llo) or 1.0)
+    llo, lhi = llo - pad, lhi + pad
+    lspan = lhi - llo
+
+    def x(o: int) -> float:
+        return _ML + (o - d0o) / dspan * pw
+
+    def y(c: float) -> float:
+        return _MT + (1 - (math.log10(c) - llo) / lspan) * ph
+
+    parts: list[str] = []
+    # 失明期灰底（时间轴灰显，P0-3 同口径）
+    for a, b in _replay_segs(rows, "blind"):
+        bx, bw = x(a.toordinal()), x(b.toordinal() + 1) - x(a.toordinal())
+        tag = (f'<text class="blind-tag" x="{bx + bw / 2:.1f}" y="{_MT + ph - 8}" '
+               'text-anchor="middle">失明期 · 放风腿无数据（Musk 归档缺口）</text>'
+               if bw > 260 else "")
+        parts.append(
+            f'<rect class="blind-wash" x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" '
+            f'height="{ph}"><title>Musk 归档缺口 {a} → {b}：该段探测器无放风腿数据，'
+            "无触发 ≠ 判定安全</title></rect>" + tag
+        )
+    # risk-off 底纹
+    for i, (a, b) in enumerate(_replay_segs(rows, "off"), start=1):
+        bx, bw = x(a.toordinal()), x(b.toordinal() + 1) - x(a.toordinal())
+        parts.append(
+            f'<rect class="band-wash" x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" height="{ph}">'
+            f"<title>risk-off E{i}：{a} → {b}</title></rect>"
+            f'<rect x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" height="{ph}" '
+            'fill="url(#hatch45)" pointer-events="none"/>'
+            f'<text class="band-tag" x="{bx + bw / 2:.1f}" y="{_MT + 13}" '
+            f'text-anchor="middle">E{i}</text>'
+        )
+    # 网格 + 轴
+    grid, labels = [], []
+    for t in _log_ticks(10 ** llo, 10 ** lhi):
+        ty = y(t)
+        grid.append(f'<line x1="{_ML}" y1="{ty:.1f}" x2="{_VB_W - _MR}" y2="{ty:.1f}"/>')
+        labels.append(f'<text x="{_ML - 8}" y="{ty:.1f}" class="tv-tick" '
+                      f'text-anchor="end" dominant-baseline="central">{t:,.0f}</text>')
+    for t, lab in _x_ticks(d0, d1):
+        tx = x(t.toordinal())
+        grid.append(f'<line x1="{tx:.1f}" y1="{_MT}" x2="{tx:.1f}" y2="{_MT + ph}"/>')
+        labels.append(f'<text x="{tx:.1f}" y="{_RP_VB_H - 10}" class="tv-tick" '
+                      f'text-anchor="middle">{esc(lab)}</text>')
+    parts.append(f'<g class="tv-grid">{"".join(grid)}</g>{"".join(labels)}')
+    # 触发日标记（顶部小旗刻度）
+    trig_marks = "".join(
+        f'<line x1="{x(r["date"].toordinal()):.1f}" x2="{x(r["date"].toordinal()):.1f}" '
+        f'y1="{_MT}" y2="{_MT + 10}"/>'
+        for r in rows if r["trig"]
+    )
+    parts.append(f'<g class="rp-trigmarks">{trig_marks}</g>')
+    # 价格折线 + 播放光标（竖线 + 圆点，JS 驱动）
+    pts = " ".join(f"{x(r['date'].toordinal()):.1f},{y(r['close']):.1f}" for r in rows)
+    parts.append(f'<polyline class="tv-price" points="{pts}"/>')
+    parts.append(
+        f'<g class="rp-cursor"><line id="rp-cur-line" x1="{_ML}" x2="{_ML}" '
+        f'y1="{_MT}" y2="{_MT + ph}"/>'
+        f'<circle id="rp-cur-dot" cx="{_ML}" cy="{y(rows[0]["close"]):.1f}" r="4"/>'
+        f'<text id="rp-cur-px" x="{_ML + 8}" y="{_MT + 16}" class="rp-curlab"></text></g>'
+    )
+    svg = (f'<svg class="tv-svg" viewBox="0 0 {_VB_W} {_RP_VB_H}" role="img" '
+           f'aria-label="N3-H 考场回放：TSLA 日线收盘（对数）与探测器状态">{"".join(parts)}</svg>')
+
+    # ---- 内嵌 JSON（精简字段控体积）----
+    cards = cards or {}
+    card_out = {}
+    for r in rows:
+        k = str(r["date"])
+        if r["trig"] and k in cards:
+            c = cards[k]
+            card_out[k] = {"ep": c["ep"], "t": c["ep_title"], "s": c["seen"],
+                           "d": c["decide"], "a": c["after"],
+                           "ok": bool(c["ok"]), "v": c["verdict"]}
+        elif r["trig"]:
+            card_out[k] = {"ep": 0, "t": "", "s": r.get("reason") or "触发（日记缺失）",
+                           "d": "", "a": "", "ok": None, "v": "日记卡缺失"}
+    data_json = json.dumps(
+        {
+            "D": [r["date"].toordinal() for r in rows],
+            "C": [round(r["close"], 2) for r in rows],
+            "T": [None if r["tweets"] is None else round(r["tweets"]) for r in rows],
+            "H": [None if r["thr"] is None else round(r["thr"], 1) for r in rows],
+            "S": [int(r["off"]) for r in rows],
+            "G": [int(r["trig"]) for r in rows],
+            "B": [int(r["blind"]) for r in rows],
+            "SI": si_idx,
+            "R": [[str(r["pub_date"]), r["settle"], round(r["chg"], 2)] for r in rels],
+            "cards": card_out,
+            "epoch": _EPOCH_ORD,
+            "meta": {"d0": d0o, "ds": dspan, "ml": _ML, "pw": pw,
+                     "mt": _MT, "ph": ph, "ly0": round(llo, 6),
+                     "lys": round(lspan, 6)},
+        },
+        separators=(",", ":"), ensure_ascii=False,
+    )
+
+    # ---- 页头「使用指标」固定卡 ----
+    spec_card = f"""
+  <div class="card rp-spec">
+    <div class="rp-spec-grid">
+      <div><div class="bt">两腿指标定义</div>
+        <p>腿 A · 空头利益跳变：FINRA 双周空头利益 change_pct ≥ +{SHORT_JUMP_PCT:.0f}%
+        的发布（拆股修正后口径），按<b>发布日</b>生效——act = 发布次交易日；
+        腿 B · Musk 密集发帖：日发帖数 &gt; 密集阈值（本推演口径：过去 365 日 90 分位，
+        参考值 {DENSE_REF} 帖/日，Sprinklr 归档）。两腿同窗命中（回看 {LOOKBACK_BDAYS} 交易日）才触发。</p></div>
+      <div><div class="bt">冻结参数</div>
+        <p><span class="chip">up-jump +{SHORT_JUMP_PCT:.0f}%</span>
+        <span class="chip">密集阈值 {DENSE_REF}</span>
+        <span class="chip">F{PERSIST_BDAYS}</span>
+        <span class="chip">LOOKBACK {LOOKBACK_BDAYS}bd</span>
+        —— 触发起 {PERSIST_BDAYS} 交易日 risk-off，重叠触发顺延；参数 2018→2023-06
+        发现段冻结，考场内不许改。</p></div>
+      <div><div class="bt">证据等级</div>
+        <p>考场 2 段全对（2023-12 段 B&amp;H −1.7%、2024-02→04 段 −11.0%），但块 bootstrap
+        <b>p=0.14</b>——仅方向性证据；<b>窄谱</b>过滤器（只防空头知情型下跌，对 2024-12→2025-04
+        的 −53.8% 失明）；<b>N6 拆股修正后幸存</b>（考场段无拆股，2/2 判对原样）。</p></div>
+      <div><div class="bt">口径</div>
+        <p><b>Walk-forward</b>：考场段（2023-07 → 2026-07）未参与规则发现，探测器逐日只见
+        当日开盘前信息（空头看发布日、发帖看前一日）；回放即重演当时视野，无事后修饰。
+        失明期（Musk 归档止于 2025-05-08 后）灰显，无触发 ≠ 判定安全。</p></div>
+    </div>
+  </div>"""
+
+    return f"""
+<section id="rp">
+  <h2><span class="sec-no">R1</span>推演播放器<span class="h-sub">N3-H 考场 {esc(str(d0))} → {esc(str(d1))} · {n} 交易日 · 触发 {n_trig} 次 · 失明 {n_blind} 日 · 触发日自动暂停弹日记卡</span></h2>
+  {spec_card}
+  <div class="card chartcard">
+    <div class="rp-controls">
+      <button id="rp-play" class="rp-btn primary" type="button">开始推演</button>
+      <button id="rp-step" class="rp-btn" type="button">单步</button>
+      <div class="tv-ranges" role="group" aria-label="速度">
+        <button class="tv-rb rp-speed act" data-s="1">1x</button>
+        <button class="tv-rb rp-speed" data-s="5">5x</button>
+        <button class="tv-rb rp-speed" data-s="20">20x</button>
+      </div>
+      <input type="range" id="rp-range" min="0" max="{n - 1}" value="0" step="1"
+        aria-label="推演进度">
+      <span class="rp-date num" id="rp-date">{esc(str(d0))}</span>
+      <span class="rp-count num" id="rp-count">1 / {n}</span>
+    </div>
+    <div class="tv-wrap rp-wrap" id="rp-wrap">
+      {svg}
+      <div class="rp-card" id="rp-card" hidden>
+        <div class="rp-card-h"><span id="rp-card-title" class="num"></span>
+          <span class="pill sm" id="rp-card-pill"><span class="dot"></span><span id="rp-card-pilltxt"></span></span></div>
+        <div class="rc-row"><span class="rc-k">看到什么</span><span class="rc-v" id="rp-card-seen"></span></div>
+        <div class="rc-row"><span class="rc-k">决定</span><span class="rc-v" id="rp-card-decide"></span></div>
+        <div class="rc-row"><span class="rc-k">之后 20 日实际</span><span class="rc-v" id="rp-card-after"></span></div>
+        <div class="rc-row"><span class="rc-k">判定</span><span class="rc-v" id="rp-card-verdict"></span></div>
+        <div class="rp-card-foot">
+          <button class="rp-btn primary" id="rp-resume" type="button">继续推演</button>
+          <button class="rp-btn" id="rp-close" type="button">关闭卡片</button>
+        </div>
+      </div>
+    </div>
+    <div class="rp-panel">
+      <div class="leg"><div class="leg-h"><svg class="ic" aria-hidden="true"><use href="#i-scales"/></svg>
+        腿 A · 空头最新期<span class="pill sm" id="rp-a-pill"><span class="dot"></span><span id="rp-a-pilltxt">—</span></span></div>
+        <div class="val num" id="rp-a-val">—</div>
+        <div class="ref" id="rp-a-ref">当日可见的最新一期（发布日 ≤ 当日）</div></div>
+      <div class="leg" id="rp-legb"><div class="leg-h"><svg class="ic" aria-hidden="true"><use href="#i-mega"/></svg>
+        腿 B · Musk 前日发帖<span class="pill sm" id="rp-b-pill"><span class="dot"></span><span id="rp-b-pilltxt">—</span></span></div>
+        <div class="val num" id="rp-b-val">—</div>
+        <div class="ref" id="rp-b-ref">阈值 = 过去 365 日 90 分位（参考 {DENSE_REF}）</div></div>
+      <div class="leg rp-statecell"><div class="leg-h"><svg class="ic" aria-hidden="true"><use href="#i-lamp"/></svg>
+        当日状态</div>
+        <div class="val"><span class="pill" id="rp-st-pill"><span class="dot"></span><span id="rp-st-txt">RISK_ON</span></span></div>
+        <div class="ref" id="rp-st-ref">—</div></div>
+    </div>
+    <p class="footnote">回放为 N3-H 历史推演的逐日重演（outputs/n3h_deduction/daily_states.csv +
+    trigger_diary.md），触发日自动暂停并弹出当次日记卡；空头读数来自拆股修正后
+    finra_short.csv，按发布日对齐（当日只见已发布的最新一期）。灰底 = Musk 归档缺口
+    （2025-05-08 后 {n_blind} 个交易日放风腿无数据，探测器无法触发——该段"无触发"是失明，
+    不是安全）。假想推演，不碰真钱。</p>
+  </div>
+  <script type="application/json" id="rp-data">{data_json}</script>
 </section>"""
 
 
@@ -1680,7 +2298,7 @@ def _hypo_summary(trades: list[dict]) -> str:
     return "".join(rows[-4:])
 
 
-def render_detector(data: dict | None, now: datetime) -> str:
+def render_detector(data: dict | None, now: datetime, wait_html: str = "") -> str:
     if not data:
         return ""
     cur = data["cur"]
@@ -1824,6 +2442,7 @@ def render_detector(data: dict | None, now: datetime) -> str:
     </div>
     <div>{right}</div>
   </div>
+  {wait_html}
   <div class="card det-more">
     {_det_trades_html(data["trades"], now)}
     <p class="footnote">{footnote}</p>
@@ -2596,6 +3215,99 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .lrow .n { font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
   font-variant-numeric: tabular-nums; text-align: right; }
 
+/* ===== 视图切换（实时值班｜模拟探测） ===== */
+main > .sym-tabs { margin-top: 26px; }
+.viewbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 12px 0 0; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.viewtabs { display: inline-flex; border: 1px solid var(--border); border-radius: 5px;
+  overflow: hidden; }
+.vt { appearance: none; border: none; background: transparent; cursor: pointer;
+  color: var(--muted); font: 600 12.5px var(--font-sans); letter-spacing: .05em;
+  padding: 8px 20px; border-right: 1px solid var(--border); }
+.vt:last-child { border-right: none; }
+.vt:hover { color: var(--ink-2); }
+.vt.act { background: var(--surface-2); color: var(--ink); }
+.vw { display: none; } .vw.act { display: block; }
+
+/* ===== 等待板（值班台账） ===== */
+.waitboard { margin-top: 12px; padding: 16px 18px 8px; }
+.wb-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 4px; }
+.wb-head h3 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.wb-head h3 svg.ic { width: 15px; height: 15px; color: var(--muted); }
+.wb-sec { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .18em;
+  color: var(--muted); margin: 14px 0 8px; display: flex; align-items: center; gap: 10px; }
+.wb-sec::after { content: ""; flex: 1; border-top: 1px dashed var(--border); }
+.wb-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.wb-grid.three { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 1080px){ .wb-grid, .wb-grid.three { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px){ .wb-grid, .wb-grid.three { grid-template-columns: 1fr; } }
+.waitboard .cx-v { font-size: 17px; }
+.playbook { display: flex; flex-direction: column; gap: 8px; }
+.pb-row { display: grid; grid-template-columns: 40px minmax(0, 1.1fr) 52px minmax(0, 1.3fr) 118px;
+  gap: 10px; align-items: baseline; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px; }
+@media (max-width: 900px){ .pb-row { grid-template-columns: 40px 1fr;
+  grid-auto-rows: auto; } .pb-row .pb-src { grid-column: 2; } }
+.pb-chip { font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: .1em; text-align: center; border-radius: 3px; padding: 2px 0;
+  align-self: center; }
+.pb-chip.if { background: var(--warn-wash); color: var(--warn-text);
+  border: 1px solid var(--warn); }
+.pb-chip.then { background: var(--crit-wash); color: var(--crit-text);
+  border: 1px solid var(--crit); }
+.pb-cond { font-size: 12.5px; color: var(--ink-2); line-height: 1.55; }
+.pb-act { font-size: 12.5px; color: var(--ink-2); line-height: 1.55; }
+.pb-src { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted);
+  letter-spacing: .04em; text-align: right; align-self: center; white-space: nowrap; }
+
+/* ===== 模拟探测（历史推演） ===== */
+.rp-spec { padding: 14px 18px; margin-bottom: 12px; }
+.rp-spec-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+@media (max-width: 1080px){ .rp-spec-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 620px){ .rp-spec-grid { grid-template-columns: 1fr; } }
+.rp-spec .bt { display: flex; gap: 8px; align-items: center; font-size: 12px;
+  color: var(--ink-2); font-weight: 600; margin-bottom: 4px; }
+.rp-spec p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.65; }
+.rp-spec .chip { margin-right: 4px; }
+.rp-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; }
+.rp-btn { appearance: none; cursor: pointer; font: 600 12px var(--font-mono);
+  letter-spacing: .08em; color: var(--ink-2); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 4px; padding: 7px 16px; }
+.rp-btn:hover { border-color: var(--muted); color: var(--ink); }
+.rp-btn.primary { background: var(--warn-wash); border-color: var(--warn);
+  color: var(--warn-text); }
+#rp-range { flex: 1; min-width: 160px; accent-color: var(--warn); }
+.rp-date { font-size: 12.5px; color: var(--ink); }
+.rp-count { font-size: 11px; color: var(--muted); }
+.rp-trigmarks line { stroke: var(--warn); stroke-width: 2; }
+.rp-cursor line { stroke: var(--ink); stroke-width: 1.2; stroke-dasharray: 4 3;
+  opacity: .85; }
+.rp-cursor circle { fill: var(--ink); stroke: var(--surface); stroke-width: 1.5; }
+.rp-curlab { font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  fill: var(--ink); }
+.rp-panel { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
+  margin-top: 12px; }
+@media (max-width: 860px){ .rp-panel { grid-template-columns: 1fr; } }
+#rp-legb.blind { opacity: .55; }
+#rp-legb.blind .val { color: var(--muted); font-size: 15px; }
+.rp-statecell .val { margin: 10px 0 6px; }
+.rp-statecell .pill { font-size: 13px; padding: 5px 14px; }
+.rp-card { position: absolute; z-index: 8; top: 8%; left: 50%;
+  transform: translateX(-50%); width: min(560px, 92%);
+  background: var(--surface); border: 1px solid var(--warn); border-radius: 8px;
+  padding: 14px 18px 12px; box-shadow: 0 10px 34px rgba(0,0,0,.35); }
+.rp-card-h { display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 8px; }
+.rp-card-h > span:first-child { font-size: 13.5px; font-weight: 700; color: var(--ink); }
+.rc-row { display: grid; grid-template-columns: 96px 1fr; gap: 10px; padding: 5px 0;
+  font-size: 12.5px; }
+.rc-k { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em;
+  color: var(--muted); padding-top: 2px; }
+.rc-v { color: var(--ink-2); line-height: 1.6; min-width: 0; }
+.rp-card-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 10px; }
+
 /* ===== footer ===== */
 .footnote { font-size: 12px; color: var(--muted); margin: 8px 16px 12px; }
 section > .footnote { margin-left: 2px; margin-right: 2px; }
@@ -2778,6 +3490,169 @@ _TV_JS = """
 })();
 """
 
+# 视图切换 + 推演播放器（模拟探测页）。不经 %-格式化，直接拼接。
+_RP_JS = """
+/* 视图切换：实时值班｜模拟探测；location.hash 记忆，meta refresh 后不丢 */
+(function () {
+  var tabs = document.querySelectorAll(".vt");
+  if (!tabs.length) return;
+  function setView(v) {
+    tabs.forEach(function (b) {
+      var on = b.getAttribute("data-view") === v;
+      b.classList.toggle("act", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    document.querySelectorAll(".vw").forEach(function (w) {
+      w.classList.toggle("act", w.id === "view-" + v);
+    });
+  }
+  tabs.forEach(function (b) {
+    b.addEventListener("click", function () {
+      setView(b.getAttribute("data-view"));
+      try { history.replaceState(null, "", "#" + b.getAttribute("data-view")); }
+      catch (e) {}
+    });
+  });
+  var h = (location.hash || "").slice(1);
+  if (h === "replay" || h === "live") setView(h);
+})();
+/* 推演播放器：逐日回放 N3-H 考场；触发日自动暂停弹日记卡 */
+(function () {
+  var sec = document.getElementById("rp");
+  var dataEl = document.getElementById("rp-data");
+  if (!sec || !dataEl) return;
+  var D = null;
+  try { D = JSON.parse(dataEl.textContent); } catch (e) {}
+  if (!D) return;
+  var m = D.meta, n = D.D.length;
+  function $(id) { return document.getElementById(id); }
+  var curLine = $("rp-cur-line"), curDot = $("rp-cur-dot"), curPx = $("rp-cur-px");
+  var range = $("rp-range"), dateLab = $("rp-date"), countLab = $("rp-count");
+  var playBtn = $("rp-play"), stepBtn = $("rp-step"), card = $("rp-card");
+  var idx = 0, timer = null, speed = 1, lastCard = -1, BASE_MS = 320;
+
+  function isoOf(i) {
+    return new Date((D.D[i] - D.epoch) * 86400000).toISOString().slice(0, 10);
+  }
+  function X(i) { return m.ml + (D.D[i] - m.d0) / m.ds * m.pw; }
+  function Y(i) {
+    return m.mt + (1 - (Math.log(D.C[i]) / Math.LN10 - m.ly0) / m.lys) * m.ph;
+  }
+  function draw(i) {
+    idx = i;
+    var x = X(i), y = Y(i);
+    curLine.setAttribute("x1", x); curLine.setAttribute("x2", x);
+    curDot.setAttribute("cx", x); curDot.setAttribute("cy", y);
+    curPx.textContent = D.C[i].toFixed(2);
+    if (x > m.ml + m.pw * 0.75) {
+      curPx.setAttribute("x", x - 8); curPx.setAttribute("text-anchor", "end");
+    } else {
+      curPx.setAttribute("x", x + 8); curPx.setAttribute("text-anchor", "start");
+    }
+    range.value = i;
+    dateLab.textContent = isoOf(i);
+    countLab.textContent = (i + 1) + " / " + n;
+    var si = D.SI[i];
+    if (si >= 0) {
+      var r = D.R[si];
+      $("rp-a-val").textContent = (r[2] >= 0 ? "+" : "") + r[2].toFixed(2) + "%";
+      $("rp-a-ref").textContent = "结算 " + r[1] + " · 发布 " + r[0] + "（当日已见的最新一期）";
+      var ah = r[2] >= 10;
+      $("rp-a-pill").className = "pill sm" + (ah ? " warn" : "");
+      $("rp-a-pilltxt").textContent = ah ? "≥+10% 命中" : "未命中";
+    } else {
+      $("rp-a-val").textContent = "—";
+      $("rp-a-ref").textContent = "尚无已发布空头数据";
+      $("rp-a-pill").className = "pill sm";
+      $("rp-a-pilltxt").textContent = "无数据";
+    }
+    var legb = $("rp-legb");
+    if (D.B[i] === 1) {
+      legb.classList.add("blind");
+      $("rp-b-val").textContent = "放风腿无数据";
+      $("rp-b-ref").textContent = "Musk 归档缺口——该段无法触发，无触发 ≠ 判定安全";
+      $("rp-b-pill").className = "pill sm";
+      $("rp-b-pilltxt").textContent = "失明期";
+    } else {
+      legb.classList.remove("blind");
+      var t = D.T[i], h = D.H[i];
+      $("rp-b-val").textContent = t == null ? "—" : t + " 帖";
+      $("rp-b-ref").textContent =
+        h == null ? "阈值 —" : "阈值 " + h.toFixed(1) + " 帖/日（过去 365 日 90 分位）";
+      var bh = t != null && h != null && t > h;
+      $("rp-b-pill").className = "pill sm" + (bh ? " warn" : "");
+      $("rp-b-pilltxt").textContent = bh ? ">阈值 命中" : "未命中";
+    }
+    var off = D.S[i] === 1;
+    $("rp-st-pill").className = "pill " + (off ? "crit" : "good");
+    $("rp-st-txt").textContent = off ? "RISK_OFF" : "RISK_ON";
+    $("rp-st-ref").textContent = off
+      ? "假想减仓生效（F20，重叠触发顺延）"
+      : (D.B[i] === 1 ? "未见触发——但放风腿失明，覆盖不完整" : "两腿未同时命中");
+  }
+  function showCard(i) {
+    var c = D.cards[isoOf(i)];
+    if (!c) return;
+    $("rp-card-title").textContent = "触发 " + isoOf(i) + (c.t ? " · Episode " + c.ep : "");
+    $("rp-card-seen").textContent = c.s || "—";
+    $("rp-card-decide").textContent = c.d || "—";
+    $("rp-card-after").textContent = c.a || "—";
+    $("rp-card-verdict").textContent = c.v || "—";
+    $("rp-card-pill").className =
+      "pill sm " + (c.ok === true ? "good" : c.ok === false ? "crit" : "");
+    $("rp-card-pilltxt").textContent =
+      c.ok === true ? "判对" : c.ok === false ? "判错" : "未判";
+    card.hidden = false;
+  }
+  function hideCard() { card.hidden = true; }
+  function pause() {
+    if (timer) { clearInterval(timer); timer = null; }
+    playBtn.textContent = idx >= n - 1 ? "重新推演" : "开始推演";
+  }
+  function tick() {
+    if (idx >= n - 1) { pause(); return; }
+    draw(idx + 1);
+    if (D.G[idx] === 1 && lastCard !== idx) {
+      lastCard = idx;
+      showCard(idx);
+      pause();  /* 触发日自动暂停 */
+    }
+  }
+  function play() {
+    hideCard();
+    if (idx >= n - 1) { lastCard = -1; draw(0); }
+    if (timer) return;
+    timer = setInterval(tick, BASE_MS / speed);
+    playBtn.textContent = "暂停";
+  }
+  playBtn.addEventListener("click", function () { if (timer) pause(); else play(); });
+  stepBtn.addEventListener("click", function () {
+    pause(); hideCard();
+    if (idx >= n - 1) return;
+    draw(idx + 1);
+    if (D.G[idx] === 1 && lastCard !== idx) { lastCard = idx; showCard(idx); }
+  });
+  sec.querySelectorAll(".rp-speed").forEach(function (b) {
+    b.addEventListener("click", function () {
+      sec.querySelectorAll(".rp-speed").forEach(function (x) {
+        x.classList.toggle("act", x === b);
+      });
+      speed = parseFloat(b.getAttribute("data-s")) || 1;
+      if (timer) { clearInterval(timer); timer = setInterval(tick, BASE_MS / speed); }
+    });
+  });
+  range.addEventListener("input", function () {
+    pause(); hideCard(); lastCard = -1;
+    draw(Math.max(0, Math.min(n - 1, parseInt(range.value, 10) || 0)));
+  });
+  $("rp-resume").addEventListener("click", function () { hideCard(); play(); });
+  $("rp-close").addEventListener("click", hideCard);
+  window.__rp = { draw: draw, play: play, pause: pause, n: n,
+                  get idx() { return idx; }, get playing() { return !!timer; } };
+  draw(0);
+})();
+"""
+
 
 def render(db_path: Path = DB_PATH) -> str:
     now = datetime.now(timezone.utc)
@@ -2825,6 +3700,7 @@ def render(db_path: Path = DB_PATH) -> str:
                 )
 
         shadow = load_shadow(now)
+        finra = load_finra_releases()
         body = [_ICON_SPRITE, render_topbar(conn, now, px)]
         symbol_block = render_symbol_view(
             "TSLA", dates, closes,
@@ -2834,7 +3710,7 @@ def render(db_path: Path = DB_PATH) -> str:
         )
         sections = [
             render_consensus(det, px, shadow, now),
-            render_detector(det, now),
+            render_detector(det, now, render_waitboard(det, px, finra, now)),
             symbol_block,
             render_health(load_health(conn, sources), now),
             render_timeline(load_timeline(conn), now),
@@ -2849,7 +3725,15 @@ def render(db_path: Path = DB_PATH) -> str:
         ]
         if not rendered:
             rendered = ['<p class="empty">数据库暂无可展示的表——待哨兵首采后刷新。</p>']
-        body.append("<main>" + "".join(rendered) + "</main>")
+        replay_html = render_replay_view(
+            load_replay_days(), dates, closes, finra, load_trigger_cards()
+        )
+        body.append(
+            "<main>" + render_symbol_tabs() + render_view_tabs()
+            + f'<div class="vw act" id="view-live">{"".join(rendered)}</div>'
+            + f'<div class="vw" id="view-replay">{replay_html}</div>'
+            + "</main>"
+        )
     finally:
         conn.close()
     body.append(
@@ -2875,6 +3759,7 @@ def render(db_path: Path = DB_PATH) -> str:
         + "\n<script>"
         + _JS % {"stale_ms": STALE_S * 1000}
         + _TV_JS
+        + _RP_JS
         + "</script>\n</body>\n</html>\n"
     )
 
