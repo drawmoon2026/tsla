@@ -5,3 +5,5 @@ matplotlib
 pytz
 lightgbm
 scikit-learn
+requests
+feedparser

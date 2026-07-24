@@ -144,3 +144,22 @@ LLM 信息处理层（只做提炼，不做决策）
 3. 期权异动信号在散户工具普及后拥挤化，2020 前的实证不能外推。
 4. 本体系的多重比较记账并入 strategy-lab.md 计数器；每个情报源单独立假设检验，
    不允许"全家桶一起上然后挑好的"。
+
+## 六、哨兵 v0 实施状态（2026-07-24 上线）
+
+代码 `intel/`（store.py + collectors/ + run_sentinel.py），库 `data/intel/sentinel.sqlite`
+（events 双时间戳：event_time_utc 发布时刻 / observed_time_utc 首见时刻，差值=渠道时延；
+sources 渠道注册表；poll_log 健康监控；v_latency 时延视图）。详见 intel/README.md。
+
+| 渠道 | 层级 | 状态 | 首采 | 说明 |
+|---|---|---|---|---|
+| edgar（Form4/8-K, acceptanceDateTime） | T1 | ✅ | 6 | 稳态时延≈5min 轮询间隔 |
+| fed_fomc（日历页） | T2 | ✅ | 55 场 | 预告类，event_time 可在未来 |
+| uspto（PatentsView） | T2 | ⚠️ 降级 | 0 | 需免费 key 且端点本网络不通；备选 api.uspto.gov |
+| youtube（5 频道 RSS） | T3 | ✅ | 18 | Tesla 官方全收，媒体按关键词 |
+| news_rss（Yahoo/CNBC/MarketWatch/GoogleNews） | T3 | ✅ | 123 | 关键词 tesla/tsla/musk |
+| x_nitter（nitter.net RSS） | T3 | ✅ 脆弱 | 40 | 免费镜像唯一存活通道；死亡则启用 X API Basic ~$200/月（sources 已登记） |
+
+首轮时延分布是回填口径（跑数天后看增量事件才是稳态真值）。调度：launchd 模板
+`intel/deploy/com.tsla.sentinel.plist`（未 load）：盘中 5min / 盘外 30min 一轮。
+第三节"前向积累 8-12 周出首批干净样本"的时钟从今天起表。

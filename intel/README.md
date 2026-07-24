@@ -1,46 +1,127 @@
-# intel/ — 哨兵情报采集层（N1 起用）
+# intel/ — 哨兵（Sentinel）情报采集层
+
+两套并存的管线：
+
+1. **哨兵 v0（本节，2026-07-24 起）**：多渠道前向流式采集 → SQLite 双时间戳库
+   `data/intel/sentinel.sqlite`。目标是从今天起积累"干净"的前向情报流。
+2. **历史批量管线（附节）**：`intel/edgar.py / fomc.py / musk_tweets.py` → CSV，
+   2018 起的历史回填，供事件研究；与哨兵互不干扰。
+
+## 架构
+
+```
+intel/store.py                SQLite 存储层（建表/去重入库/poll_log/时延视图）
+intel/collectors/base.py      采集器基类：fetch → normalize → dedupe → store
+                              统一限速 HTTP（UA 带联系邮箱，全局 ~6.7 req/s < SEC 红线 10）
+intel/collectors/<渠道>.py    每渠道一个模块（见下表）
+intel/run_sentinel.py         总入口：跑一轮所有渠道 + 慢渠道节流 + launchd 节奏门控
+intel/deploy/                 launchd plist 模板（未加载）+ 部署说明
+```
+
+数据库三表一视图：
+
+- `sources` 渠道注册表：tier(T1-T3)/method/poll_interval_s/cost/weight_source(身位分初值)/notes
+- `events` 事件表，**双时间戳**是全库核心：
+  - `event_time_utc`：信息发生/发布时刻（源头声称）
+  - `observed_time_utc`：哨兵首次看到时刻（入库时写死，不随重复轮询变）
+  - 特征只能在 `observed_time_utc` 之后可用——防前视在 schema 层写死
+  - `event_id = sha256(source_id|dedupe_key)[:16]`，INSERT OR IGNORE 去重
+  - 索引 (source_id, event_time_utc)
+- `poll_log` 每次轮询一行（成败/抓到数/新增数/耗时/错误）——渠道健康监控
+- `v_latency` 视图：每渠道 observed-event 秒级分布（min/avg/max；p50 由
+  `store.latency_stats()` 补算）
+
+## 渠道清单与实测（2026-07-24 首采）
+
+| source_id | 层级 | 通道 | 状态 | 首采入库 | 时延（首轮实测，见口径注） |
+|---|---|---|---|---|---|
+| edgar | T1 | data.sec.gov submissions API（acceptanceDateTime） | ✅ | 6（90 天内 Form4/8-K，含 7/22 财报 8-K） | 稳态≈轮询间隔 5min；首轮 min 32h 是回填口径 |
+| fed_fomc | T2 | fomccalendars.htm 日历页解析 | ✅ | 55 场会议（2022→2027） | 日历预告类，lag 为负=会议在未来，正常 |
+| uspto | T2 | PatentsView Search API | ⚠️ 降级 | 0 | 需免费 API key，且 search.patentsview.org 本网络连接超时；备选 USPTO ODP api.uspto.gov（401=通但要 key） |
+| youtube | T3 | 频道 RSS ×5（Tesla 官方/CNBC/CNBC TV/Bloomberg TV/Yahoo Fin） | ✅ | 18 | min 8.5h（RSS 只含最近 15 条视频，回填口径）；稳态≈15min 轮询 |
+| news_rss | T3 | Yahoo-TSLA / CNBC×2 / MarketWatch / GoogleNews RSS | ✅ | 123 | min ≈50min（回填口径）；稳态≈5min 轮询 + 源发布延迟 |
+| x_nitter | T3 | nitter.net RSS（elonmusk + Tesla） | ✅ 脆弱 | 40 | min ≈45min（回填）；稳态≈5min 轮询；实例随时可能死 |
+| x_api_paid | T3 | X API v2（付费备选） | 未启用 | — | Basic ~$200/月（读 ~1.5 万帖/月）/ Pro ~$5000/月，以 developer.x.com 现价为准 |
+
+> **时延口径注**：首轮的 lag 分布被"回填"支配（事件发布在几小时/几天前，今天才开始观察），
+> 不代表稳态时延。稳态时延 = 轮询间隔 + 源侧发布延迟，要跑几天后只看**增量事件**的
+> lag 才是真值。`v_latency` 会随积累自动收敛到真值附近（老事件占比下降）。
+
+### X/Twitter 免费通道调研结论（2026-07-24 实测）
+
+| 通道 | 结果 |
+|---|---|
+| nitter.net RSS | ✅ 可用，返回最近 20 帖、分钟级新鲜度（已做成 x_nitter 采集器）；但连续请求会 429，且 Nitter 实例历史上反复死亡——**按天塌方预期管理** |
+| syndication.twitter.com timeline-profile | ✗ 返回空壳 HTML，无时间线数据（需登录 token） |
+| nitter.poast.org / lightbrd.com / twiiit.com | ✗ 403 反爬墙 |
+| cdn.syndication.twimg.com | ✗ 空响应 |
+
+判定：免费通道短期用 nitter.net，poll_log 连续失败即为死亡信号，届时二选一：
+换存活 Nitter 实例（status.d420.de 有实例清单），或启用 x_api_paid（已在 sources 登记价格）。
+不做浏览器伪装硬爬 x.com（违反其 ToS 且极易封）。
+
+## 运行方式
+
+```bash
+# 单渠道跑一轮
+.venv/bin/python -m intel.collectors.edgar --once
+.venv/bin/python -m intel.collectors.fed --once
+.venv/bin/python -m intel.collectors.uspto --once      # 需 PATENTSVIEW_API_KEY
+.venv/bin/python -m intel.collectors.youtube --once
+.venv/bin/python -m intel.collectors.news_rss --once
+.venv/bin/python -m intel.collectors.x_nitter --once
+
+# 全渠道一轮（慢渠道自动节流；--force 忽略节流）
+.venv/bin/python -m intel.run_sentinel --once
+
+# 库内统计（渠道/事件量/时延分布/最近轮询）
+.venv/bin/python -m intel.run_sentinel --status
+
+# 常驻调度（launchd，模板未加载，见 intel/deploy/README.md）
+cp intel/deploy/com.tsla.sentinel.plist ~/Library/LaunchAgents/ && \
+  launchctl load ~/Library/LaunchAgents/com.tsla.sentinel.plist
+```
+
+调度节奏：launchd 每 5 分钟触发 `--once --auto`；盘中（美东 09:30-16:00）每次真跑，
+盘外只在整点/半点后 5 分钟窗口内跑（≈30 分钟一轮）。与 `com.tsla.shadow` label 独立。
+
+## 加一个新渠道的方法
+
+1. `intel/collectors/` 下新建模块，继承 `base.Collector`：
+   - `SOURCE`：填 source_id/name/tier/method/poll_interval_s/cost/weight_source/notes
+   - `fetch()`：发请求（用 `base.http_get`，自带 UA/限速/重试）返回原始数据
+   - `normalize(raw)`：返回事件 dict 列表，必填 `dedupe_key`（渠道内稳定唯一键）、
+     `event_time_utc`（**信息公开时刻**，ISO8601 UTC，绝不用内部发生时刻）、`type`；
+     可选 `symbol/title/url/payload`
+   - 文件尾 `if __name__ == "__main__": cli(YourCollector)`
+2. 在 `run_sentinel.COLLECTORS` 列表加一行。
+3. 跑 `--once` 验证，看 `--status` 里 poll_log 与时延。
+去重、入库、poll_log、sources 注册全部由基类完成，单渠道通常 <100 行。
+
+## 已知边界
+
+- edgar 采集器只入库申报元数据（form/items/acceptance 时刻/URL）；Form 4 逐笔
+  交易解析在历史管线 `intel/edgar.py`（CSV）里，哨兵侧需要时再移植。
+- fed_fomc 是"日历预告"渠道：event_time 是会议末日 14:00 ET（决议常规发布时刻），
+  可以在未来；决议**内容**发布流水见历史管线 `intel/fomc.py`。
+- youtube/x_nitter 的 RSS 只含最近 15/20 条，渠道断采超过窗口长度会漏帖。
+- news_rss 单 feed 挂掉不拖垮渠道（打印 dead feeds 继续）；google_news 是二手
+  聚合，event_time 为源文章发布时刻、非收录时刻。
+
+---
+
+# 附：历史批量管线（CSV，2026-07-24 前建）
 
 统一 schema（data/intel/*.csv）：`event_time_utc, source, type, payload`。
-**event_time_utc 一律取公开披露时刻**（不是事件/交易发生时刻）——防前视的第一原则。
-payload 为 JSON 字符串，源特有字段全部在内。
+event_time_utc 一律取公开披露时刻——与哨兵同一防前视原则。
 
-## 各源口径
+- **edgar_form4.csv / edgar_8k.csv**（`python -m intel.edgar`）：2018 起全量，
+  acceptanceDateTime 口径；Form 4 按申报×交易代码聚合，472 张 → 721 事件行，
+  insider_buy 仅 11 笔；8-K 136 张。
+- **fomc.csv**（`python -m intel.fomc`）：联储 ne-press.json 新闻流筛 FOMC statement，
+  70 条（2018 起），含 2020-03 两次非常规时刻。
+- **musk_tweets.csv**（`python -m intel.musk_tweets`）：HuggingFace fdaudens/musk-tweets
+  归档，72,743 条，覆盖 2018-01→2025-05-08，此后无免费全量归档——**2025-05 之后的
+  Musk 帖子由哨兵 x_nitter 渠道前向接力**（中间有 ~14 个月缺口，记死）。
 
-### edgar_form4.csv — TSLA 内部人交易（SEC Form 4）
-- 采集：`python -m intel.edgar`。data.sec.gov submissions API（recent 段 + 2018 前归档段），
-  CIK 0001318605，逐张申报拉原始 ownershipDocument XML（primaryDocument 去掉 xslF345X0x/
-  前缀直取），限速 ~8 req/s（SEC 上限 10），User-Agent 带联系邮箱。
-- 时间戳：EDGAR `acceptanceDateTime`（SEC 接收申报时刻，UTC）= 公众最早可见时刻。
-  交易日只进 payload.trade_dates。
-- 事件行：一张 Form 4 内同交易代码的多笔合并（股数/金额求和、vwap 加权）。
-  type：`insider_buy`(code P 公开市场买入) / `insider_sell`(code S) / `code_X`(其他：
-  M 行权、F 税务代扣、A 授予、G 赠与等——**不算真金白银信号**)。
-- 已知边界：4/A 修正单独成行（payload.is_amendment）；派生表（期权）未采集；
-  股数跨 2020(5:1)/2022(3:1) 拆股不可比，用 value_usd 比较。
-- 2026-07-24 采集结果：472 张申报 → 721 事件行；insider_buy 仅 **11 笔**（预警条目
-  说中：高管几乎只卖）；41 张跳过（无非派生交易/获取失败）。
-
-### edgar_8k.csv — TSLA 8-K 重大事件
-- 同一 submissions API，零额外请求；时间戳同 acceptanceDateTime。
-- type = `8k_items_<item列表>`；payload.items 存 item 编号（2.02 业绩、5.02 高管变动、
-  1.01 重大协议、7.01 RegFD、8.01 其他…）。136 张（2018-01 起）。
-
-### fomc.csv — FOMC 决议
-- 采集：`python -m intel.fomc`。联储官网新闻稿 JSON 流
-  https://www.federalreserve.gov/json/ne-press.json ，筛 "Federal Reserve issues FOMC
-  statement"，`d` 字段（美东时刻）转 UTC。常规会 14:00 ET，2020-03 两次紧急决议为
-  真实非常规时刻（3/3 10:00、3/15 17:00），比硬编码日历准。70 条（2018-01 起）。
-
-### musk_tweets.csv — Musk 发帖流（best-effort）
-- 采集：`python -m intel.musk_tweets`。HuggingFace 公开数据集 fdaudens/musk-tweets
-  （Sprinklr 导出，原始文件缓存在 _musk_tweets_raw.csv）。
-- **覆盖 2018-01 → 2025-05-08，此后无数据**（X API 收费后无免费全量归档）；
-  完整性不可证（可能漏帖/含已删推），逐年密度与公开报道量级一致（2018 ~7 帖/日 →
-  2024 ~80 帖/日）。72,743 条。
-- 时间戳 = 发帖时刻（发帖即公开）。type：musk_post/musk_reply/musk_repost。
-  本轮零 LLM 判断，payload 只存原文（截 2000 字符），下游做关键词字符串匹配。
-
-## 复采
-```
-.venv/bin/python -m intel.edgar && .venv/bin/python -m intel.fomc && .venv/bin/python -m intel.musk_tweets
-```
+复采：`.venv/bin/python -m intel.edgar && .venv/bin/python -m intel.fomc && .venv/bin/python -m intel.musk_tweets`
