@@ -1,0 +1,27 @@
+# Backtest configuration — aligned with live_trading/run_sim.py defaults
+# so trading/tools/compare_trades.py can verify trade-stream parity.
+mode: backtest
+symbol: TSLA
+capital: 10000.0
+bar_seconds: 300
+data_path: data/TSLA_5m_60d.csv
+out_dir: outputs/trading_backtest
+
+fill:
+  fee_bp: 1.0        # per side, on entry notional (CostModel semantics)
+  slippage_bp: 2.0   # adverse, entry + stop exits
+
+strategy:
+  trigger: 0.015     # |1H intraday ret| threshold
+  tp: 0.03
+  sl: 0.01
+  allowed_hours: [9, 10, 11, 12, 15]   # ET hour of the execution window start
+  signal_seconds: 3600
+
+risk:
+  sizing: full_equity        # run_sim parity: 100% of equity per trade
+  max_position_pct: 1.0
+  per_trade_risk_pct: 0.005  # used by sizing: risk_budget
+  daily_loss_stop_pct: 0.02
+  max_drawdown_stop_pct: 0.10
+  max_open_orders: 4
