@@ -21,19 +21,29 @@ from zoneinfo import ZoneInfo
 
 from intel import store
 from intel.collectors.edgar import EdgarCollector
+from intel.collectors.edgar_t0 import EdgarT0Collector
 from intel.collectors.fed import FedCollector
+from intel.collectors.finra_ats import FinraAtsCollector
+from intel.collectors.finra_short import FinraShortCollector
 from intel.collectors.news_rss import NewsRssCollector
+from intel.collectors.options_snapshot import OptionsSnapshotCollector
+from intel.collectors.polymarket import PolymarketCollector
 from intel.collectors.uspto import UsptoCollector
 from intel.collectors.x_nitter import PAID_FALLBACK, XNitterCollector
 from intel.collectors.youtube import YoutubeCollector
 
 COLLECTORS = [
     EdgarCollector,
+    EdgarT0Collector,
+    FinraShortCollector,
+    FinraAtsCollector,
+    OptionsSnapshotCollector,
     FedCollector,
     UsptoCollector,
     YoutubeCollector,
     NewsRssCollector,
     XNitterCollector,
+    PolymarketCollector,
 ]
 
 

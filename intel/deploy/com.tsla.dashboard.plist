@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 哨兵仪表盘：每 5 分钟重新生成 data/intel/dashboard.html（只读渲染，不采集）。
+       模板默认不 load；启用：
+         cp intel/deploy/com.tsla.dashboard.plist ~/Library/LaunchAgents/ && \
+           launchctl load ~/Library/LaunchAgents/com.tsla.dashboard.plist
+       与 com.tsla.sentinel / com.tsla.shadow 的 label 独立，互不冲突。 -->
+  <key>Label</key><string>com.tsla.dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tom/project/tsla/.venv/bin/python</string>
+    <string>-m</string><string>intel.dashboard</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/tom/project/tsla</string>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/tom/project/tsla/outputs/sentinel/dashboard.log</string>
+  <key>StandardErrorPath</key><string>/Users/tom/project/tsla/outputs/sentinel/dashboard.err</string>
+</dict>
+</plist>
