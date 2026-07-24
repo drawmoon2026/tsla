@@ -5,10 +5,12 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
 
 板块（按重要性）：
   1. 顶栏：生成时刻 / 最后事件入库时刻 / 最后轮询时刻（>30 分钟标红）
-  2. 渠道健康表（poll_log + sources + events 累计）
-  3. 最新情报流（最近 50 条事件时间线）
-  4. 时延统计（observed - event 的 p50/p90；回填口径加注）
-  5. 今日/近 7 日事件计数按层级条形图（内联 SVG）
+  2. 因果探测器（detector_state 当前状态 + 两腿读数 + 标定进度/阈值
+     + 最近状态切换 + 假想单判分；表缺失整面板隐藏）
+  3. 渠道健康表（poll_log + sources + events 累计；含权重列，tier→权重排序）
+  4. 最新情报流（最近 50 条事件时间线）
+  5. 时延统计（observed - event 的 p50/p90；回填口径加注）
+  6. 今日/近 7 日事件计数按层级条形图（内联 SVG）
 
 容错：任一表/视图缺失则跳过对应板块，不炸。
 
@@ -23,11 +25,20 @@ from __future__ import annotations
 
 import argparse
 import html as html_mod
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from intel.store import DB_PATH
+
+try:  # 与探测器冻结参数保持同源；导入失败退回写死值（容错，不炸仪表盘）
+    from intel.detector import (
+        CALIB_BDAYS, COST_LINE, LOOKBACK_BDAYS, PERSIST_BDAYS, SHORT_JUMP_PCT,
+    )
+except Exception:  # noqa: BLE001
+    CALIB_BDAYS, COST_LINE = 20, -0.0006
+    LOOKBACK_BDAYS, PERSIST_BDAYS, SHORT_JUMP_PCT = 20, 20, 10.0
 
 OUT_PATH = DB_PATH.parent / "dashboard.html"
 
@@ -40,6 +51,13 @@ TIER_LABEL = {
     "T1": "T1 监管申报",
     "T2": "T2 官方发布",
     "T3": "T3 公开舆情",
+}
+
+# 探测器状态 → (语义色类, 中文短语, 一句话说明)。语义色，不用层级色。
+DET_STATE = {
+    "CALIBRATING": ("warn", "标定中", "累积 nitter 口径基线，不出信号"),
+    "RISK_ON": ("good", "正常持仓", "两腿未同时命中，无风险规避"),
+    "RISK_OFF": ("crit", "假想减仓", "空头 up-jump × Musk 密集命中"),
 }
 
 
@@ -124,6 +142,39 @@ def load_sources(conn: sqlite3.Connection) -> dict[str, dict]:
     }
 
 
+def load_detector(conn: sqlite3.Connection) -> dict | None:
+    """探测器面板数据；detector_state 缺失或无行 → None（整面板隐藏）。"""
+    if not has_table(conn, "detector_state"):
+        return None
+    cur = conn.execute(
+        "SELECT * FROM detector_state ORDER BY state_date DESC LIMIT 1"
+    ).fetchone()
+    if cur is None:
+        return None
+    switches: list[dict] = []
+    if has_table(conn, "events"):
+        for r in conn.execute(
+            """SELECT event_time_utc, title, payload_json FROM events
+               WHERE source_id = 'detector' AND type = 'detector_state'
+               ORDER BY event_time_utc DESC LIMIT 5"""
+        ):
+            row = dict(r)
+            try:
+                row["state"] = json.loads(row.get("payload_json") or "{}").get("state")
+            except ValueError:
+                row["state"] = None
+            switches.append(row)
+    trades: list[dict] = []
+    if has_table(conn, "detector_trades"):
+        trades = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM detector_trades ORDER BY trade_time_utc, trade_id"
+            )
+        ]
+    return {"cur": dict(cur), "switches": switches, "trades": trades}
+
+
 def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
     """每渠道：最近轮询 + 连续失败数 + 累计事件数。"""
     if not has_table(conn, "poll_log"):
@@ -166,6 +217,7 @@ def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
                 "name": src.get("name", sid),
                 "tier": src.get("tier"),
                 "method": src.get("method", ""),
+                "weight": src.get("weight_source"),
                 "poll_interval_s": src.get("poll_interval_s") or 0,
                 "last": dict(last) if last is not None else None,
                 "fail_streak": streak,
@@ -173,6 +225,8 @@ def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
                 "last_obs": ev_counts.get(sid, {}).get("last_obs"),
             }
         )
+    # tier 升序 → 权重降序 → source_id（无 tier/权重的排最后）
+    rows.sort(key=lambda h: (h["tier"] or "T9", -(h["weight"] or 0.0), h["source_id"]))
     return rows
 
 
@@ -279,6 +333,178 @@ def render_topbar(conn: sqlite3.Connection, now: datetime) -> str:
 </header>"""
 
 
+def _fmt_count(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{v:.0f}" if float(v).is_integer() else f"{v:.1f}"
+
+
+def _det_trades_html(trades: list[dict], now: datetime) -> str:
+    """假想单判分（REDUCE→RESTORE 配对；成本线同 detector_report）。"""
+    if not trades:
+        return ""
+    trs = []
+    open_reduce = None
+    n_right = n_wrong = 0
+    for t in trades:
+        verdict = ""
+        if t["action"] == "REDUCE":
+            open_reduce = t
+        elif t["action"] == "RESTORE" and open_reduce is not None:
+            if open_reduce["price"] is not None and t["price"] is not None:
+                ret = t["price"] / open_reduce["price"] - 1
+                ok = ret < COST_LINE
+                n_right, n_wrong = n_right + ok, n_wrong + (not ok)
+                verdict = (
+                    f'<span class="{"good" if ok else "crit"}-text">'
+                    f"期间 B&amp;H {ret:+.2%} · "
+                    f"{'对（避损成立）' if ok else '错（空仓错过收益）'}</span>"
+                )
+            else:
+                verdict = "缺价格快照，无法判分"
+            open_reduce = None
+        act_cls = "crit" if t["action"] == "REDUCE" else "good"
+        px = f"{t['price']:.2f}" if t["price"] is not None else "n/a"
+        tt = parse_ts(t["trade_time_utc"])
+        trs.append(
+            "<tr>"
+            f'<td class="num">{fmt_local(tt)}</td>'
+            f'<td><span class="pill sm {act_cls}"><span class="dot"></span>'
+            f'{esc(t["action"])}</span></td>'
+            f'<td class="num">{px}</td>'
+            f'<td class="num">{esc(t["state_date"])}</td>'
+            f'<td class="detail" title="{esc(t.get("note") or "")}">'
+            f'{verdict or esc((t.get("note") or "")[:80])}</td></tr>'
+        )
+    if open_reduce is not None:
+        trs.append(
+            '<tr><td class="num">—</td><td colspan="4" class="detail">'
+            "REDUCE 未平仓——判分以 RESTORE 时点为准（静态页不取现价）</td></tr>"
+        )
+    score = (
+        f'<span class="h-sub">战绩 {n_right} 对 / {n_wrong} 错（已平仓配对，'
+        f"成本线 {COST_LINE:+.2%}）</span>"
+        if (n_right + n_wrong)
+        else f'<span class="h-sub">成本线 {COST_LINE:+.2%} · 判分以 RESTORE 配对</span>'
+    )
+    return (
+        f'<div class="det-sub"><h3>假想单判分 {score}</h3>'
+        '<div class="scroll-x"><table class="det-table">'
+        "<thead><tr><th>时刻</th><th>动作</th><th>TSLA 快照</th>"
+        "<th>状态日</th><th>判分</th></tr></thead>"
+        f"<tbody>{''.join(trs)}</tbody></table></div></div>"
+    )
+
+
+def render_detector(data: dict | None, now: datetime) -> str:
+    if not data:
+        return ""
+    cur = data["cur"]
+    state = cur["state"]
+    cls, phrase, why = DET_STATE.get(state, ("off", state, ""))
+    upd = parse_ts(cur.get("updated_utc"))
+
+    # -- 状态徽章
+    badge_sub = f"{esc(phrase)} · {esc(why)}"
+    if state == "RISK_OFF" and cur.get("risk_off_until"):
+        badge_sub += f" · F{PERSIST_BDAYS} 至 {esc(cur['risk_off_until'])}"
+    badge = (
+        f'<div class="det-state {cls}">'
+        f'<div class="det-state-name">{esc(state)}</div>'
+        f'<div class="det-state-sub">{badge_sub}</div>'
+        f'<div class="det-state-meta num">状态日 {esc(cur["state_date"])}'
+        f'<span class="sub rel" data-iso="{esc(upd.isoformat() if upd else "")}">'
+        f"更新于 {esc(fmt_ago(upd, now))}</span></div></div>"
+    )
+
+    # -- 两腿读数
+    musk_sub = "口径日 " + esc(cur.get("musk_count_day") or "—") + " · nitter 口径"
+    leg_musk = (
+        '<div class="det-leg"><div class="leg-label">放风腿 · Musk 日发帖</div>'
+        f'<div class="leg-value num">{_fmt_count(cur.get("musk_count"))}'
+        '<span class="leg-unit">帖/日</span></div>'
+        f'<div class="leg-sub">{musk_sub}</div></div>'
+    )
+    chg = cur.get("short_chg_pct")
+    upjump = bool(cur.get("short_upjump_recent"))
+    jump_html = (
+        f'<span class="warn-text">回看 {LOOKBACK_BDAYS} 交易日内有 up-jump</span>'
+        if upjump
+        else f"回看 {LOOKBACK_BDAYS} 交易日内无 up-jump"
+    )
+    leg_short = (
+        '<div class="det-leg"><div class="leg-label">空头腿 · 最新期变化</div>'
+        f'<div class="leg-value num">{f"{chg:+.2f}" if chg is not None else "—"}'
+        '<span class="leg-unit">%</span></div>'
+        f'<div class="leg-sub">结算 {esc(cur.get("short_settlement") or "—")} · '
+        f"{jump_html}</div></div>"
+    )
+
+    # -- 第四格：标定进度条（标定期）或密集阈值（正式期）
+    if state == "CALIBRATING":
+        days = int(cur.get("baseline_days") or 0)
+        pct = min(100.0, days / CALIB_BDAYS * 100)
+        leg4 = (
+            '<div class="det-leg"><div class="leg-label">标定进度 · 基线累积</div>'
+            f'<div class="leg-value num">{days}<span class="leg-unit">/ {CALIB_BDAYS} '
+            "交易日</span></div>"
+            f'<div class="prog" role="img" aria-label="标定进度 {days}/{CALIB_BDAYS}">'
+            f'<span style="width:{pct:.0f}%"></span></div>'
+            '<div class="leg-sub">期满后阈值 = 基线同分位数，出信号</div></div>'
+        )
+    else:
+        thr = cur.get("dense_thr")
+        leg4 = (
+            '<div class="det-leg"><div class="leg-label">密集阈值 · 当日生效</div>'
+            f'<div class="leg-value num">{_fmt_count(thr)}'
+            '<span class="leg-unit">帖/日</span></div>'
+            '<div class="leg-sub">nitter 基线分位映射 · 扩张窗每日重算</div></div>'
+        )
+
+    # -- 最近状态切换
+    switches_html = ""
+    if data["switches"]:
+        items = []
+        for s in data["switches"]:
+            t = parse_ts(s["event_time_utc"])
+            s_cls = DET_STATE.get(s.get("state") or "", ("off",))[0]
+            items.append(
+                '<li class="ev">'
+                f'<span class="ev-time num">{fmt_local(t)}</span>'
+                f'<span class="pill sm {s_cls}"><span class="dot"></span>'
+                f'{esc(s.get("state") or "?")}</span>'
+                f'<span class="ev-title" title="{esc(s["title"])}">{esc(s["title"])}</span>'
+                "</li>"
+            )
+        switches_html = (
+            f'<div class="det-sub"><h3>状态切换 <span class="h-sub">最近 '
+            f'{len(items)} 次</span></h3>'
+            f'<ol class="feed">{"".join(items)}</ol></div>'
+        )
+
+    footnote = (
+        f"冻结规则 N3-H：Musk 密集发帖（act=次交易日）× 回看 {LOOKBACK_BDAYS} 交易日内"
+        f"空头 change_pct ≥ +{SHORT_JUMP_PCT:.0f}% 发布 → RISK_OFF 持续 "
+        f"F{PERSIST_BDAYS}（{PERSIST_BDAYS} 交易日，重叠触发顺延）。"
+        f"标定期 {CALIB_BDAYS} 交易日只累积基线，不出信号。假想推演，不碰真钱。"
+    )
+    return f"""
+<section>
+  <h2>因果探测器 <span class="h-sub">N3-H 冻结规则 · 空头 up-jump × Musk 密集 · 前向虚拟推演</span></h2>
+  <div class="card">
+    <div class="det-grid">
+      {badge}
+      {leg_musk}
+      {leg_short}
+      {leg4}
+    </div>
+    {switches_html}
+    {_det_trades_html(data["trades"], now)}
+    <p class="footnote">{footnote}</p>
+  </div>
+</section>"""
+
+
 def render_health(rows: list[dict], now: datetime) -> str:
     if not rows:
         return ""
@@ -306,11 +532,23 @@ def render_health(rows: list[dict], now: datetime) -> str:
         streak_html = (
             f'<span class="crit-text num">{streak}</span>' if streak else '<span class="num">0</span>'
         )
+        w = h.get("weight")
+        if w is None:
+            weight_html = "—"
+        else:
+            t = h["tier"] if h["tier"] in TIERS else "T3"
+            weight_html = (
+                '<span class="wt-cell">'
+                f'<span class="wt-bar"><span class="wtf-{t[1]}" '
+                f'style="width:{min(1.0, max(0.0, w)) * 100:.0f}%"></span></span>'
+                f"{w:.1f}</span>"
+            )
         trs.append(
             f'<tr class="{row_cls}">'
             f"<td>{tier_badge(h['tier'])}</td>"
             f'<td class="src"><strong>{esc(h["source_id"])}</strong>'
             f'<span class="sub">{esc(h["name"])}</span></td>'
+            f'<td class="num wt">{weight_html}</td>'
             f'<td><span class="pill sm {status_cls}"><span class="dot"></span>{status_txt}</span></td>'
             f'<td class="num">{fmt_local(last_t)}<span class="sub rel" data-iso="'
             f'{esc(last_t.isoformat() if last_t else "")}">{esc(fmt_ago(last_t, now))}</span></td>'
@@ -320,11 +558,11 @@ def render_health(rows: list[dict], now: datetime) -> str:
         )
     return f"""
 <section>
-  <h2>渠道健康</h2>
+  <h2>渠道健康 <span class="h-sub">按层级 → 权重排序</span></h2>
   <div class="card">
     <div class="scroll-x">
       <table>
-        <thead><tr><th>层级</th><th>渠道</th><th>状态</th><th>最近轮询</th>
+        <thead><tr><th>层级</th><th>渠道</th><th>权重</th><th>状态</th><th>最近轮询</th>
         <th>连续失败</th><th>累计事件</th><th>备注</th></tr></thead>
         <tbody>{"".join(trs)}</tbody>
       </table>
@@ -479,6 +717,8 @@ _CSS = """
   --good: #0ca30c; --good-text: #006300;
   --warn: #fab219; --warn-text: #7a5200;
   --crit: #d03b3b; --crit-text: #b02a2a;
+  --good-wash: rgba(12,163,12,0.08);
+  --warn-wash: rgba(250,178,25,0.12);
   --crit-wash: rgba(208,59,59,0.07); --off: #898781;
   --tier0: #1c5cab; --tier0-ink: #ffffff;
   --tier1: #2a78d6; --tier1-ink: #ffffff;
@@ -495,6 +735,8 @@ _CSS = """
     --good: #0ca30c; --good-text: #0ca30c;
     --warn: #fab219; --warn-text: #fab219;
     --crit: #d03b3b; --crit-text: #e66767;
+    --good-wash: rgba(12,163,12,0.16);
+    --warn-wash: rgba(250,178,25,0.14);
     --crit-wash: rgba(208,59,59,0.14);
     --tier0: #9ec5f4; --tier0-ink: #0b0b0b;
     --tier1: #5598e7; --tier1-ink: #0b0b0b;
@@ -528,6 +770,8 @@ h3 { font-size: 13px; margin: 0 0 6px; color: var(--ink-2); font-weight: 600; }
 .stat-sub { font-size: 12px; color: var(--muted); }
 .crit-text, .crit-text .stat-value, .stat.crit-text .stat-value { color: var(--crit-text); }
 .stat.crit-text .stat-label { color: var(--crit-text); }
+.good-text { color: var(--good-text); }
+.warn-text { color: var(--warn-text); }
 
 .banner {
   margin-top: 14px; padding: 8px 12px; border: 1px solid var(--crit);
@@ -579,6 +823,54 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .tier-1 { background: var(--tier1); color: var(--tier1-ink); }
 .tier-2 { background: var(--tier2); color: var(--tier2-ink); }
 .tier-3 { background: var(--tier3); color: var(--tier3-ink); }
+
+/* ---- 探测器面板（状态用语义色：good/warn/crit，不用层级色） ---- */
+.det-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+  gap: 14px; padding: 14px;
+}
+.det-state {
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;
+  display: flex; flex-direction: column; justify-content: center; gap: 3px;
+}
+.det-state.good { background: var(--good-wash); border-color: var(--good); }
+.det-state.good .det-state-name { color: var(--good-text); }
+.det-state.warn { background: var(--warn-wash); border-color: var(--warn); }
+.det-state.warn .det-state-name { color: var(--warn-text); }
+.det-state.crit { background: var(--crit-wash); border-color: var(--crit); }
+.det-state.crit .det-state-name { color: var(--crit-text); }
+.det-state-name { font-size: 27px; font-weight: 800; letter-spacing: 0.04em;
+                  line-height: 1.15; }
+.det-state-sub { font-size: 12px; color: var(--ink-2); }
+.det-state-meta { font-size: 12px; color: var(--muted); }
+.det-state-meta .sub { display: inline; margin-left: 8px; }
+.det-leg { padding: 12px 2px; }
+.leg-label { font-size: 12px; color: var(--muted); }
+.leg-value { font-size: 24px; font-weight: 700; margin: 2px 0; }
+.leg-unit { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 5px; }
+.leg-sub { font-size: 12px; color: var(--muted); }
+.prog {
+  height: 8px; border-radius: 4px; background: var(--grid);
+  overflow: hidden; margin: 7px 0 5px; max-width: 220px;
+}
+.prog span { display: block; height: 100%; border-radius: 4px;
+             background: var(--warn); min-width: 4px; }
+.det-sub { border-top: 1px solid var(--grid); }
+.det-sub h3 { margin: 10px 14px 4px; }
+.det-sub .feed { padding-bottom: 6px; }
+.det-table { min-width: 640px; }
+
+/* ---- 渠道权重（数值条按层级色阶着色） ---- */
+td.wt { min-width: 96px; }
+.wt-cell { display: inline-flex; align-items: center; gap: 8px; }
+.wt-bar {
+  width: 52px; height: 6px; border-radius: 3px; background: var(--grid);
+  overflow: hidden; flex: none;
+}
+.wt-bar span { display: block; height: 100%; border-radius: 3px; }
+.wtf-0 { background: var(--tier0); } .wtf-1 { background: var(--tier1); }
+.wtf-2 { background: var(--tier2); } .wtf-3 { background: var(--tier3); }
+tr.row-off .wt-bar span { opacity: 0.45; }
 
 .feed { list-style: none; margin: 0; padding: 2px 0; }
 .ev {
@@ -671,6 +963,7 @@ def render(db_path: Path = DB_PATH) -> str:
         sources = load_sources(conn)
         body = [render_topbar(conn, now)]
         sections = [
+            render_detector(load_detector(conn), now),
             render_health(load_health(conn, sources), now),
             render_timeline(load_timeline(conn), now),
             render_latency(load_latency(conn), sources),
