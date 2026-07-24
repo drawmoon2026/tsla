@@ -23,13 +23,15 @@ steady-state leverage):
   equity. Deposits and sale proceeds repay the loan FIRST (single signed
   cash balance: negative = outstanding loan). Interest 6.5%/yr daily on the
   outstanding balance.
-- Second clarification: any borrow event means the human takes over, so no
-  maintenance-margin / forced-liquidation simulation. The 0% tier is the
-  fully-automated, fully-credible result. The 50%/100% tiers run in
-  "intervention-marking mode": the buy executes mechanically and interest
-  accrues (to estimate the cost), but every borrow is logged as a manual
-  intervention point; those tiers' IRRs are reference-only mechanical
-  continuations.
+- Final clarification (supersedes the intermediate "mark-only" version): the
+  loan cap is an optimization variable — grid {0, 1 month salary, 3 months
+  salary, 50% of equity, 100% of equity}. The mechanical simulation runs in
+  full. No forced-liquidation cascade is simulated, but the 30% maintenance
+  line is monitored daily: min(equity/market value) over the run and every
+  crossing below 30% is a "danger event". Combos with any danger event are
+  excluded from the recommendation list (kept in a separate high-risk group).
+  Every borrow is still logged as a manual intervention point, now with the
+  post-borrow buffer to the liquidation line attached.
 
 Headline metric: XIRR on the actual cash-flow sequence (deposits out,
 final equity in). Controls per window: DCA-hold (same deposits, buy at that
@@ -72,7 +74,15 @@ STEPS = [0.05, 0.10, 0.15]
 TPS = [0.08, 0.12, 0.20, 0.30]
 UNITS = [4167.0, 12500.0, 25000.0]          # 1 / 3 / 6 months of salary
 UNIT_LABEL = {4167.0: "1mo", 12500.0: "3mo", 25000.0: "6mo"}
-LOAN_CAPS = [0.0, 0.5, 1.0]                 # emergency credit line, frac of own equity
+# emergency credit line: (label, kind, value); "abs" = fixed $, "frac" = frac of equity
+LOAN_CAPS = [
+    ("L0", "abs", 0.0),
+    ("L1mo", "abs", 4167.0),
+    ("L3mo", "abs", 12500.0),
+    ("L50", "frac", 0.5),
+    ("L100", "frac", 1.0),
+]
+MAINT = 0.30                                 # maintenance line monitored, not enforced
 
 OUT = ROOT / "outputs" / "e13_salary_ladder"
 
@@ -142,7 +152,7 @@ def nav_drawdown(dates, equity, flows) -> float:
 
 
 def simulate_ladder(daily: pd.DataFrame, step: float, tp: float, unit: float,
-                    loan_cap: float) -> dict:
+                    cap_kind: str, cap_value: float) -> dict:
     idx = daily.index
     dep_days = deposit_days(idx)
     roll_high = daily["Close"].shift(1).rolling(HIGH_WIN).max()
@@ -151,7 +161,7 @@ def simulate_ladder(daily: pd.DataFrame, step: float, tp: float, unit: float,
     tranches: list[dict] = []
     closed: list[dict] = []
     interventions: list[dict] = []
-    eq_curve, flow_curve = [], []
+    eq_curve, flow_curve, mv_curve = [], [], []
     cf_dates, cf_amts = [], []
 
     anchor = float(daily["Open"].iloc[0])
@@ -164,6 +174,11 @@ def simulate_ladder(daily: pd.DataFrame, step: float, tp: float, unit: float,
     in_debt_prev = False
     skipped_buys = 0
     prev_date = idx[0]
+    peak_debt_equity = 0.0
+    min_margin_ratio = np.inf            # min daily equity/MV (only binds when in debt)
+    danger_events = 0                    # crossings below the 30% maintenance line
+    days_below_maint = 0
+    below_prev = False
 
     def buy(ts, fill_raw, close_px):
         """Try to fund one tranche at fill_raw. Returns True if bought."""
@@ -172,7 +187,8 @@ def simulate_ladder(daily: pd.DataFrame, step: float, tp: float, unit: float,
         equity = cash + mv
         avail_cash = max(0.0, cash)
         debt = max(0.0, -cash)
-        borrow_room = max(0.0, loan_cap * equity - debt)
+        cap = cap_value if cap_kind == "abs" else cap_value * equity
+        borrow_room = max(0.0, cap - debt)
         stake = min(unit, avail_cash + borrow_room)
         if stake < 1.0:
             skipped_buys += 1
@@ -186,13 +202,16 @@ def simulate_ladder(daily: pd.DataFrame, step: float, tp: float, unit: float,
         if borrow > 0:
             total_borrowed += borrow
             max_debt = max(max_debt, -cash)
+            mv_now = sum(t["shares"] for t in tranches) * fill_raw
+            eq_now = cash + mv_now
             interventions.append({
                 "date": ts, "borrow": round(borrow, 2), "stake": round(stake, 2),
                 "fill_price": round(fill_raw, 2),
                 "pct_below_anchor": round(fill_raw / anchor - 1, 4),
                 "cash_before": round(avail_cash, 2),
                 "debt_after": round(-cash, 2),
-                "equity": round(cash + sum(t["shares"] for t in tranches) * fill_raw, 2),
+                "equity": round(eq_now, 2),
+                "margin_ratio_after": round(eq_now / mv_now, 4) if mv_now > 0 else np.nan,
                 "n_open_tranches": len(tranches),
             })
         return True
@@ -270,8 +289,25 @@ def simulate_ladder(daily: pd.DataFrame, step: float, tp: float, unit: float,
         prev_date = ts
 
         mv = sum(t["shares"] for t in tranches) * c
-        eq_curve.append(cash + mv)
+        equity_close = cash + mv
+        eq_curve.append(equity_close)
         flow_curve.append(flow)
+        mv_curve.append(mv)
+
+        # 7) daily risk monitors (maintenance line watched, never enforced)
+        if equity_close > 0:
+            peak_debt_equity = max(peak_debt_equity, debt / equity_close)
+        if mv > 0:
+            ratio = equity_close / mv
+            min_margin_ratio = min(min_margin_ratio, ratio)
+            below = ratio < MAINT
+            if below:
+                days_below_maint += 1
+                if not below_prev:
+                    danger_events += 1
+            below_prev = below
+        else:
+            below_prev = False
 
     last_c = float(daily["Close"].iloc[-1])
     final_eq = eq_curve[-1]
@@ -302,8 +338,15 @@ def simulate_ladder(daily: pd.DataFrame, step: float, tp: float, unit: float,
         "avg_debt_episode_days": days_with_debt / debt_episodes if debt_episodes else 0.0,
         "interest_paid": interest_paid,
         "final_debt": max(0.0, -cash),
+        "peak_debt_equity": peak_debt_equity,
+        "min_margin_ratio": float(min_margin_ratio) if np.isfinite(min_margin_ratio) else np.nan,
+        "n_danger_events": danger_events,
+        "days_below_maint": days_below_maint,
         "skipped_buys": skipped_buys,
-        "_equity": pd.DataFrame({"Date": idx, "equity": eq_curve, "flow": flow_curve}),
+        "avg_invested_frac": float(np.mean(
+            [m / e for m, e in zip(mv_curve, eq_curve) if e > 0])),
+        "_equity": pd.DataFrame({"Date": idx, "equity": eq_curve, "flow": flow_curve,
+                                 "mv": mv_curve}),
         "_interventions": interventions,
         "_closed": closed_df,
     }
@@ -314,7 +357,7 @@ def simulate_dca(daily: pd.DataFrame) -> dict:
     idx = daily.index
     dep_days = deposit_days(idx)
     cash, shares = 0.0, 0.0
-    eq_curve, flow_curve, cf_dates, cf_amts = [], [], [], []
+    eq_curve, flow_curve, mv_curve, cf_dates, cf_amts = [], [], [], [], []
     for ts, row in daily.iterrows():
         o, c = float(row["Open"]), float(row["Close"])
         flow = 0.0
@@ -328,6 +371,7 @@ def simulate_dca(daily: pd.DataFrame) -> dict:
             cash = 0.0
         eq_curve.append(cash + shares * c)
         flow_curve.append(flow)
+        mv_curve.append(shares * c)
     final_eq = eq_curve[-1]
     cf_dates.append(idx[-1])
     cf_amts.append(final_eq)
@@ -336,7 +380,10 @@ def simulate_dca(daily: pd.DataFrame) -> dict:
         "final_equity": final_eq,
         "total_deposit": -sum(a for a in cf_amts[:-1]),
         "dd_twr": nav_drawdown(idx, eq_curve, flow_curve),
-        "_equity": pd.DataFrame({"Date": idx, "equity": eq_curve, "flow": flow_curve}),
+        "avg_invested_frac": float(np.mean(
+            [m / e for m, e in zip(mv_curve, eq_curve) if e > 0])),
+        "_equity": pd.DataFrame({"Date": idx, "equity": eq_curve, "flow": flow_curve,
+                                 "mv": mv_curve}),
     }
 
 
@@ -382,7 +429,6 @@ def main() -> None:
         print(f"{name}: {w.index[0].date()} .. {w.index[-1].date()}  ({len(w)} days)")
 
     grid_rows, interv_rows, curve_rows = [], [], []
-    curves_wanted = set()  # (window, key) combos whose curves we keep
 
     for wname, w in windows.items():
         # controls
@@ -401,38 +447,37 @@ def main() -> None:
         for stp in STEPS:
             for tp in TPS:
                 for unit in UNITS:
-                    for cap in LOAN_CAPS:
-                        res = simulate_ladder(w, stp, tp, unit, cap)
-                        key = f"s{int(stp*100)}_tp{int(tp*100)}_{UNIT_LABEL[unit]}_L{int(cap*100)}"
+                    for cap_label, cap_kind, cap_value in LOAN_CAPS:
+                        res = simulate_ladder(w, stp, tp, unit, cap_kind, cap_value)
+                        key = f"s{int(stp*100)}_tp{int(tp*100)}_{UNIT_LABEL[unit]}_{cap_label}"
                         grid_rows.append({
                             "window": wname, "strategy": key, "step": stp, "tp": tp,
-                            "unit": unit, "loan_cap": cap,
+                            "unit": unit, "loan_cap": cap_label,
+                            "cap_kind": cap_kind, "cap_value": cap_value,
                             **{k: v for k, v in res.items() if not k.startswith("_")},
                         })
                         for ev in res["_interventions"]:
                             interv_rows.append({"window": wname, "strategy": key,
                                                 "step": stp, "tp": tp, "unit": unit,
-                                                "loan_cap": cap, **ev})
-                        res["_equity"]["_key"] = (wname, key)
-                        # stash curve lazily; decide keepers after ranking
-                        curves_wanted.add((wname, key))
-                        # to bound memory, only keep the curve frame around via dict
-                        res_curves.setdefault((wname, key), res["_equity"])
+                                                "loan_cap": cap_label, **ev})
+                        res_curves[(wname, key)] = res["_equity"]
 
     grid = pd.DataFrame(grid_rows)
     grid.to_csv(OUT / "grid_results.csv", index=False)
     pd.DataFrame(interv_rows).to_csv(OUT / "intervention_points.csv", index=False)
 
-    # ---- keep equity curves: best-on-train (per loan tier) + user example + top W2
+    # ---- keep equity curves: best-on-train + best-on-val (per loan tier, safe
+    # combos preferred) + user example + top W2
     lad = grid[grid["step"].notna()]
-    train = lad[lad["window"] == "W1train"]
     keep = []
-    for cap in LOAN_CAPS:
-        sub = train[train["loan_cap"] == cap].sort_values("irr", ascending=False)
-        if len(sub):
-            keep.append(sub.iloc[0]["strategy"])
+    for sel_win in ["W1train", "W1val"]:
+        sub_w = lad[lad["window"] == sel_win]
+        for cap_label, _, _ in LOAN_CAPS:
+            sub = sub_w[sub_w["loan_cap"] == cap_label].sort_values("irr", ascending=False)
+            if len(sub):
+                keep.append(sub.iloc[0]["strategy"])
     keep.append("s10_tp12_3mo_L0")          # user's worked example (250 -> 280)
-    w2 = lad[(lad["window"] == "W2") & (lad["loan_cap"] == 0)]
+    w2 = lad[(lad["window"] == "W2") & (lad["loan_cap"] == "L0")]
     keep.append(w2.sort_values("irr", ascending=False).iloc[0]["strategy"])
     keep = list(dict.fromkeys(keep))
     for (wname, key), frame in res_curves.items():
