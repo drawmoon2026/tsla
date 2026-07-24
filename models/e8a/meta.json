@@ -1,0 +1,136 @@
+{
+  "strategy": "E8-A+S2",
+  "frozen_at": "2026-07-24",
+  "freeze_statement": "候选 = E8-A + S2 绑定（docs/strategy-lab.md E11 冻结声明 2026-07-24）。参数与开关规则自此不得再调；裁决权移交 shadow 前向 >= 8 周。",
+  "persisted_at": "2026-07-24T12:52:37+00:00",
+  "model": {
+    "kind": "lightgbm.LGBMClassifier",
+    "training": "a_leave_tsla_out (25 pool symbols, no TSLA)",
+    "train_end": "2025-09-30",
+    "holdout_start": "2025-10-01",
+    "seed": 42,
+    "n_train": 49032,
+    "holdout_auc": 0.6416724445845151,
+    "lgbm_params": {
+      "boosting_type": "gbdt",
+      "class_weight": null,
+      "colsample_bytree": 0.8,
+      "importance_type": "split",
+      "learning_rate": 0.05,
+      "max_depth": 3,
+      "min_child_samples": 10,
+      "min_child_weight": 0.001,
+      "min_split_gain": 0.0,
+      "n_estimators": 200,
+      "n_jobs": null,
+      "num_leaves": 7,
+      "objective": "binary",
+      "random_state": 42,
+      "reg_alpha": 0.0,
+      "reg_lambda": 1.0,
+      "subsample": 0.8,
+      "subsample_for_bin": 200000,
+      "subsample_freq": 1,
+      "deterministic": true,
+      "verbosity": -1
+    }
+  },
+  "features": [
+    "drop_pct_n",
+    "drop_speed_n",
+    "vol_ratio_trough",
+    "et_hour",
+    "open_to_now_ret_n",
+    "prev_day_ret_n",
+    "rv20_rel",
+    "bars_since_open",
+    "symbol"
+  ],
+  "symbol_categories": [
+    "AAPL",
+    "AMD",
+    "AMZN",
+    "AVGO",
+    "BA",
+    "CAT",
+    "COIN",
+    "COST",
+    "CRM",
+    "DIS",
+    "GOOGL",
+    "GS",
+    "INTC",
+    "JPM",
+    "META",
+    "MSFT",
+    "MU",
+    "NFLX",
+    "NVDA",
+    "PLTR",
+    "QCOM",
+    "TSLA",
+    "UNH",
+    "V",
+    "WMT",
+    "XOM"
+  ],
+  "tsla_rv20_med_train": 0.002499242145604026,
+  "label_spec": {
+    "tp": 0.005,
+    "sl": 0.01,
+    "horizon_bars": 24,
+    "note": "training label only; trading geometry differs"
+  },
+  "gate": {
+    "threshold": 0.43250235336744486,
+    "archived_threshold": 0.43250235336744486,
+    "provenance": "E9 gate 0.70 retention-matched quantile on the TSLA holdout signal pool (top ~10% kept), outputs/e8_pooled/frontier_shift.csv"
+  },
+  "geometry": {
+    "direction": "long_only",
+    "tp_pct": 0.005,
+    "sl_pct": 0.02,
+    "timeout_bars": 48,
+    "bar_seconds": 300,
+    "day_flat": true
+  },
+  "s2_switch": {
+    "rule": "disable entries when dd = close/rolling_max(close,252) - 1 < -0.20, evaluated on YESTERDAY's daily close (shift(1)); min_periods=252 (inactive before warm-up)",
+    "lookback_days": 252,
+    "dd_threshold": -0.2
+  },
+  "v_detection": {
+    "source": "src/v_stats.py 5m unique tables (deduped grid union)",
+    "grid": {
+      "x": [
+        0.005,
+        0.01,
+        0.02
+      ],
+      "y": [
+        0.003,
+        0.005,
+        0.01
+      ],
+      "t": [
+        12,
+        24,
+        48,
+        78
+      ]
+    },
+    "lookback": 3,
+    "lookforward": 3,
+    "max_drop_bars": 78
+  },
+  "holdout_reference": {
+    "n_trades": 62,
+    "wr": 0.8064516129032258,
+    "avg_bp": 15.965470720673224,
+    "n_trades_after_s2": 54
+  },
+  "data_files": {
+    "data/TSLA_5m_3y.csv": "b8127d1bf08e7f09e67b03f63fe9f9172607d854b0e8c8ce6358a91281eebd8b",
+    "outputs/v_events_3y/v_events_5m_unique.csv": "65507b45786234f604b91d5b72328b107d954405ab4d33a9a5a540fbd480153d"
+  }
+}

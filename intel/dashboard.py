@@ -7,16 +7,21 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
 + 等宽序号、标定环表盘 + 三灯信号组、军事地图旗标、T0-T3 色深+形状双编码。
 
 板块（等宽序号按实际渲染顺序编排）：
-  顶栏：生成时刻 / 最后事件入库时刻 / 最后轮询时刻（>30 分钟标红）+ 主题切换
-  01 态势总览（detector_state：标定环表盘 + 态势陈述 + 两腿读数卡 +
-     三灯信号组 + 最近状态切换 + 假想单判分；表缺失整面板隐藏）
-  02 战场走势（标的视图，render_symbol_view 可复用：TSLA 日线收盘
-     对数坐标折线 + 1/3/8 年时间刷 + 四层可开关旗标——避险影线带 /
-     真坑实心尖旗 / 假坑空心旗斜杠 / Musk 菱旗 / 假想单十字准星；
-     事后研究口径已注明。页面预留多标的标签栏。）
-  03 渠道健康（按 T0-T3 分组的渠道卡片，每层配 SVG 小图标）
-  04 最新情报流（最近 50 条事件时间线，行首带层级徽章）
-  05 计数与时延（层级双条计数 + 每渠道 p50→p90 对数轴标尺）
+  顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
+     （>30 分钟标红）+ 主题切换；<meta refresh> 每 5 分钟自动重载
+  01 今日合议（每日决策卡：现价 · S2 开关读数（距 252 日高回撤，E11 冻结口径）·
+     探测器状态与标定倒计时 · 策略线 shadow 健康 · 规则合成的综合一句话）
+  02 态势总览（detector_state：标定环表盘（标定倒计时）+ 态势陈述 +
+     两腿读数卡（含数据龄徽章）+ 证据等级行 + 三灯信号组 + 假想单判分；
+     表缺失整面板隐藏）
+  03 战场走势（标的视图：TSLA 日线收盘（yfinance 增量补到最新，失败降级
+     + STALE 徽章）对数坐标折线 + 1/3/8 年时间刷 + 可开关图层——图例分
+     「研究回放（事后）」区（避险影线带 / 真坑 / 假坑 / Musk 数据失明期灰底）
+     与「前向/事实（当时可知）」区（Musk 菱旗 / 假想单十字准星）；
+     坑判据写进 tooltip 与明细表。页面预留多标的标签栏。）
+  04 渠道健康（按 T0-T3 分组的渠道卡片 + 衍生信号单列；权重标注人工先验）
+  05 最新情报流（最近 50 条事件时间线，行首带层级徽章）
+  06 计数与时延（层级双条计数（ET 日口径）+ 每渠道 p50→p90 稳态口径标尺）
 
 容错：任一表/视图/CSV 缺失则跳过或置灰对应板块（图层），不炸。
 
@@ -38,8 +43,16 @@ import sqlite3
 from bisect import bisect_left
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from intel.store import DB_PATH
+
+try:  # 价格上下文（yfinance 增量 + S2 读数）；导入失败降级为"取价失败"
+    from intel.prices import get_price_context
+except Exception:  # noqa: BLE001
+    get_price_context = None  # type: ignore[assignment]
+
+ET = ZoneInfo("America/New_York")
 
 try:  # 与探测器冻结参数保持同源；导入失败退回写死值（容错，不炸仪表盘）
     from intel.detector import (
@@ -75,11 +88,21 @@ TIER_LABEL = {
 }
 
 # 探测器状态 → (语义色类, 中文短语, 一句话说明)。语义色，不用层级色。
+# RISK_ON 措辞刻意去承诺化（P0-6）：探测器只覆盖"空头知情型下跌"一类，
+# 不能说"正常持仓"——盲区声明常驻面板。
 DET_STATE = {
     "CALIBRATING": ("warn", "标定中", "累积 nitter 口径基线，不出信号"),
-    "RISK_ON": ("good", "正常持仓", "两腿未同时命中，无风险规避"),
+    "RISK_ON": ("good", "未见目标风险",
+                "未见空头知情型风险（仅覆盖此类，盲区见声明）"),
     "RISK_OFF": ("crit", "假想减仓", "空头 up-jump × Musk 密集命中"),
 }
+
+# 探测器证据等级（strategy-lab N3-H 结论，常驻面板，P0-6）
+DET_EVIDENCE = (
+    "证据等级：历史推演 2 段全对，但块 bootstrap p=0.14——仅方向性证据；"
+    "窄谱过滤器，对空头回补型/宏观型下跌失明"
+    "（如 2024-12→2025-04 的 −53.8% 整段无信号）。广谱回撤防线看「今日合议」S2 读数。"
+)
 
 
 # ---------------------------------------------------------------- utilities
@@ -166,6 +189,36 @@ def bdays_between(a: date, b: date) -> int:
             n += 1
         d += timedelta(days=1)
     return n
+
+
+def add_bdays(d: date, n: int) -> date:
+    """d 之后第 n 个工作日（n>=0；n=0 返回 d 本身或下个工作日）。"""
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    while n > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            n -= 1
+    return d
+
+
+def calib_eta(state_date: str, baseline_days: int) -> date | None:
+    """标定期满预计日：state_date 起再累积 (CALIB_BDAYS - baseline_days) 个交易日。"""
+    try:
+        sd = date.fromisoformat(state_date)
+    except (TypeError, ValueError):
+        return None
+    return add_bdays(sd, max(0, CALIB_BDAYS - baseline_days))
+
+
+def age_badge(d: date | None, now: datetime, warn_days: int, label: str = "数据龄") -> str:
+    """数据龄徽章（P0-2 全站规范）：超过 warn_days 天转黄，双倍转红。"""
+    if d is None:
+        return f'<span class="age crit">{esc(label)}未知</span>'
+    days = (now.astimezone(ET).date() - d).days
+    cls = "crit" if days > 2 * warn_days else ("warn" if days > warn_days else "")
+    txt = "今日" if days <= 0 else f"{days} 天前"
+    return f'<span class="age {cls}">{esc(label)} {txt}</span>'
 
 
 # ---------------------------------------------------------------- data pulls
@@ -284,32 +337,42 @@ def load_timeline(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
 
 
 def load_latency(conn: sqlite3.Connection) -> list[dict]:
-    """基于 v_latency 的渠道集合，p50/p90 在 Python 里补算。"""
+    """基于 v_latency 的渠道集合，p50/p90 在 Python 里补算。
+
+    P2-1 稳态口径：p50/p90 只统计"首采日次日起 observed"的增量事件——
+    首采回填（老事件今天才入库）的天文数字不再污染分位数；回填条数单列。
+    """
     if not (has_table(conn, "v_latency") and has_table(conn, "events")):
         return []
     out = []
     for r in conn.execute("SELECT * FROM v_latency ORDER BY source_id"):
-        lags = sorted(
-            x[0]
-            for x in conn.execute(
-                """SELECT (julianday(observed_time_utc) - julianday(event_time_utc))
-                          * 86400.0
-                   FROM events WHERE source_id = ?""",
-                (r["source_id"],),
-            )
+        rows = conn.execute(
+            """SELECT observed_time_utc,
+                      (julianday(observed_time_utc) - julianday(event_time_utc))
+                      * 86400.0 AS lag_s
+               FROM events WHERE source_id = ?""",
+            (r["source_id"],),
+        ).fetchall()
+        first_day = min((x["observed_time_utc"] for x in rows), default="")[:10]
+        steady = sorted(
+            x["lag_s"] for x in rows if x["observed_time_utc"][:10] > first_day
         )
         row = dict(r)
-        row["p50"] = percentile(lags, 0.50)
-        row["p90"] = percentile(lags, 0.90)
+        row["n_steady"] = len(steady)
+        row["n_backfill"] = len(rows) - len(steady)
+        row["p50"] = percentile(steady, 0.50)
+        row["p90"] = percentile(steady, 0.90)
         out.append(row)
     return out
 
 
 def load_tier_counts(conn: sqlite3.Connection, now: datetime) -> dict[str, dict]:
-    """今日（UTC 日）与近 7 日按层级的事件计数（observed 口径）。"""
+    """今日（ET 交易日口径，P2-2）与近 7 日按层级的事件计数（observed 口径）。"""
     if not (has_table(conn, "events") and has_table(conn, "sources")):
         return {}
-    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day0 = (now.astimezone(ET)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .astimezone(timezone.utc))
     week0 = now - timedelta(days=7)
     counts: dict[str, dict] = {}
     for key, since in (("today", day0), ("week", week0)):
@@ -369,6 +432,82 @@ def load_risk_segments() -> list[tuple[date, date]] | None:
         if run_start is not None and prev is not None:
             segs.append((run_start, prev))
         return segs
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_blind_segments() -> list[tuple[date, date]] | None:
+    """daily_states.csv 中 tweet_data_blind=True 连续区段（Musk 数据失明期）。
+
+    P0-3：历史推演在这些区段没有放风腿数据——图上"无避险段"≠"判定安全"。
+    """
+    try:
+        segs: list[tuple[date, date]] = []
+        run_start = prev = None
+        with STATES_CSV.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                d = date.fromisoformat(row["date"].strip())
+                if (row.get("tweet_data_blind") or "").strip().lower() in ("true", "1"):
+                    if run_start is None:
+                        run_start = d
+                    prev = d
+                elif run_start is not None:
+                    segs.append((run_start, prev))
+                    run_start = prev = None
+        if run_start is not None and prev is not None:
+            segs.append((run_start, prev))
+        return segs
+    except Exception:  # noqa: BLE001
+        return None
+
+
+SHADOW_JOURNAL = PROJECT_ROOT / "outputs" / "shadow_live" / "journal.sqlite"
+
+
+def load_shadow(now: datetime) -> dict:
+    """策略线（shadow 白跑）健康：journal.sqlite 最后运行/信号数；空则如实说。"""
+    out: dict = {"exists": SHADOW_JOURNAL.exists(), "empty": True,
+                 "last_run": None, "n_runs": 0, "n_orders": 0,
+                 "n_orders_7d": 0, "last_equity_ts": None, "error": None}
+    if not out["exists"] or SHADOW_JOURNAL.stat().st_size == 0:
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{SHADOW_JOURNAL}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "runs" in tables:
+                r = conn.execute(
+                    "SELECT COUNT(*) n, MAX(started_at) t FROM runs").fetchone()
+                out["n_runs"], out["last_run"] = r["n"], r["t"]
+            if "orders" in tables:
+                out["n_orders"] = conn.execute(
+                    "SELECT COUNT(*) FROM orders").fetchone()[0]
+                week_ago = (now - timedelta(days=7)).isoformat(timespec="seconds")
+                out["n_orders_7d"] = conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE created_at >= ?",
+                    (week_ago,)).fetchone()[0]
+            if "equity_curve" in tables:
+                out["last_equity_ts"] = conn.execute(
+                    "SELECT MAX(ts) FROM equity_curve").fetchone()[0]
+            out["empty"] = not (out["n_runs"] or out["n_orders"])
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+SHADOW_STATUS = PROJECT_ROOT / "outputs" / "shadow_status.json"
+
+
+def load_shadow_status() -> dict | None:
+    """shadow_status.json：各策略（e2/e8a）最近会话摘要，由 trading/run.py 会话结束时写。"""
+    if not SHADOW_STATUS.exists():
+        return None
+    try:
+        return json.loads(SHADOW_STATUS.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return None
 
@@ -555,6 +694,7 @@ def _render_view_svg(
     closes: list[float],
     i0: int,
     risk: list[tuple[date, date]],
+    blind: list[tuple[date, date]],
     pits: list[dict],
     buys: list[dict],
     trades: list[dict],
@@ -579,7 +719,30 @@ def _render_view_svg(
 
     parts: list[str] = []
 
-    # -- 避险底纹（最底层：状态色 wash + 45° 影线 + 虚线沿 + R 序号旗标）
+    # -- 失明期底纹（最底层，P0-3）：Musk 数据失明区段灰示——
+    #    该段历史推演无放风腿数据，"无避险段"≠"判定安全"
+    blind_rects = []
+    for a, b in blind:
+        ao, bo = max(a.toordinal(), d0o), min(b.toordinal() + 1, d1o)
+        if bo <= d0o or ao >= d1o:
+            continue
+        bx, bw = x(ao), x(bo) - x(ao)
+        tag = (
+            f'<text class="blind-tag" x="{bx + bw / 2:.1f}" y="{_MT + ph - 8}" '
+            f'text-anchor="middle">Musk 数据失明期（探测器该段无数据）</text>'
+            if bw > 250
+            else ""
+        )
+        blind_rects.append(
+            f'<rect class="blind-wash" x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" '
+            f'height="{ph}"><title>Musk 数据失明期 {a} → {b}：历史推演该段无'
+            "放风腿数据，无避险段 ≠ 判定安全</title></rect>"
+            f"{tag}"
+        )
+    if blind_rects:
+        parts.append(f'<g class="ly ly-blind">{"".join(blind_rects)}</g>')
+
+    # -- 避险底纹（状态色 wash + 45° 影线 + 虚线沿 + R 序号旗标）
     band_rects = []
     for bi, (a, b) in enumerate(risk, start=1):
         ao, bo = max(a.toordinal(), d0o), min(b.toordinal() + 1, d1o)
@@ -659,6 +822,7 @@ def _render_view_svg(
         tip = _tip_attr(
             [
                 f"{kind} · {p['date']}",
+                "判据：坑底后先收复+25%=真坑 / 先破位-10%=假坑（60日窗，事后）",
                 f"坑底收盘 {p['close']:,.2f}",
                 f"深度 {_fmt_pct_pt(p['dd'])}",
                 f"后 60 日最高 {_fmt_pct_pt(p['fwd'])}",
@@ -753,6 +917,10 @@ def _render_view_svg(
 
 # 图例芯片内嵌小样（设计稿 legendrow 的 20×14 视框微缩旗标）
 _LG_SW = {
+    "blind": (
+        '<svg viewBox="0 0 20 14" aria-hidden="true"><rect x="1" y="1" width="18" '
+        'height="12" fill="var(--muted)" opacity=".28"/></svg>'
+    ),
     "risk": (
         '<svg viewBox="0 0 20 14" aria-hidden="true"><rect x="1" y="1" width="18" '
         'height="12" fill="var(--crit-wash)" stroke="var(--crit)" stroke-width="1" '
@@ -832,6 +1000,9 @@ def _pits_table(pits: list[dict], buys_aligned: list[tuple[dict, str]]) -> str:
         return ""
     return (
         '<details class="tv-table"><summary>标注明细（表格视图）</summary>'
+        '<p class="footnote" style="margin:6px 0 4px">真假坑判据（N4 事后口径）：'
+        "坑底后 60 日内<b>先收复 +25%</b> = 真坑；<b>先破位 −10%</b> 或反弹不足 = 假坑。"
+        "「后 60 日最高」为前视指标，仅历史复盘。Musk 买入为 Form 4 申报事实（当时可知）。</p>"
         '<div class="scroll-x"><table>'
         "<thead><tr><th>类型</th><th>日期</th><th>价格</th><th>深度</th>"
         "<th>后 60 日最高</th><th>空头 6 周</th><th>Musk 趋势比</th></tr></thead>"
@@ -855,10 +1026,12 @@ def render_symbol_view(
     dates: list[date],
     closes: list[float],
     risk: list[tuple[date, date]] | None,
+    blind: list[tuple[date, date]] | None,
     pits: list[dict] | None,
     buys: list[dict] | None,
     trades: list[dict],
     has_trades_table: bool,
+    fresh_badge: str = "",
 ) -> str:
     """③ 走势与历史判断——单标的完整区块（图 + 时间刷 + 图层开关 + 明细表）。"""
     if not dates:
@@ -869,6 +1042,7 @@ def render_symbol_view(
 </section>"""
 
     risk_l = risk or []
+    blind_l = blind or []
     pits_l = pits or []
     buys_l = buys or []
     last = dates[-1]
@@ -881,7 +1055,8 @@ def render_symbol_view(
     svgs, metas = [], {}
     for vid, _, i0 in views:
         svg, meta = _render_view_svg(
-            vid, dates, closes, i0, risk_l, pits_l, buys_l, trades, active=(vid == "3y")
+            vid, dates, closes, i0, risk_l, blind_l, pits_l, buys_l, trades,
+            active=(vid == "3y"),
         )
         svgs.append(svg)
         metas[vid] = meta
@@ -909,33 +1084,52 @@ def render_symbol_view(
         trade_note = "值班期尚无记录"
     else:
         trade_note = None
-    layer_btns = "".join(
-        [
-            _layer_btn(
-                "risk", "", "避险段",
-                f"{len(risk_l)}",
-                None if risk is not None else "数据缺失", risk_title,
-            ),
-            _layer_btn(
-                "pitg", "", "真坑",
-                f"{n_gold}", None if pits is not None else "数据缺失",
-                "label=golden（事后口径）",
-            ),
-            _layer_btn(
-                "pitt", "", "假坑",
-                f"{n_trap}", None if pits is not None else "数据缺失",
-                "label=trap（事后口径）",
-            ),
-            _layer_btn(
-                "musk", "", "Musk 买入",
-                f"{len(buys_aligned)}", None if buys is not None else "数据缺失",
-                musk_note,
-            ),
-            _layer_btn(
-                "trade", "", "假想单",
-                f"{len(trades)}", trade_note, "探测器值班期的虚拟操作",
-            ),
-        ]
+    blind_title = "；".join(f"{a} → {b}" for a, b in blind_l)
+    # P0-3：图例分两区——研究回放（事后口径）不可与前向值班（当时可知）混读
+    layer_btns = (
+        '<span class="lg-zone">研究回放 · 事后口径</span>'
+        + "".join(
+            [
+                _layer_btn(
+                    "risk", "", "避险段",
+                    f"{len(risk_l)}",
+                    None if risk is not None else "数据缺失",
+                    "N3-H 历史推演 RISK_OFF 区间（研究回放，非当时值班输出）"
+                    + ("；" + risk_title if risk_title else ""),
+                ),
+                _layer_btn(
+                    "pitg", "", "真坑",
+                    f"{n_gold}", None if pits is not None else "数据缺失",
+                    "事后判据：坑底后 60 日内先收复 +25%（含前视，仅历史复盘）",
+                ),
+                _layer_btn(
+                    "pitt", "", "假坑",
+                    f"{n_trap}", None if pits is not None else "数据缺失",
+                    "事后判据：先破位 -10% 或 60 日反弹不足（含前视，仅历史复盘）",
+                ),
+                _layer_btn(
+                    "blind", "", "失明期",
+                    f"{len(blind_l)}",
+                    None if blind is not None else "数据缺失",
+                    "Musk 数据失明区段：探测器该段无放风腿数据，无避险段≠判定安全"
+                    + ("；" + blind_title if blind_title else ""),
+                ),
+            ]
+        )
+        + '<span class="lg-zone">前向 / 事实 · 当时可知</span>'
+        + "".join(
+            [
+                _layer_btn(
+                    "musk", "", "Musk 买入",
+                    f"{len(buys_aligned)}", None if buys is not None else "数据缺失",
+                    "Form 4 申报事实（当时可知）" + ("；" + musk_note if musk_note else ""),
+                ),
+                _layer_btn(
+                    "trade", "", "假想单",
+                    f"{len(trades)}", trade_note, "探测器值班期的虚拟操作（真前向）",
+                ),
+            ]
+        )
     )
     range_btns = "".join(
         f'<button class="tv-rb{" act" if vid == "3y" else ""}" '
@@ -955,7 +1149,7 @@ def render_symbol_view(
     foot_extra = f"Musk 买入 {musk_note}。" if n_unaligned else ""
     return f"""
 <section>
-  <h2><span class="sec-no">__NO__</span>战场走势<span class="h-sub">{esc(symbol)} 日线收盘（ET 交易日聚合） · 对数刻度 · {esc(str(dates[0]))} → {esc(str(last))}</span></h2>
+  <h2><span class="sec-no">__NO__</span>战场走势<span class="h-sub">{esc(symbol)} 日线收盘（ET 交易日聚合） · 对数刻度 · {esc(str(dates[0]))} → {esc(str(last))}</span>{fresh_badge}</h2>
   {render_symbol_tabs()}
   <div class="card chartcard" id="tv">
     <div class="tv-bar legendrow">
@@ -970,22 +1164,258 @@ def render_symbol_view(
     </div>
     <div class="axis-note">
       <span>纵轴 USD（对数） · 横轴日线</span>
-      <span>真坑 = 事后确认的可买入回撤底</span>
-      <span>假坑 = 形似坑、事后证伪</span>
-      <span>避险段 = 探测器 RISK_OFF 区间</span>
+      <span>真坑 = 坑底后先收复 +25%（事后）</span>
+      <span>假坑 = 先破位 −10% 或反弹不足（事后）</span>
+      <span>避险段 = 历史推演 RISK_OFF（回放）</span>
+      <span>灰底 = Musk 数据失明期</span>
     </div>
     {_pits_table(pits_l, buys_aligned)}
-    <p class="footnote">真假坑与避险区段为事后研究口径，非当时可知信号；坑的标注含前视指标
-    （后 60 日表现），仅作历史复盘。Musk 买入为 Form 4 申报事实（菱旗落在首个成交日的收盘价上）。
+    <p class="footnote">「研究回放」区（避险段/真坑/假坑/失明期）全部为事后口径：
+    坑由 N4 研究按"坑底后 60 日内先收复 +25% = 真坑、先破位 −10% = 假坑"贴标（含前视指标，
+    仅作历史复盘）；避险段是 N3-H 对历史的回放，不是当时值班输出；灰色失明区段
+    （Musk 归档止于 2025-05-08 之后至 nitter 前向覆盖前）内探测器无放风腿数据——
+    该段没有避险标记是"看不见"，不是"判定安全"。「前向/事实」区：Musk 买入为 Form 4
+    申报事实（菱旗落在首个成交日收盘价），假想单为值班期真前向记录。
     {esc(foot_extra)}价格轴为对数刻度；悬停标记看明细，悬停曲线看逐日收盘。</p>
   </div>
   <script type="application/json" id="tv-data">{data_json}</script>
 </section>"""
 
 
+# ------------------------------------------------------- 今日合议（决策卡）
+
+def render_consensus(det: dict | None, px: dict | None, shadow: dict,
+                     now: datetime) -> str:
+    """① 今日合议：现价 · S2 开关读数 · 探测器 · 策略线 · 综合一句话.
+
+    roadmap #1 / P0-1：把"我今天该怎么办"放在第一屏。规则合成，不引入新判断；
+    诚实优先——无建议时明说无建议，并给出恢复时间预估。
+    S2 = E11 压测过的全系统最强开关（距 252 交易日滚动高点回撤 >20% → 停用买入），
+    从今天起由仪表盘每次生成时计算。
+    """
+    today_et = now.astimezone(ET).date()
+    s2 = (px or {}).get("s2")
+
+    # -- ① 现价
+    if px and px.get("live_price") is not None:
+        chg = px.get("chg_pct")
+        chg_lab = ("今日" if px.get("chg_date") == today_et
+                   else f"{px.get('chg_date')} 收盘" if px.get("chg_date") else "—")
+        chg_cls = "crit-text" if (chg or 0) < 0 else "good-text"
+        cache_tag = ('<span class="age warn">缓存价（本次取价失败）</span>'
+                     if px.get("from_cache") else "")
+        cell_px = (
+            '<div class="cx-cell"><div class="cx-k">TSLA 现价</div>'
+            f'<div class="cx-v num">{px["live_price"]:,.2f}'
+            + (f' <span class="{chg_cls}">{chg:+.2f}%</span>' if chg is not None else "")
+            + "</div>"
+            f'<div class="cx-ref">{esc(chg_lab)}涨跌 · yfinance 快照 '
+            f"{age_badge(px.get('price_asof'), now, 1, '价格龄')}{cache_tag}</div></div>"
+        )
+    else:
+        err = (px or {}).get("error") or "价格模块不可用"
+        cell_px = (
+            '<div class="cx-cell crit"><div class="cx-k">TSLA 现价</div>'
+            '<div class="cx-v crit-text">取价失败</div>'
+            f'<div class="cx-ref" title="{esc(err)}">yfinance 与缓存均不可用——'
+            "现价/S2 读数本次缺席，勿当作无风险</div></div>"
+        )
+
+    # -- ② S2 开关（每日必算）
+    if s2:
+        s2_cls = " crit" if s2["triggered"] else ""
+        s2_pill = (
+            '<span class="pill sm crit"><span class="dot"></span>S2 触发</span>'
+            if s2["triggered"]
+            else '<span class="pill sm good"><span class="dot"></span>未触发</span>'
+        )
+        s2_note = (
+            f"超过 −20% 线 {abs(s2['margin_pp']):.1f} pp——E11 口径：买入策略停用区"
+            if s2["triggered"]
+            else f"距 −20% 线余量 {s2['margin_pp']:.1f} pp"
+        )
+        cell_s2 = (
+            f'<div class="cx-cell{s2_cls}"><div class="cx-k">S2 开关 · 距 252 日高回撤'
+            f"{s2_pill}</div>"
+            f'<div class="cx-v num{" crit-text" if s2["triggered"] else ""}">'
+            f'{s2["drawdown_pct"]:+.1f}%</div>'
+            f'<div class="cx-ref">252 日高 {s2["high"]:,.2f}（{esc(str(s2["high_date"]))}）· '
+            f'现值 {s2["ref_price"]:,.2f} · {esc(s2_note)}</div></div>'
+        )
+    else:
+        cell_s2 = (
+            '<div class="cx-cell crit"><div class="cx-k">S2 开关 · 距 252 日高回撤</div>'
+            '<div class="cx-v crit-text">无法计算</div>'
+            '<div class="cx-ref">价格序列不足或取价失败——今天没人替你算 S2，'
+            "这是缺口不是安全</div></div>"
+        )
+
+    # -- ③ 探测器
+    if det:
+        cur = det["cur"]
+        state = cur["state"]
+        cls, phrase, why = DET_STATE.get(state, ("off", state, ""))
+        eta = calib_eta(str(cur.get("state_date")), int(cur.get("baseline_days") or 0))
+        if state == "CALIBRATING":
+            d_txt = (f"标定中 {cur.get('baseline_days') or 0}/{CALIB_BDAYS} · "
+                     + (f"预计 {eta.strftime('%m-%d')} 恢复出信号" if eta else "期满出信号"))
+        elif state == "RISK_OFF":
+            d_txt = f"假想减仓生效 · F{PERSIST_BDAYS} 至 {cur.get('risk_off_until') or '—'}"
+        else:
+            d_txt = why
+        cell_det = (
+            '<div class="cx-cell"><div class="cx-k">探测器（窄谱避险）</div>'
+            f'<div class="cx-v"><span class="{cls}-text">{esc(phrase)}</span></div>'
+            f'<div class="cx-ref">{esc(d_txt)} · 盲区：不覆盖空头回补型/宏观型下跌'
+            "（历史证据 2 段，p=0.14）</div></div>"
+        )
+        det_state = state
+        det_eta = eta
+    else:
+        cell_det = (
+            '<div class="cx-cell crit"><div class="cx-k">探测器（窄谱避险）</div>'
+            '<div class="cx-v crit-text">无状态</div>'
+            '<div class="cx-ref">detector_state 缺失——避险侧无输出</div></div>'
+        )
+        det_state, det_eta = None, None
+
+    # -- ④ 策略线（shadow 白跑）
+    status = load_shadow_status()
+    e8a = (status or {}).get("strategies", {}).get("e8a")
+    if e8a:
+        sess_end = parse_ts(e8a.get("session_end") or "")
+        e8a_s2 = e8a.get("s2") or {}
+        s2_off = e8a_s2.get("off")
+        s_v = ("S2 停用中 · 不发买入" if s2_off
+               else f"{e8a.get('signals', 0)} 信号/会话")
+        s_cls = " warn" if s2_off else ""
+        parts = [f"E8-A+S2 已值班（{e8a.get('out_dir', 'outputs/shadow_e8a')}）"]
+        if sess_end:
+            parts.append(f"最近会话 {fmt_local(sess_end)}（{fmt_ago(sess_end, now)}）")
+        if e8a_s2.get("dd_pct") is not None:
+            parts.append(f"策略侧 S2 读数 {e8a_s2['dd_pct'] * 100:+.1f}%")
+        if e8a.get("error"):
+            s_cls, s_v = " crit", "会话异常"
+            parts.append(f"error: {e8a['error']}")
+        elif sess_end and (now - sess_end).total_seconds() > 3 * 86400:
+            s_cls = " crit"
+            parts.append("超过 3 天未运行")
+        s_ref = " · ".join(parts)
+    elif not shadow["exists"]:
+        s_v, s_ref, s_cls = "无输出", "journal.sqlite 不存在——shadow 可能从未成功运行", " crit"
+    elif shadow["empty"]:
+        s_v, s_ref, s_cls = (
+            "尚无记录",
+            "journal 存在但为空——shadow 尚无任何运行/信号记录（买入侧无输出）",
+            " crit",
+        )
+    else:
+        last_run = parse_ts(shadow["last_run"])
+        s_v = f"{shadow['n_orders_7d']} 信号/7日"
+        s_ref = (
+            f"最后运行 {fmt_local(last_run)}（{fmt_ago(last_run, now)}） · "
+            f"累计 {shadow['n_runs']} 次运行 · {shadow['n_orders']} 单"
+        )
+        s_cls = ""
+        if last_run and (now - last_run).total_seconds() > 3 * 86400:
+            s_cls = " crit"
+            s_ref += " · 超过 3 天未运行"
+    if not e8a:
+        s_ref += " · E8-A+S2 冻结候选尚未接入实时层"
+    cell_sh = (
+        f'<div class="cx-cell{s_cls}"><div class="cx-k">策略线（shadow 白跑）</div>'
+        f'<div class="cx-v{" crit-text" if s_cls == " crit" else ""}">{esc(s_v)}</div>'
+        f'<div class="cx-ref">{esc(s_ref)}</div></div>'
+    )
+
+    # -- 综合一句话（规则拼接，不引入新判断）
+    bits = []
+    if s2:
+        if s2["triggered"]:
+            bits.append(
+                f"<b class=\"crit-text\">S2 已触发</b>（回撤 {s2['drawdown_pct']:+.1f}%，"
+                "超过 −20% 线）——广谱回撤防线亮红，E11 压测口径下属买入策略停用区"
+            )
+        else:
+            bits.append(
+                f"S2 未触发（回撤 {s2['drawdown_pct']:+.1f}%，"
+                f"距 −20% 线 {s2['margin_pp']:.1f} pp）"
+            )
+    else:
+        bits.append("S2 读数缺席（取价失败）")
+    if det_state == "CALIBRATING":
+        bits.append(
+            "探测器标定中"
+            + (f"（预计 {det_eta.strftime('%m-%d')} 起值班）" if det_eta else "")
+            + "，避险侧无输出"
+        )
+    elif det_state == "RISK_OFF":
+        bits.append("探测器 RISK_OFF，假想减仓生效（窄谱）")
+    elif det_state == "RISK_ON":
+        bits.append("探测器未见空头知情型风险（仅覆盖此类）")
+    else:
+        bits.append("探测器无状态")
+    if e8a:
+        if (e8a.get("s2") or {}).get("off"):
+            bits.append("买入侧 E8-A+S2 值班中，S2 停用区内不发买入信号")
+        else:
+            bits.append(f"买入侧 E8-A+S2 值班中（本会话 {e8a.get('signals', 0)} 信号）")
+    elif shadow["empty"] or not shadow["exists"]:
+        bits.append("买入侧（shadow）无输出")
+    verdict_tail = "——<b>系统今日无正式建议</b>；以上为每日读数，供人工判断"
+    if s2 and s2["triggered"]:
+        verdict_tail = (
+            "——系统无正式买卖信号，但 <b class=\"crit-text\">S2 广谱开关处于触发区</b>"
+            "（唯一已通过压测的实时可算防线）；其余两路无输出，供人工判断"
+        )
+    verdict = "；".join(bits) + verdict_tail
+
+    return f"""
+<section>
+  <h2><span class="sec-no">__NO__</span>今日合议<span class="h-sub">每日决策卡 · {esc(str(today_et))}（ET） · 规则合成 · 诚实优先：无建议时明说无建议</span></h2>
+  <div class="card cx">
+    <div class="cx-grid">{cell_px}{cell_s2}{cell_det}{cell_sh}</div>
+    <p class="statement cx-verdict">综合：{verdict}。</p>
+    <p class="footnote">S2 定义（E11 冻结口径，研究原文 research/e11_bear_switch.py）：
+    收盘距 252 交易日滚动高点回撤超过 −20% → 停用买入策略；历史压测中是唯一显著改善
+    崩盘段亏损的开关，滞后指标、只防大势不防急跌。本卡由仪表盘每次生成时用最新价格
+    计算——S2 从今天起每天有人算。四格中任何一格标红即为当日需要人眼确认的缺口。</p>
+  </div>
+</section>"""
+
+
 # ---------------------------------------------------------------- rendering
 
-def render_topbar(conn: sqlite3.Connection, now: datetime) -> str:
+def _topbar_price(px: dict | None, now: datetime) -> str:
+    """顶栏 TSLA 现价 + 最近涨跌 + 数据龄（P0-2：决策台第一锚点）。"""
+    if not px or px.get("live_price") is None:
+        err = (px or {}).get("error") or "价格模块不可用"
+        return (
+            f'<span class="px crit-text" title="{esc(err)}">TSLA 取价失败</span>'
+        )
+    chg = px.get("chg_pct")
+    today_et = now.astimezone(ET).date()
+    chg_lab = "今日" if px.get("chg_date") == today_et else esc(
+        f"{px.get('chg_date') or '—'} 收盘"
+    )
+    chg_cls = "crit-text" if (chg or 0) < 0 else "good-text"
+    chg_html = (
+        f'<span class="{chg_cls}">{chg:+.2f}%</span>'
+        f'<span class="px-lab">{chg_lab}</span>'
+        if chg is not None else ""
+    )
+    cache_note = "（缓存价）" if px.get("from_cache") else ""
+    return (
+        f'<span class="px" title="yfinance 快照{esc(cache_note)} · '
+        f'取于 {esc(px.get("live_time_utc") or "—")}">'
+        f'TSLA <b class="num">{px["live_price"]:,.2f}</b>{chg_html}'
+        + (f'<span class="px-lab warn-text">缓存</span>' if px.get("from_cache") else "")
+        + "</span>"
+    )
+
+
+def render_topbar(conn: sqlite3.Connection, now: datetime,
+                  px: dict | None = None) -> str:
     last_obs = last_poll = None
     if has_table(conn, "events"):
         last_obs = parse_ts(
@@ -1021,6 +1451,7 @@ def render_topbar(conn: sqlite3.Connection, now: datetime) -> str:
         <div class="sub">TSLA CAUSAL SENTINEL — INTEL COMMAND</div>
       </div>
       <span class="pill {pill_cls}" id="poll-pill"><span class="dot"></span>{pill_txt}</span>
+      {_topbar_price(px, now)}
     </div>
     <div class="topmeta">
       {stat("页面生成于", now, iso_id="gen-ts")}
@@ -1113,9 +1544,13 @@ def _ring_svg(state: str, cls: str, phrase: str, cur: dict) -> tuple[str, str]:
     if state == "CALIBRATING":
         days = int(cur.get("baseline_days") or 0)
         pct = min(100.0, days / CALIB_BDAYS * 100)
+        eta = calib_eta(str(cur.get("state_date")), days)
         prog_txt = f"{days} / {CALIB_BDAYS} 交易日"
-        sub_txt = f"基线累积 {pct:.0f}% · 不出信号"
-        cap = f"标定环 · 期满出信号"
+        sub_txt = (
+            f"不出信号 · 预计 {eta.strftime('%m-%d')} 恢复" if eta
+            else f"基线累积 {pct:.0f}% · 不出信号"
+        )
+        cap = (f"标定环 · 预计 {eta} 期满出信号" if eta else "标定环 · 期满出信号")
     elif state == "RISK_OFF":
         until = None
         try:
@@ -1147,7 +1582,9 @@ def _ring_svg(state: str, cls: str, phrase: str, cur: dict) -> tuple[str, str]:
         '<circle class="prog" cx="112" cy="112" r="90" fill="none" stroke-width="8" '
         f'pathLength="100" stroke-dasharray="{pct:.1f} {100 - pct:.1f}" '
         'stroke-dashoffset="0" transform="rotate(-90 112 112)"/>'
-        f'<text class="t-state" x="112" y="106" text-anchor="middle">{esc(phrase)}</text>'
+        f'<text class="t-state" x="112" y="106" text-anchor="middle"'
+        + (' style="font-size:24px"' if len(phrase) > 4 else "")
+        + f">{esc(phrase)}</text>"
         f'<text class="t-code" x="112" y="128" text-anchor="middle">{esc(code)}</text>'
         f'<text class="t-prog" x="112" y="150" text-anchor="middle">{esc(prog_txt)}</text>'
         f'<text class="t-sub" x="112" y="166" text-anchor="middle">{esc(sub_txt)}</text>'
@@ -1160,7 +1597,7 @@ def _lamps_html(state: str) -> str:
     """三灯信号组：RISK_ON / CALIBRATING / RISK_OFF，当前态点亮。"""
     rows = []
     for st, dot_cls, zh in (
-        ("RISK_ON", "g", "正常持仓"),
+        ("RISK_ON", "g", "未见目标风险"),
         ("CALIBRATING", "w", "标定中"),
         ("RISK_OFF", "c", "假想减仓"),
     ):
@@ -1253,10 +1690,12 @@ def render_detector(data: dict | None, now: datetime) -> str:
     ring, ring_cap = _ring_svg(state, cls, phrase, cur)
 
     # -- 中栏：态势陈述 + 两腿读数
+    eta = calib_eta(str(cur.get("state_date")), int(cur.get("baseline_days") or 0))
     if state == "CALIBRATING":
         stmt = (
-            "重建 nitter 口径基线中，两腿读数仅观测、<b>不触发信号</b>；"
-            "两腿需同时命中且各自持续，方转入假想减仓。"
+            "重建 nitter 口径基线中，两腿读数仅观测、<b>不触发信号</b>"
+            + (f"（预计 <b>{eta}</b> 期满恢复出信号）" if eta else "")
+            + "；两腿需同时命中且各自持续，方转入假想减仓。"
         )
     elif state == "RISK_OFF":
         stmt = (
@@ -1265,7 +1704,8 @@ def render_detector(data: dict | None, now: datetime) -> str:
         )
     else:
         stmt = (
-            "两腿未同时命中，<b>正常持仓</b>；"
+            "两腿未同时命中——<b>未见空头知情型风险</b>"
+            "（本探测器仅覆盖此类下跌，不构成持仓建议，盲区见下方证据行）；"
             "空头利益与 Musk 发帖密度按各自周期滚动监测。"
         )
     since_bits = [f"状态日 {esc(cur['state_date'])}"]
@@ -1288,13 +1728,18 @@ def render_detector(data: dict | None, now: datetime) -> str:
         else '<span class="pill"><span class="dot"></span>未命中</span>'
     )
     a_w = min(100.0, max(0.0, (chg or 0.0) / SHORT_JUMP_PCT * 100))
+    try:
+        settle_d = date.fromisoformat(str(cur.get("short_settlement")))
+    except (TypeError, ValueError):
+        settle_d = None
     leg_a = (
         '<div class="leg"><div class="leg-h">'
         '<svg class="ic" aria-hidden="true"><use href="#i-scales"/></svg>'
         f"腿 A · 空头利益跳变{a_pill}</div>"
         f'<div class="val num">{f"{chg:+.2f}%" if chg is not None else "—"}</div>'
         f'<div class="ref">阈值 +{SHORT_JUMP_PCT:.1f}% · FINRA 双周口径 · '
-        f'结算 {esc(cur.get("short_settlement") or "—")} · 回看 {LOOKBACK_BDAYS}bd</div>'
+        f'结算 {esc(cur.get("short_settlement") or "—")} · 回看 {LOOKBACK_BDAYS}bd '
+        f'{age_badge(settle_d, now, 18)}</div>'
         f'<div class="gauge{" hit" if upjump else ""}">'
         f'<i style="width:{a_w:.1f}%"></i><span class="th"></span></div></div>'
     )
@@ -1311,12 +1756,16 @@ def render_detector(data: dict | None, now: datetime) -> str:
         b_ref = (
             f"密集阈值 {_fmt_count(thr)} 帖/日 · " if thr else "阈值未生效 · "
         ) + f"口径日 {esc(cur.get('musk_count_day') or '—')}"
+    try:
+        musk_d = date.fromisoformat(str(cur.get("musk_count_day")))
+    except (TypeError, ValueError):
+        musk_d = None
     leg_b = (
         '<div class="leg"><div class="leg-h">'
         '<svg class="ic" aria-hidden="true"><use href="#i-mega"/></svg>'
         f"腿 B · Musk 发帖密度{b_pill}</div>"
         f'<div class="val num">{_fmt_count(mc)}<span class="unit"> 帖/日</span></div>'
-        f'<div class="ref">{b_ref}</div>'
+        f'<div class="ref">{b_ref} {age_badge(musk_d, now, 2)}</div>'
         f"{_sparks_html(cur)}</div>"
     )
 
@@ -1326,6 +1775,9 @@ def render_detector(data: dict | None, now: datetime) -> str:
         f"判定冻结参数：两腿同窗命中（LOOKBACK {LOOKBACK_BDAYS}bd）且持续"
         f"（PERSIST {PERSIST_BDAYS}bd）→ RISK_OFF；假想单成本线 {COST_LINE:+.2%}。"
         "标定期读数灰示，不参与判定。</span></div>"
+        # 证据等级行（P0-6）：常驻，不随状态变化
+        '<div class="legnote evid"><svg class="ic" aria-hidden="true">'
+        f'<use href="#i-pulse"/></svg><span>{DET_EVIDENCE}</span></div>'
     )
 
     # -- 右栏：三灯组 + 最近切换 + 假想单判分小结
@@ -1351,8 +1803,10 @@ def render_detector(data: dict | None, now: datetime) -> str:
         f"空头 change_pct ≥ +{SHORT_JUMP_PCT:.0f}% 发布 → RISK_OFF 持续 "
         f"F{PERSIST_BDAYS}（{PERSIST_BDAYS} 交易日，重叠触发顺延）。"
         f"标定期 {CALIB_BDAYS} 交易日只累积基线，不出信号。假想推演，不碰真钱。"
-        "表盘进度语义：标定期 = 基线累积（设计稿方案）；正常持仓 = 放风腿密度占比、"
+        "表盘进度语义：标定期 = 基线累积（设计稿方案）；RISK_ON = 放风腿密度占比、"
         "避险期 = F 窗行进度（设计稿未预留正式期方案，自定口径）。"
+        "RISK_ON 读作「未见空头知情型风险」——本探测器仅覆盖此一类下跌，"
+        "不是持仓建议；广谱回撤防线见「今日合议」S2 读数。"
     )
     return f"""
 <section>
@@ -1390,7 +1844,7 @@ def tier_icon(tier: str | None, cls: str = "t-ic") -> str:
     )
 
 
-def _src_card(h: dict, now: datetime) -> str:
+def _src_card(h: dict, now: datetime, show_weight: bool = True) -> str:
     last = h["last"]
     if last is None:
         status_cls, status_txt, card_cls = "off", "未启用", " offline"
@@ -1410,12 +1864,12 @@ def _src_card(h: dict, now: datetime) -> str:
             status_cls, status_txt, card_cls = "good", "正常", ""
             detail = f"抓 {last['n_seen']} / 新 {last['n_new']}"
     w = h.get("weight")
-    if w is None:
+    if w is None or not show_weight:
         weight_html = ""
     else:
         t = h["tier"] if h["tier"] in TIERS else "T3"
         weight_html = (
-            '<span class="wt-cell" title="权重">'
+            '<span class="wt-cell" title="人工先验权重（身位分初值，未经四维评分）">'
             f'<span class="wt-bar"><span class="wtf-{t[1]}" '
             f'style="width:{min(1.0, max(0.0, w)) * 100:.0f}%"></span></span>'
             f'<span class="num">{w:.1f}</span></span>'
@@ -1445,12 +1899,18 @@ def _src_card(h: dict, now: datetime) -> str:
     )
 
 
+# 衍生信号（detector 等）：是"结论"不是"渠道"，移出层级矩阵单列（P0-4）
+DERIVED_SOURCE_IDS = {"detector"}
+
+
 def render_health(rows: list[dict], now: datetime) -> str:
-    """④ 渠道矩阵：按 T0-T3 分组的卡片组，每层配 SVG 小图标。"""
+    """④ 渠道矩阵：按 T0-T3 分组的卡片组 + 衍生信号单列小组。"""
     if not rows:
         return ""
+    derived = [h for h in rows if h["source_id"] in DERIVED_SOURCE_IDS]
+    channels = [h for h in rows if h["source_id"] not in DERIVED_SOURCE_IDS]
     groups: dict[str, list[dict]] = {}
-    for h in rows:  # rows 已按 tier→权重排好序
+    for h in channels:  # rows 已按 tier→权重排好序
         t = h["tier"] if h["tier"] in TIERS else "T?"
         groups.setdefault(t, []).append(h)
     blocks = []
@@ -1466,10 +1926,28 @@ def render_health(rows: list[dict], now: datetime) -> str:
             f'<span class="h-sub">{len(groups[t])} 渠道</span></div>'
             f'<div class="src-cards">{cards}</div></div>'
         )
+    if derived:
+        cards = "".join(_src_card(h, now, show_weight=False) for h in derived)
+        blocks.append(
+            f'<div class="tier-group"><div class="tier-head">{tier_icon("T0")}'
+            "<h3>衍生信号</h3>"
+            '<span class="h-sub">探测器是结论不是渠道——健康状态在此监控，'
+            "不与情报源同池排序</span></div>"
+            f'<div class="src-cards">{cards}</div></div>'
+        )
+    foot = (
+        '<p class="footnote">权重口径（P0-5 如实标注）：列示权重为建渠道时'
+        "人工拍定的<b>身位分初值</b>（人工先验），<b>不是</b>算出来的四维评分——"
+        "四维评分（身位/事实/时效/意外）尚未实现，见 docs/intel-framework.md 第二节。"
+        "分层依据 intel-framework 第一节 + strategy-lab N2：T0 布局痕迹（13D/G、Form 144、"
+        "空头利益、暗池、期权快照；Polymarket 预测市场赔率亦归此层，属资金布局痕迹而非"
+        "法定披露，口径最弱）。</p>"
+    )
     return f"""
 <section>
-  <h2><span class="sec-no">__NO__</span>渠道健康<span class="h-sub">{len(rows)} 渠道 · 按层级分组 · 组内按权重排序 · 权重 = 四维评分先验</span></h2>
+  <h2><span class="sec-no">__NO__</span>渠道健康<span class="h-sub">{len(channels)} 渠道 + {len(derived)} 衍生信号 · 按层级分组 · 组内按权重排序 · 权重 = 人工先验（未经四维评分）</span></h2>
   <div class="card">{"".join(blocks)}</div>
+  {foot}
 </section>"""
 
 
@@ -1486,10 +1964,15 @@ def render_timeline(rows: list[dict], now: datetime) -> str:
             if url
             else esc(title)
         )
+        badge = (
+            '<span class="tier tier-d" title="衍生信号（探测器结论，非情报渠道）">信号</span>'
+            if e["source_id"] in DERIVED_SOURCE_IDS
+            else tier_badge(e.get("tier"))
+        )
         items.append(
             '<li class="ev">'
             f'<span class="ev-time num" title="观察时刻（本机时区）">{fmt_local(obs)}</span>'
-            f"{tier_badge(e.get('tier'))}"
+            f"{badge}"
             f'<span class="ev-src">{esc(e["source_id"])}</span>'
             f'<span class="ev-title">{title_html}</span>'
             f'<span class="ev-type micro">{esc(e.get("type") or "")}</span>'
@@ -1545,9 +2028,8 @@ def _latency_card(rows: list[dict], sources: dict) -> str:
         notes = []
         if (r.get("lag_min_s") or 0) < 0:
             notes.append("日历预告（lag 为负 = 事件在未来，正常）")
-        interval = src.get("poll_interval_s") or 0
-        if r["p50"] is not None and interval and r["p50"] > 12 * max(interval, 300):
-            notes.append("回填主导，偏大")
+        if r.get("n_backfill"):
+            notes.append(f"另有回填 {r['n_backfill']} 条不计入分位数")
         a, b = _lat_pos(r["p50"]), _lat_pos(r["p90"])
         col = f"var(--tier{t[1]})"
         if a is not None and b is not None:
@@ -1560,20 +2042,26 @@ def _latency_card(rows: list[dict], sources: dict) -> str:
             )
         else:
             rail = '<span class="rail"><span class="base"></span></span>'
-        p50t = _fmt_lat(r["p50"])
-        p90t = _fmt_lat(r["p90"])
+        if r.get("n_steady"):
+            num_txt = f"{_fmt_lat(r['p50'])} / {_fmt_lat(r['p90'])}"
+        else:
+            num_txt = "仅回填"
         mint = fmt_dur(r["lag_min_s"]) if r.get("lag_min_s") is not None else "—"
-        title = f"n={r['n_events']:,} · 最小 {mint}" + ("；" + "；".join(notes) if notes else "")
+        title = (
+            f"稳态 n={r.get('n_steady', 0):,}（回填 {r.get('n_backfill', 0):,} 不计入）"
+            f" · 最小 {mint}" + ("；" + "；".join(notes) if notes else "")
+        )
         lrows.append(
             f'<div class="lrow" title="{esc(title)}">'
             f'<span class="lbl">{tier_badge(src.get("tier"))}'
             f'<span class="sid">{esc(sid)}</span></span>'
-            f'{rail}<span class="n">{esc(p50t)} / {esc(p90t)}</span></div>'
+            f'{rail}<span class="n">{esc(num_txt)}</span></div>'
         )
     return (
         '<div class="card duo-card"><h3><svg class="ic" aria-hidden="true">'
-        '<use href="#i-clock"/></svg>入库时延 p50 → p90</h3>'
-        '<div class="cap">observed − event · 对数轴 1m → 7d · 悬停看 n / 最小 / 备注</div>'
+        '<use href="#i-clock"/></svg>入库时延 p50 → p90（稳态口径）</h3>'
+        '<div class="cap">observed − event · 对数轴 1m → 7d · 仅首采日之后的增量事件'
+        '（回填不计入）· 悬停看 n / 最小 / 备注</div>'
         f'<div class="lat-scale">{ticks}</div>{"".join(lrows)}'
         "</div>"
     )
@@ -1600,7 +2088,7 @@ def _counts_card(counts: dict[str, dict]) -> str:
     return (
         '<div class="card duo-card"><h3><svg class="ic" aria-hidden="true">'
         '<use href="#i-pulse"/></svg>事件计数</h3>'
-        '<div class="cap">深色 = 今日（UTC 日） · 浅色 = 近 7 日 · observed 口径 · 同标尺</div>'
+        '<div class="cap">深色 = 今日（ET 交易日） · 浅色 = 近 7 日 · observed 口径 · 同标尺</div>'
         + "".join(brows)
         + "</div>"
     )
@@ -1615,9 +2103,9 @@ def render_counts_latency(
     if not (left or right):
         return ""
     foot = (
-        '<p class="footnote">时延口径注：首采期的 p50/p90 被回填支配'
-        "（老事件今天才开始观察），显著高于稳态时延；稳态 ≈ 轮询间隔 + 源侧发布延迟，"
-        "随增量事件积累自动收敛。悬停行内可见「最小」列，更接近该渠道的稳态下限。</p>"
+        '<p class="footnote">时延口径注：p50/p90 为稳态口径——只统计首采日之后 '
+        "observed 的增量事件；首采回填（老事件当天集中入库）不参与分位数，"
+        "条数见悬停备注。显示「仅回填」的渠道尚无稳态样本，等增量事件积累。</p>"
     )
     duo_cls = "duo" if (left and right) else "duo one"
     return f"""
@@ -1800,6 +2288,39 @@ h3 { font: 600 13.5px var(--font-sans); margin: 0 0 6px; color: var(--ink-2); }
 .tier-1 { background: var(--tier1); color: var(--tier1-ink); }
 .tier-2 { background: var(--tier2); color: var(--tier2-ink); }
 .tier-3 { background: var(--tier3); color: var(--tier3-ink); }
+.tier-d { background: var(--surface-2); color: var(--warn-text);
+  border-color: var(--warn); }
+
+/* ===== 顶栏现价 + 数据龄徽章（P0-2 全站规范） ===== */
+.px { display: inline-flex; align-items: baseline; gap: 7px;
+  font-family: var(--font-mono); font-size: 13px; color: var(--ink-2);
+  padding-left: 14px; border-left: 1px solid var(--border); }
+.px b { font-size: 16px; color: var(--ink); font-weight: 600; }
+.px-lab { font-size: 10.5px; color: var(--muted); letter-spacing: .04em; }
+.age { display: inline-block; font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: .05em; padding: 0 6px; border-radius: 3px;
+  border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+.age.warn { color: var(--warn-text); border-color: var(--warn);
+  background: var(--warn-wash); }
+.age.crit { color: var(--crit-text); border-color: var(--crit);
+  background: var(--crit-wash); }
+
+/* ===== 01 今日合议（决策卡） ===== */
+.cx { padding: 16px 18px 8px; }
+.cx-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 1080px){ .cx-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px){ .cx-grid { grid-template-columns: 1fr; } }
+.cx-cell { background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 12px 14px; min-width: 0; }
+.cx-cell.crit { background: var(--crit-wash); border-color: var(--crit); }
+.cx-k { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--muted); letter-spacing: .04em; }
+.cx-k .pill { margin-left: auto; }
+.cx-v { font: 600 21px/1.3 var(--font-mono); font-variant-numeric: tabular-nums;
+  margin: 6px 0 3px; color: var(--ink); }
+.cx-v .good-text, .cx-v .crit-text { font-size: 14px; }
+.cx-ref { font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+.cx-verdict { margin: 14px 2px 6px; }
 
 /* ===== 01 态势总览 hero ===== */
 .hero { display: grid; grid-template-columns: 264px minmax(0,1fr) 300px; gap: 0;
@@ -1865,6 +2386,9 @@ h3 { font: 600 13.5px var(--font-sans); margin: 0 0 6px; color: var(--ink-2); }
 .legnote { margin-top: 14px; font-size: 12px; color: var(--muted); display: flex;
   gap: 8px; align-items: flex-start; }
 .legnote svg.ic { width: 15px; height: 15px; margin-top: 2px; }
+.legnote.evid { margin-top: 8px; padding: 7px 10px; border: 1px dashed var(--border);
+  border-radius: 5px; background: var(--surface-2); }
+.legnote.evid svg.ic { color: var(--warn); }
 
 .lamps { display: flex; flex-direction: column; gap: 2px; }
 .lamp { display: flex; align-items: center; gap: 12px; padding: 9px 6px; border-radius: 6px; }
@@ -1959,6 +2483,12 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .tv-end { fill: var(--ink); }
 .tv-endlab { font-family: var(--font-mono); font-size: 11px; font-weight: 600;
   fill: var(--ink); }
+.blind-wash { fill: var(--muted); opacity: .13; }
+.blind-tag { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px;
+  fill: var(--muted); }
+.lg-zone { font-family: var(--font-mono); font-size: 10px; color: var(--muted);
+  letter-spacing: .08em; padding: 2px 0 2px 10px; border-left: 2px solid var(--border);
+  white-space: nowrap; align-self: center; }
 .band-wash { fill: var(--crit-wash); }
 .band-edge { stroke: var(--crit); stroke-width: 1; stroke-dasharray: 3 3; opacity: .6; }
 .band-tag { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px;
@@ -1970,7 +2500,8 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .xh line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; }
 .xh circle { fill: none; stroke: var(--ink); stroke-width: 1.6; }
 #tv.hide-risk .ly-risk, #tv.hide-pitg .ly-pitg, #tv.hide-pitt .ly-pitt,
-#tv.hide-musk .ly-musk, #tv.hide-trade .ly-trade { display: none; }
+#tv.hide-musk .ly-musk, #tv.hide-trade .ly-trade,
+#tv.hide-blind .ly-blind { display: none; }
 #tv-tip { position: absolute; z-index: 5; pointer-events: none;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
   padding: 6px 10px; font-family: var(--font-mono); font-size: 11.5px;
@@ -2256,14 +2787,53 @@ def render(db_path: Path = DB_PATH) -> str:
         sources = load_sources(conn)
         det = load_detector(conn)
         has_trades_table = has_table(conn, "detector_trades")
-        body = [_ICON_SPRITE, render_topbar(conn, now)]
-        dates, closes = load_daily_closes()
+
+        # -- 价格上下文：CSV 日线 + yfinance 增量 + 现价 + S2（失败降级，P0-2）
+        csv_dates, csv_closes = load_daily_closes()
+        px: dict | None = None
+        if get_price_context is not None:
+            try:
+                px = get_price_context(csv_dates, csv_closes, now=now)
+            except Exception:  # noqa: BLE001
+                px = None
+        dates, closes = (px["dates"], px["closes"]) if px else (csv_dates, csv_closes)
+
+        # -- 走势图价格新鲜度徽章（>1 交易日转红，P0-2）
+        fresh_badge = ""
+        if dates:
+            today_et = now.astimezone(ET).date()
+            stale_bd = bdays_between(dates[-1], today_et)
+            if px is None or (px.get("error") and not px.get("from_cache")):
+                fresh_badge = (
+                    '<span class="pill sm crit"><span class="dot"></span>'
+                    f"STALE · 增量更新失败 · 价格截至 {esc(str(dates[-1]))}</span>"
+                )
+            elif stale_bd > 1:
+                fresh_badge = (
+                    '<span class="pill sm crit"><span class="dot"></span>'
+                    f"STALE · 价格截至 {esc(str(dates[-1]))} · 已滞后 {stale_bd} 交易日</span>"
+                )
+            elif stale_bd == 1:
+                fresh_badge = (
+                    f'<span class="pill sm"><span class="dot"></span>'
+                    f"价格截至 {esc(str(dates[-1]))}（最近收盘）</span>"
+                )
+            else:
+                fresh_badge = (
+                    '<span class="pill sm good"><span class="dot"></span>'
+                    "价格已更新至今日</span>"
+                )
+
+        shadow = load_shadow(now)
+        body = [_ICON_SPRITE, render_topbar(conn, now, px)]
         symbol_block = render_symbol_view(
             "TSLA", dates, closes,
-            load_risk_segments(), load_pits(), load_musk_buys(),
-            det["trades"] if det else [], has_trades_table,
+            load_risk_segments(), load_blind_segments(), load_pits(),
+            load_musk_buys(),
+            det["trades"] if det else [], has_trades_table, fresh_badge,
         )
         sections = [
+            render_consensus(det, px, shadow, now),
             render_detector(det, now),
             symbol_block,
             render_health(load_health(conn, sources), now),
@@ -2298,6 +2868,7 @@ def render(db_path: Path = DB_PATH) -> str:
         "<!DOCTYPE html>\n"
         '<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta http-equiv="refresh" content="300">\n'
         "<title>因果探测器 · 哨兵</title>\n"
         f"<style>{_CSS}</style>\n</head>\n<body>\n"
         + "\n".join(body)

@@ -37,6 +37,7 @@ from trading.core.types import Bar, Fill, Order, OrderSide, OrderType, Position
 from trading.data.bar_builder import aggregate
 from trading.data.feed import DataFeed
 from trading.data.historical import HistoricalFeed
+from trading.persistence.status import write_shadow_status
 from trading.persistence.store import Store
 from trading.portfolio.portfolio import Portfolio
 from trading.risk.manager import Halt, RiskLimits, RiskManager
@@ -77,6 +78,10 @@ class Runner:
         self._brackets: dict[str, list[str]] = {}   # symbol -> resting exit ids
         self._open_trade: Optional[dict] = None
         self.trades: list[dict] = []
+        self.started_at = clock.now()
+        self._bars_seen = 0
+        self._n_signals = 0
+        self._last_signal_at: Optional[datetime] = None
         broker.set_callbacks(self._on_fill, self._on_order_update, self._on_error)
 
     # -- main loop ---------------------------------------------------------
@@ -88,6 +93,7 @@ class Runner:
             if isinstance(self.clock, SimClock):
                 self.clock.advance(bar.start + timedelta(seconds=bar.duration_s))
             self._bars.append(bar)
+            self._bars_seen += 1
             if self.cfg.mode != "backtest":
                 # forward-run journal: bar + feed-health snapshot at receipt
                 # (shadow_report replays these for hypothetical fills)
@@ -124,6 +130,8 @@ class Runner:
                     # = signal-bar end + ttl window
                 self._pending_entries[order.id] = (intent, deadline)
                 self._submit(order)
+                self._n_signals += 1
+                self._last_signal_at = order.created_at
         return self._finalize()
 
     def _submit(self, order: Order) -> None:
@@ -226,7 +234,29 @@ class Runner:
         summary += f" | feed gaps: {self.feed.health().gap_count}"
         (out / "summary.txt").write_text(summary + "\n", encoding="utf-8")
         print(summary)
+        if self.cfg.mode == "shadow":
+            self.write_status()
         return trades
+
+    def write_status(self, error: Optional[str] = None) -> None:
+        """Shadow heartbeat -> outputs/shadow_status.json (P0-1/P1-9)."""
+        info = getattr(self.strategy, "status_info", None) or {}
+        write_shadow_status({
+            "strategy": self.cfg.strategy_name,
+            "mode": self.cfg.mode,
+            "live": bool(self.cfg.live),
+            "out_dir": self.cfg.out_dir,
+            "session_start": self.started_at.isoformat(),
+            "session_end": self.clock.now().isoformat(),
+            "bars": self._bars_seen,
+            "gap_count": self.feed.health().gap_count,
+            "signals": self._n_signals,
+            "last_signal_at": (self._last_signal_at.isoformat()
+                               if self._last_signal_at else None),
+            "halted": self.risk.halted,
+            "s2": info.get("s2"),
+            "error": error,
+        }, strategy=self.cfg.strategy_name)
 
 
 def build(mode: str, cfg: Config) -> Runner:
@@ -261,12 +291,21 @@ def build(mode: str, cfg: Config) -> Runner:
     else:
         raise ValueError(f"unknown mode: {mode}")
 
-    strategy = VReversalStrategy(
-        symbol=cfg.symbol,
-        trigger=cfg.strategy.trigger, tp=cfg.strategy.tp, sl=cfg.strategy.sl,
-        allowed_hours=cfg.strategy.allowed_hours,
-        signal_seconds=cfg.strategy.signal_seconds,
-    )
+    if cfg.strategy_name == "e8a":
+        # lazy import: pulls in lightgbm/joblib + the frozen model artifact
+        from trading.strategy.e8a_v_reversal import E8AVReversalStrategy
+        strategy: Strategy = E8AVReversalStrategy(
+            symbol=cfg.symbol, live_backfill=cfg.live,
+        )
+    elif cfg.strategy_name == "e2":
+        strategy = VReversalStrategy(
+            symbol=cfg.symbol,
+            trigger=cfg.strategy.trigger, tp=cfg.strategy.tp, sl=cfg.strategy.sl,
+            allowed_hours=cfg.strategy.allowed_hours,
+            signal_seconds=cfg.strategy.signal_seconds,
+        )
+    else:
+        raise ValueError(f"unknown strategy_name: {cfg.strategy_name}")
     limits = RiskLimits(
         max_position_pct=cfg.risk.max_position_pct,
         per_trade_risk_pct=cfg.risk.per_trade_risk_pct,

@@ -1,4 +1,4 @@
-"""EDGAR T0 采集器：TSLA 的 SC 13D/13G（含 /A）与 Form 144（布局痕迹层，T1）.
+"""EDGAR T0 采集器：TSLA 的 SC 13D/13G（含 /A）与 Form 144（布局痕迹层，T0）.
 
 通道：与 edgar.py 相同的 data.sec.gov submissions API（免 key，acceptanceDateTime 口径）。
 13D/G 与 Form 144 都以 TSLA 为 subject company，出现在 TSLA 的 submissions 列表里
@@ -91,7 +91,7 @@ class EdgarT0Collector(Collector):
     SOURCE = {
         "source_id": "edgar_t0",
         "name": "SEC EDGAR TSLA SC13D/G + Form144 (submissions API)",
-        "tier": "T1",
+        "tier": "T0",
         "method": "api",
         "poll_interval_s": 300,
         "cost": "free",

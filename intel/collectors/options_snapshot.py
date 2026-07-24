@@ -65,7 +65,7 @@ class OptionsSnapshotCollector(Collector):
     SOURCE = {
         "source_id": "options_snapshot",
         "name": "TSLA full option chain daily snapshot (yfinance)",
-        "tier": "T1",
+        "tier": "T0",
         "method": "api",
         "poll_interval_s": 86400,
         "cost": "free",

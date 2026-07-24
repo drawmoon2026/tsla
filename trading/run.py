@@ -47,6 +47,10 @@ def main() -> None:
                     help="live: exit after the 16:00 ET close instead of waiting overnight")
     ap.add_argument("--max-bars", type=int, default=None,
                     help="live: stop after N bars (bounded smoke runs)")
+    # strategy selection: e2 = 1H breakout-follow (default, existing launchd);
+    # e8a = frozen E8-A+S2 candidate (models/e8a, docs/strategy-lab.md E11)
+    ap.add_argument("--strategy", default="e2", choices=["e2", "e8a"],
+                    help="Strategy line (default e2; e8a = E8-A+S2 GBDT V-rebound)")
     # strategy overrides (E2 candidate: --trigger 0.0173 --tp 0.0285 --sl 0.0148)
     ap.add_argument("--trigger", type=float, default=None, help="Override strategy.trigger")
     ap.add_argument("--tp", type=float, default=None, help="Override strategy.tp")
@@ -64,6 +68,7 @@ def main() -> None:
     cfg.live = args.live
     cfg.once_session = args.once_session
     cfg.max_bars = args.max_bars
+    cfg.strategy_name = args.strategy
     if args.trigger is not None:
         cfg.strategy.trigger = args.trigger
     if args.tp is not None:
@@ -72,7 +77,13 @@ def main() -> None:
         cfg.strategy.sl = args.sl
 
     runner = build(args.mode, cfg)
-    runner.run()
+    try:
+        runner.run()
+    except Exception as exc:
+        # P0-1/P1-9: a crashed shadow session must still leave a heartbeat
+        if args.mode == "shadow":
+            runner.write_status(error=repr(exc))
+        raise
 
 
 if __name__ == "__main__":

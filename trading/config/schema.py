@@ -44,6 +44,7 @@ class RiskCfg:
 @dataclass
 class Config:
     mode: str = "backtest"
+    strategy_name: str = "e2"            # "e2" (1H breakout) | "e8a" (E8-A+S2)
     symbol: str = "TSLA"
     capital: float = 10_000.0
     bar_seconds: int = 300

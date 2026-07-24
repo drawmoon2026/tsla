@@ -42,13 +42,14 @@ class PolymarketCollector(Collector):
     SOURCE = {
         "source_id": "polymarket",
         "name": "Polymarket Tesla/Musk markets odds snapshot",
-        "tier": "T3",
+        "tier": "T0",
         "method": "api",
         "poll_interval_s": 86400,
         "cost": "free",
         "weight_source": 0.4,
         "notes": "快照型渠道：event_time=抓取时刻，每市场每日一条赔率快照；"
-                 "关键词 tesla/tsla/musk，流动性>=100 USD",
+                 "关键词 tesla/tsla/musk，流动性>=100 USD；"
+                 "归 T0：预测市场赔率视为资金布局痕迹（非法定披露，注意口径差）",
     }
 
     def fetch(self):

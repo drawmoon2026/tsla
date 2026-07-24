@@ -147,7 +147,7 @@ class FinraAtsCollector(Collector):
     SOURCE = {
         "source_id": "finra_ats",
         "name": "FINRA OTC transparency TSLA ATS/OTC weekly",
-        "tier": "T1",
+        "tier": "T0",
         "method": "api",
         "poll_interval_s": 86400,
         "cost": "free",

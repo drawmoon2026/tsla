@@ -78,7 +78,7 @@ class FinraShortCollector(Collector):
     SOURCE = {
         "source_id": "finra_short",
         "name": "FINRA consolidated short interest TSLA (biweekly)",
-        "tier": "T1",
+        "tier": "T0",
         "method": "api",
         "poll_interval_s": 86400,
         "cost": "free",

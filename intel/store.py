@@ -28,7 +28,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     source_id        TEXT PRIMARY KEY,
     name             TEXT NOT NULL,
-    tier             TEXT NOT NULL CHECK (tier IN ('T1','T2','T3')),
+    tier             TEXT NOT NULL CHECK (tier IN ('T0','T1','T2','T3')),
     method           TEXT NOT NULL,            -- rss / api / scrape / paid_pending
     poll_interval_s  INTEGER NOT NULL,
     cost             TEXT NOT NULL DEFAULT 'free',
@@ -83,10 +83,44 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _migrate_sources_tier_t0(conn: sqlite3.Connection) -> None:
+    """兼容迁移：旧库 sources.tier CHECK 不含 T0 → 重建表放开（保留数据）.
+
+    SQLite 改 CHECK 只能重建表。events 的外键按表名引用 sources，
+    先建新表→搬数据→删旧表→改名，数据与外键引用均不受影响。
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'sources' AND type = 'table'"
+    ).fetchone()
+    if row is None or "'T0'" in (row[0] or ""):
+        return  # 表不存在（executescript 会建新版）或已是新版
+    conn.executescript(
+        """
+        PRAGMA foreign_keys=OFF;
+        BEGIN;
+        CREATE TABLE sources_new (
+            source_id        TEXT PRIMARY KEY,
+            name             TEXT NOT NULL,
+            tier             TEXT NOT NULL CHECK (tier IN ('T0','T1','T2','T3')),
+            method           TEXT NOT NULL,
+            poll_interval_s  INTEGER NOT NULL,
+            cost             TEXT NOT NULL DEFAULT 'free',
+            weight_source    REAL NOT NULL DEFAULT 0.5,
+            notes            TEXT DEFAULT ''
+        );
+        INSERT INTO sources_new SELECT * FROM sources;
+        DROP TABLE sources;
+        ALTER TABLE sources_new RENAME TO sources;
+        COMMIT;
+        """
+    )
+
+
 def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
+    _migrate_sources_tier_t0(conn)
     conn.executescript(_SCHEMA)
     return conn
 
