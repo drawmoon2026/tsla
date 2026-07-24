@@ -15,3 +15,6 @@ daily_v_count.csv
 v_events_*.csv
 v_summary.csv
 zigzag_*.csv
+
+# 密钥
+.env

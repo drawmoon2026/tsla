@@ -69,6 +69,7 @@
 
 ## Phase 5：上线路径
 
-1. shadow 模式影子对账（实时信号 vs 回测重放，diff 到零）——原型已可用，待 LiveFeed
-2. Alpaca paper trading ≥ 2–4 周（验证断线恢复、状态机、对账）
-3. 小仓位实盘（paper→live 只换 broker key）；实盘滑点 vs SimBroker 假设周度复盘
+1. ✅ **LiveFeed 实装完成（2026-07-23）**：AlpacaPollingFeed（IEX 实时轮询、断线退避、缺口检测、回填）+ `--mode shadow --live` + `shadow_report.py` 周报工具；真实开盘数据验证通过（3 根实时 bar、lag ~18s、报告器与回测引擎逐笔对账一致）。注意：实时 IEX vs 回测 SIP 口径差异、PyYAML 未装须 CLI 传参（详见代理汇报/代码 docstring）
+2. 🔄 shadow 前向白跑 ≥8 周（候选：E2、combo 392；E8-A 须先解决熊市开关议题）——启动命令见 run.py docstring，固定 `--out outputs/shadow_live` 累积
+3. Alpaca paper trading ≥ 2–4 周（AlpacaBroker 实装 + 断线恢复 + 对账）
+4. 小仓位实盘（paper→live 只换 broker key）；实盘滑点 vs SimBroker 假设周度复盘
