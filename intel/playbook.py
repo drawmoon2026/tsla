@@ -871,14 +871,15 @@ def _situation_html(live: float, px: dict, s2: dict, pos: dict,
 
 _LIGHT_TOKENS = """
   color-scheme: light;
-  --bg:#f9f9f7; --surface:#fcfcfb; --surface-2:#f2f1ec;
-  --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
-  --border:rgba(11,11,11,.10); --grid:#e1e0d9; --baseline:#c3c2b7;
-  --good:#0ca30c; --good-text:#006300; --good-wash:rgba(12,163,12,.08);
-  --warn:#fab219; --warn-text:#7a5200; --warn-wash:rgba(250,178,25,.14);
-  --crit:#d03b3b; --crit-text:#b02a2a; --crit-wash:rgba(208,59,59,.07);
-  --sys:#1c5cab; --sys-wash:rgba(28,92,171,.07);
-  --link:#1c5cab;
+  --bg:#f6f8fa; --surface:#fcfdfe; --surface-2:#eef2f5;
+  --ink:#0c1216; --ink-2:#46545f; --muted:#78868f;
+  --border:rgba(12,25,35,.12); --grid:#dee5ea; --baseline:#becad2;
+  --good:#059669; --good-text:#047857; --good-wash:rgba(5,150,105,.09);
+  --warn:#f59e0b; --warn-text:#b45309; --warn-wash:rgba(245,158,11,.14);
+  --crit:#dc2626; --crit-text:#b91c1c; --crit-wash:rgba(220,38,38,.08);
+  --sys:#0e7490; --sys-wash:rgba(8,145,178,.08);
+  --sys-rule:rgba(14,116,144,.30);
+  --link:#0e7490;
 """
 
 # 视觉 token 沿用 intel/dashboard.py 的设计稿色板（暗默认/亮覆盖、宋体衬线
@@ -886,14 +887,15 @@ _LIGHT_TOKENS = """
 _CSS = """
 :root {
   color-scheme: dark;
-  --bg:#0d0d0d; --surface:#1a1a19; --surface-2:#232322;
-  --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
-  --border:rgba(255,255,255,.10); --grid:#2c2c2a; --baseline:#383835;
-  --good:#0ca30c; --good-text:#0ca30c; --good-wash:rgba(12,163,12,.16);
-  --warn:#fab219; --warn-text:#fab219; --warn-wash:rgba(250,178,25,.13);
-  --crit:#d03b3b; --crit-text:#e66767; --crit-wash:rgba(208,59,59,.14);
-  --sys:#5598e7; --sys-wash:rgba(85,152,231,.10);
-  --link:#86b6ef;
+  --bg:#0b0e11; --surface:#14181d; --surface-2:#1c232a;
+  --ink:#f2f7fa; --ink-2:#b6c2cb; --muted:#7d8b95;
+  --border:rgba(255,255,255,.11); --grid:#232b32; --baseline:#39434c;
+  --good:#10b981; --good-text:#34d399; --good-wash:rgba(16,185,129,.15);
+  --warn:#fbbf24; --warn-text:#fbbf24; --warn-wash:rgba(251,191,36,.13);
+  --crit:#ef4444; --crit-text:#f87171; --crit-wash:rgba(239,68,68,.15);
+  --sys:#22d3ee; --sys-wash:rgba(34,211,238,.10);
+  --sys-rule:rgba(34,211,238,.28);
+  --link:#22d3ee;
   --font-serif:"Songti SC","STSong","Noto Serif CJK SC","Source Han Serif SC",serif;
   --font-sans:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
@@ -924,15 +926,15 @@ h1 { font: 600 21px/1.3 var(--font-serif); margin: 0; letter-spacing: .04em; }
 .themebtn { font: 12px/1 var(--font-mono); letter-spacing: .1em; color: var(--ink-2);
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
   padding: 7px 12px; cursor: pointer; }
-.themebtn:hover { color: var(--ink); border-color: var(--muted); }
+.themebtn:hover { color: var(--sys); border-color: var(--sys); }
 a.backbtn { text-decoration: none; display: inline-flex; align-items: center; margin-right: 8px; }
 
 section { margin-top: 40px; }
 h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px;
   font: 600 17px/1.4 var(--font-serif); letter-spacing: .05em; flex-wrap: wrap; }
-h2 .sec-no { font: 400 11px var(--font-mono); letter-spacing: .18em; color: var(--muted); }
+h2 .sec-no { font: 400 11px var(--font-mono); letter-spacing: .18em; color: var(--sys); }
 h2 .h-sub { font: 400 12px var(--font-sans); color: var(--muted); }
-h2::after { content: ""; flex: 1; border-top: 1px solid var(--border);
+h2::after { content: ""; flex: 1; border-top: 1px solid var(--sys-rule);
   align-self: center; margin-left: 6px; min-width: 40px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
 
@@ -976,7 +978,7 @@ h2::after { content: ""; flex: 1; border-top: 1px solid var(--border);
 .root-line { font: 600 14px/1.6 var(--font-serif); color: var(--ink);
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface-2); }
-.root-line .rp { font-family: var(--font-mono); font-weight: 600; }
+.root-line .rp { font-family: var(--font-mono); font-weight: 600; color: var(--sys); }
 .node { position: relative; margin-top: 14px; padding: 10px 12px 10px 14px;
   border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .node.up   { border-left: 3px solid var(--good); }
