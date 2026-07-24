@@ -2,17 +2,21 @@
 
 读 data/intel/sentinel.sqlite（只读，mode=ro），渲染完全自包含的
 data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直接打开。
+视觉语言合并自设计稿 data/intel/dashboard_design.html（v1.0，存档保留）：
+暗色默认 + 亮色（尊重 prefers-color-scheme，页内可切换）、宋体衬线板块题
++ 等宽序号、标定环表盘 + 三灯信号组、军事地图旗标、T0-T3 色深+形状双编码。
 
-板块（按信息层级）：
-  1. 顶栏：生成时刻 / 最后事件入库时刻 / 最后轮询时刻（>30 分钟标红）
-  2. 因果探测器（detector_state 当前状态 + 两腿读数 + 标定进度/阈值
-     + 最近状态切换 + 假想单判分；表缺失整面板隐藏）
-  3. 走势与历史判断（标的视图，render_symbol_view 可复用：TSLA 日线收盘
-     对数坐标折线 + 1/3/8 年时间刷 + 四层可开关标注——避险底纹 / 真假坑 /
-     Musk 买入 / 假想单；事后研究口径已注明。页面预留多标的标签栏。）
-  4. 渠道矩阵（按 T0-T3 分组的渠道卡片，每层配 SVG 小图标）
-  5. 最新情报流（最近 50 条事件时间线，行首带层级小图标）+ 时延统计
-  6. 今日/近 7 日事件计数按层级条形图（内联 SVG）
+板块（等宽序号按实际渲染顺序编排）：
+  顶栏：生成时刻 / 最后事件入库时刻 / 最后轮询时刻（>30 分钟标红）+ 主题切换
+  01 态势总览（detector_state：标定环表盘 + 态势陈述 + 两腿读数卡 +
+     三灯信号组 + 最近状态切换 + 假想单判分；表缺失整面板隐藏）
+  02 战场走势（标的视图，render_symbol_view 可复用：TSLA 日线收盘
+     对数坐标折线 + 1/3/8 年时间刷 + 四层可开关旗标——避险影线带 /
+     真坑实心尖旗 / 假坑空心旗斜杠 / Musk 菱旗 / 假想单十字准星；
+     事后研究口径已注明。页面预留多标的标签栏。）
+  03 渠道健康（按 T0-T3 分组的渠道卡片，每层配 SVG 小图标）
+  04 最新情报流（最近 50 条事件时间线，行首带层级徽章）
+  05 计数与时延（层级双条计数 + 每渠道 p50→p90 对数轴标尺）
 
 容错：任一表/视图/CSV 缺失则跳过或置灰对应板块（图层），不炸。
 
@@ -144,8 +148,24 @@ def percentile(sorted_vals: list[float], q: float) -> float | None:
 
 
 def tier_badge(tier: str | None) -> str:
+    """层级徽章：色深 + ◆▲●○ 形状双编码（设计稿 §一）。"""
     t = tier if tier in TIERS else "T3"
-    return f'<span class="tier tier-{t[1]}">{esc(tier or "T?")}</span>'
+    return (
+        f'<span class="tier tier-{t[1]}"><svg aria-hidden="true">'
+        f'<use href="#g-t{t[1]}"/></svg>{esc(tier or "T?")}</span>'
+    )
+
+
+def bdays_between(a: date, b: date) -> int:
+    """[a, b) 间的工作日数（周一至周五，近似交易日）。"""
+    if b <= a:
+        return 0
+    n, d = 0, a
+    while d < b:
+        if d.weekday() < 5:
+            n += 1
+        d += timedelta(days=1)
+    return n
 
 
 # ---------------------------------------------------------------- data pulls
@@ -466,6 +486,69 @@ def _tip_attr(lines: list[str]) -> str:
     return "|".join(lines)
 
 
+# ---- 军事地图式旗标（设计稿 §02：halo → 杆 → 旗；颜色走 --m-* token）----
+
+def _mk_halo(inner: str) -> str:
+    return f'<g class="mk-halo">{inner}</g>'
+
+
+def _mk_pit(x: float, y: float, solid: bool, color: str) -> str:
+    """尖旗，杆朝下：真坑实心 / 假坑空心加斜杠。"""
+    pole = f'M{x:.1f} {y + 4:.1f} V{y + 21:.1f}'
+    flag = (
+        f'M{x:.1f} {y + 21:.1f} L{x + 9:.1f} {y + 16.2:.1f} L{x:.1f} {y + 11.4:.1f} Z'
+    )
+    g = _mk_halo(f'<path d="{pole}"/><path d="{flag}"/>')
+    g += f'<path d="{pole}" stroke="{color}" stroke-width="1.6" fill="none"/>'
+    g += (
+        f'<path d="{flag}" fill="{color}" stroke="none"/>'
+        if solid
+        else f'<path d="{flag}" fill="none" stroke="{color}" stroke-width="1.5"/>'
+    )
+    if not solid:
+        g += (
+            f'<path d="M{x - 3.4:.1f} {y + 22.5:.1f} L{x + 7.4:.1f} {y + 9:.1f}" '
+            f'stroke="{color}" stroke-width="1.5" fill="none"/>'
+        )
+    return g
+
+
+def _mk_diamond(x: float, y: float, color: str) -> str:
+    """菱旗，杆朝上：内部人买入。"""
+    pole = f'M{x:.1f} {y - 4:.1f} V{y - 17:.1f}'
+    dm = (
+        f'M{x:.1f} {y - 27:.1f} L{x + 5:.1f} {y - 22:.1f} L{x:.1f} {y - 17:.1f} '
+        f'L{x - 5:.1f} {y - 22:.1f} Z'
+    )
+    return (
+        _mk_halo(f'<path d="{pole}"/><path d="{dm}"/>')
+        + f'<path d="{pole}" stroke="{color}" stroke-width="1.6" fill="none"/>'
+        + f'<path d="{dm}" fill="{color}" stroke="none"/>'
+    )
+
+
+def _mk_cross(x: float, y: float, tag: str, color: str) -> str:
+    """十字准星 + 虚线杆 + 编号：假想单。"""
+    cy = y - 38
+    g = _mk_halo(f'<circle cx="{x:.1f}" cy="{cy:.1f}" r="7.5"/>')
+    g += (
+        f'<path d="M{x:.1f} {y - 4:.1f} V{cy + 9:.1f}" stroke="{color}" '
+        'stroke-width="1.4" stroke-dasharray="3 2.4" fill="none"/>'
+    )
+    g += f'<circle cx="{x:.1f}" cy="{cy:.1f}" r="7.5" fill="none" stroke="{color}" stroke-width="1.6"/>'
+    g += f'<circle cx="{x:.1f}" cy="{cy:.1f}" r="1.6" fill="{color}"/>'
+    for dx1, dy1, dx2, dy2 in ((0, -11, 0, -6), (0, 6, 0, 11), (-11, 0, -6, 0), (6, 0, 11, 0)):
+        g += (
+            f'<path d="M{x + dx1:.1f} {cy + dy1:.1f} L{x + dx2:.1f} {cy + dy2:.1f}" '
+            f'stroke="{color}" stroke-width="1.6" fill="none"/>'
+        )
+    g += (
+        f'<text x="{x + 12:.1f}" y="{cy - 8:.1f}" class="mk-tag" '
+        f'fill="{color}">{esc(tag)}</text>'
+    )
+    return g
+
+
 def _render_view_svg(
     vid: str,
     dates: list[date],
@@ -496,15 +579,27 @@ def _render_view_svg(
 
     parts: list[str] = []
 
-    # -- 避险底纹（最底层）
+    # -- 避险底纹（最底层：状态色 wash + 45° 影线 + 虚线沿 + R 序号旗标）
     band_rects = []
-    for a, b in risk:
+    for bi, (a, b) in enumerate(risk, start=1):
         ao, bo = max(a.toordinal(), d0o), min(b.toordinal() + 1, d1o)
         if bo <= d0o or ao >= d1o:
             continue
+        bx, bw = x(ao), x(bo) - x(ao)
+        tag = (
+            f'<text class="band-tag" x="{bx + bw / 2:.1f}" y="{_MT + 13}" '
+            f'text-anchor="middle">避险 R{bi}</text>'
+            if bw > 46
+            else ""
+        )
         band_rects.append(
-            f'<rect x="{x(ao):.1f}" y="{_MT}" width="{x(bo) - x(ao):.1f}" '
+            f'<rect class="band-wash" x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" '
             f'height="{ph}"><title>避险区段（RISK_OFF）{a} → {b}</title></rect>'
+            f'<rect x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" height="{ph}" '
+            'fill="url(#hatch45)" pointer-events="none"/>'
+            f'<line class="band-edge" x1="{bx:.1f}" x2="{bx:.1f}" y1="{_MT}" y2="{_MT + ph}"/>'
+            f'<line class="band-edge" x1="{bx + bw:.1f}" x2="{bx + bw:.1f}" '
+            f'y1="{_MT}" y2="{_MT + ph}"/>{tag}'
         )
     if band_rects:
         parts.append(f'<g class="ly ly-risk">{"".join(band_rects)}</g>')
@@ -531,11 +626,17 @@ def _render_view_svg(
         f'<text x="{_ML - 8}" y="{_MT - 3}" class="tv-tick" text-anchor="end">log</text>'
     )
 
-    # -- 价格折线
+    # -- 价格折线（--ink-2 中性 2px，单系列不占图例色彩）+ 现价端标
     pts = " ".join(
         f"{x(d.toordinal()):.1f},{y(c):.1f}" for d, c in zip(sub_d, sub_c)
     )
     parts.append(f'<polyline class="tv-price" points="{pts}"/>')
+    ex, ey = x(d1o), y(sub_c[-1])
+    parts.append(
+        f'<circle class="tv-end" cx="{ex:.1f}" cy="{ey:.1f}" r="3"/>'
+        f'<text class="tv-endlab" x="{ex - 6:.1f}" y="{ey - 8:.1f}" '
+        f'text-anchor="end">{sub_c[-1]:,.1f}</text>'
+    )
 
     # -- 十字线 + 悬停捕捉面（标记层在其上，优先接管指针）
     parts.append(
@@ -565,18 +666,10 @@ def _render_view_svg(
                 f"Musk 趋势比 {p['mtr']:.2f}" if p["mtr"] is not None else "Musk 趋势比 —",
             ]
         )
-        if p["golden"]:
-            shape = (
-                f'<polygon class="mk mk-gold" points="{mx:.1f},{my - 7:.1f} '
-                f'{mx - 6.5:.1f},{my + 5:.1f} {mx + 6.5:.1f},{my + 5:.1f}"/>'
-            )
-        else:
-            shape = (
-                f'<polygon class="mk mk-trap" points="{mx:.1f},{my + 7:.1f} '
-                f'{mx - 6.5:.1f},{my - 5:.1f} {mx + 6.5:.1f},{my - 5:.1f}"/>'
-            )
+        cvar = "var(--m-pit)" if p["golden"] else "var(--m-fake)"
+        shape = f'<g class="{"mk-gold" if p["golden"] else "mk-trap"}">{_mk_pit(mx, my, p["golden"], cvar)}</g>'
         hit = (
-            f'<circle class="tv-hit" cx="{mx:.1f}" cy="{my:.1f}" r="13" '
+            f'<circle class="tv-hit" cx="{mx:.1f}" cy="{my + 14:.1f}" r="15" '
             f'data-tip="{esc(tip)}"><title>{esc(tip.replace("|", chr(10)))}</title>'
             "</circle>"
         )
@@ -609,15 +702,19 @@ def _render_view_svg(
             ]
         )
         m_items.append(
-            f'<circle class="mk mk-musk" cx="{mx:.1f}" cy="{my:.1f}" r="5.5"/>'
-            f'<circle class="tv-hit" cx="{mx:.1f}" cy="{my:.1f}" r="13" '
+            f'<g class="mk-musk">{_mk_diamond(mx, my, "var(--m-insider)")}</g>'
+            f'<circle class="tv-hit" cx="{mx:.1f}" cy="{my - 16:.1f}" r="15" '
             f'data-tip="{esc(tip)}"><title>{esc(tip.replace("|", chr(10)))}</title>'
             "</circle>"
         )
     marker_group("ly-musk", m_items)
 
     d_items = []
+    n_reduce = 0
     for t in trades:
+        reduce_ = t.get("action") == "REDUCE"
+        if reduce_:
+            n_reduce += 1
         try:
             td = date.fromisoformat(str(t.get("state_date")))
         except (TypeError, ValueError):
@@ -626,19 +723,17 @@ def _render_view_svg(
         if px is None or not (d0 <= td <= d1):
             continue
         mx, my = x(td.toordinal()), y(float(px))
-        reduce_ = t.get("action") == "REDUCE"
+        tag = (f"H{n_reduce}" if reduce_ else f"R{n_reduce}") or "H?"
         tip = _tip_attr(
             [
-                f"假想单 {t.get('action')} · {td}",
+                f"假想单 {tag} · {t.get('action')} · {td}",
                 f"TSLA 快照 {float(px):,.2f}",
                 (t.get("note") or "")[:60] or "—",
             ]
         )
         d_items.append(
-            f'<rect class="mk {"mk-trd-r" if reduce_ else "mk-trd-g"}" '
-            f'x="{mx - 5:.1f}" y="{my - 5:.1f}" width="10" height="10" '
-            f'transform="rotate(45 {mx:.1f} {my:.1f})"/>'
-            f'<circle class="tv-hit" cx="{mx:.1f}" cy="{my:.1f}" r="13" '
+            f'<g class="mk-hypo">{_mk_cross(mx, my, tag, "var(--m-hypo)")}</g>'
+            f'<circle class="tv-hit" cx="{mx:.1f}" cy="{my - 38:.1f}" r="14" '
             f'data-tip="{esc(tip)}"><title>{esc(tip.replace("|", chr(10)))}</title>'
             "</circle>"
         )
@@ -656,20 +751,55 @@ def _render_view_svg(
     return svg, meta
 
 
+# 图例芯片内嵌小样（设计稿 legendrow 的 20×14 视框微缩旗标）
+_LG_SW = {
+    "risk": (
+        '<svg viewBox="0 0 20 14" aria-hidden="true"><rect x="1" y="1" width="18" '
+        'height="12" fill="var(--crit-wash)" stroke="var(--crit)" stroke-width="1" '
+        'stroke-dasharray="2 2"/><path d="M4 12 10 2 M9 12 15 2" stroke="var(--crit)" '
+        'stroke-width="1" opacity=".55" fill="none"/></svg>'
+    ),
+    "pitg": (
+        '<svg viewBox="0 0 20 14" aria-hidden="true"><path d="M10 1 V8" '
+        'stroke="var(--m-pit)" stroke-width="1.6" fill="none"/>'
+        '<path d="M10 13 15 9.5 10 6 Z" fill="var(--m-pit)"/></svg>'
+    ),
+    "pitt": (
+        '<svg viewBox="0 0 20 14" aria-hidden="true"><path d="M10 1 V8" '
+        'stroke="var(--m-fake)" stroke-width="1.6" fill="none"/>'
+        '<path d="M10 13 15 9.5 10 6 Z" fill="none" stroke="var(--m-fake)" '
+        'stroke-width="1.4"/><path d="M6.5 13 L14 2" stroke="var(--m-fake)" '
+        'stroke-width="1.4" fill="none"/></svg>'
+    ),
+    "musk": (
+        '<svg viewBox="0 0 20 14" aria-hidden="true"><path d="M10 13 V7" '
+        'stroke="var(--m-insider)" stroke-width="1.6" fill="none"/>'
+        '<path d="M10 1 14 5 10 9 6 5 Z" fill="var(--m-insider)"/></svg>'
+    ),
+    "trade": (
+        '<svg viewBox="0 0 20 14" aria-hidden="true"><circle cx="10" cy="7" r="4.4" '
+        'fill="none" stroke="var(--m-hypo)" stroke-width="1.5"/>'
+        '<path d="M10 .8 V3.4 M10 10.6 V13.2 M3.8 7 H6.4 M13.6 7 H16.2" '
+        'stroke="var(--m-hypo)" stroke-width="1.5" fill="none"/></svg>'
+    ),
+}
+
+
 def _layer_btn(
     layer: str, sw: str, label: str, count_txt: str,
     disabled_note: str | None = None, title: str = "",
 ) -> str:
+    sw_svg = _LG_SW.get(layer, sw)
     if disabled_note:
         return (
-            f'<button class="tv-lb" data-layer="{layer}" disabled '
-            f'title="{esc(disabled_note)}">{sw}{esc(label)} '
-            f'<span class="cnt">{esc(disabled_note)}</span></button>'
+            f'<button class="lg tv-lb" data-layer="{layer}" disabled '
+            f'title="{esc(disabled_note)}">{sw_svg}{esc(label)} '
+            f'<span class="ct">{esc(disabled_note)}</span></button>'
         )
     return (
-        f'<button class="tv-lb" data-layer="{layer}" aria-pressed="true" '
-        f'title="{esc(title)}">{sw}{esc(label)} '
-        f'<span class="cnt">{esc(count_txt)}</span></button>'
+        f'<button class="lg tv-lb" data-layer="{layer}" aria-pressed="true" '
+        f'title="{esc(title)}">{sw_svg}{esc(label)} '
+        f'<span class="ct">×{esc(count_txt)}</span></button>'
     )
 
 
@@ -679,7 +809,7 @@ def _pits_table(pits: list[dict], buys_aligned: list[tuple[dict, str]]) -> str:
     for p in sorted(pits, key=lambda q: q["date"]):
         rows.append(
             "<tr>"
-            f"<td>{'真坑 ▲' if p['golden'] else '假坑 ▽'}</td>"
+            f"<td>{'真坑 ⚑' if p['golden'] else '假坑 ⚐'}</td>"
             f'<td class="num">{p["date"]}</td>'
             f'<td class="num">{p["close"]:,.2f}</td>'
             f'<td class="num">{_fmt_pct_pt(p["dd"])}</td>'
@@ -690,7 +820,7 @@ def _pits_table(pits: list[dict], buys_aligned: list[tuple[dict, str]]) -> str:
         )
     buy_rows = [
         "<tr>"
-        f"<td>Musk 买入 ●</td>"
+        f"<td>Musk 买入 ◆</td>"
         f'<td class="num">{b["date"]}</td>'
         f'<td class="num">{f"{b['vwap']:,.2f}" if b["vwap"] is not None else "—"}</td>'
         f'<td class="num" colspan="2">{_fmt_usd_cn(b["usd"])}</td>'
@@ -734,7 +864,7 @@ def render_symbol_view(
     if not dates:
         return f"""
 <section>
-  <h2>走势与历史判断 <span class="h-sub">{esc(symbol)} 日线收盘 · 对数刻度 · 事后标注</span></h2>
+  <h2><span class="sec-no">__NO__</span>战场走势<span class="h-sub">{esc(symbol)} 日线收盘 · 对数刻度 · 事后标注</span></h2>
   <div class="card"><p class="empty">价格数据不可读（{esc(str(BARS_CSV))}）——走势区块降级为空。</p></div>
 </section>"""
 
@@ -782,27 +912,27 @@ def render_symbol_view(
     layer_btns = "".join(
         [
             _layer_btn(
-                "risk", '<span class="sw-band"></span>', "避险底纹",
-                f"{len(risk_l)} 段",
+                "risk", "", "避险段",
+                f"{len(risk_l)}",
                 None if risk is not None else "数据缺失", risk_title,
             ),
             _layer_btn(
-                "pitg", '<span class="sw-tri up"></span>', "真坑",
+                "pitg", "", "真坑",
                 f"{n_gold}", None if pits is not None else "数据缺失",
                 "label=golden（事后口径）",
             ),
             _layer_btn(
-                "pitt", '<span class="sw-tri dn"></span>', "假坑",
+                "pitt", "", "假坑",
                 f"{n_trap}", None if pits is not None else "数据缺失",
                 "label=trap（事后口径）",
             ),
             _layer_btn(
-                "musk", '<span class="sw-dot"></span>', "Musk 买入",
+                "musk", "", "Musk 买入",
                 f"{len(buys_aligned)}", None if buys is not None else "数据缺失",
                 musk_note,
             ),
             _layer_btn(
-                "trade", '<span class="sw-dia"></span>', "假想单",
+                "trade", "", "假想单",
                 f"{len(trades)}", trade_note, "探测器值班期的虚拟操作",
             ),
         ]
@@ -825,19 +955,28 @@ def render_symbol_view(
     foot_extra = f"Musk 买入 {musk_note}。" if n_unaligned else ""
     return f"""
 <section>
-  <h2>走势与历史判断 <span class="h-sub">{esc(symbol)} 日线收盘（ET 交易日聚合） · 对数刻度 · {esc(str(dates[0]))} → {esc(str(last))}</span></h2>
-  <div class="card" id="tv">
-    <div class="tv-bar">
+  <h2><span class="sec-no">__NO__</span>战场走势<span class="h-sub">{esc(symbol)} 日线收盘（ET 交易日聚合） · 对数刻度 · {esc(str(dates[0]))} → {esc(str(last))}</span></h2>
+  {render_symbol_tabs()}
+  <div class="card chartcard" id="tv">
+    <div class="tv-bar legendrow">
       <div class="tv-ranges" role="group" aria-label="时间范围">{range_btns}</div>
       <div class="tv-layers" role="group" aria-label="图层开关">{layer_btns}</div>
+      <span class="spacer"></span>
+      <span class="micro muted">点击图例开关图层</span>
     </div>
     <div class="tv-wrap" id="tv-wrap">
       {"".join(svgs)}
       <div id="tv-tip" hidden></div>
     </div>
+    <div class="axis-note">
+      <span>纵轴 USD（对数） · 横轴日线</span>
+      <span>真坑 = 事后确认的可买入回撤底</span>
+      <span>假坑 = 形似坑、事后证伪</span>
+      <span>避险段 = 探测器 RISK_OFF 区间</span>
+    </div>
     {_pits_table(pits_l, buys_aligned)}
     <p class="footnote">真假坑与避险区段为事后研究口径，非当时可知信号；坑的标注含前视指标
-    （后 60 日表现），仅作历史复盘。Musk 买入为 Form 4 申报事实（蓝点落在首个成交日的收盘价上）。
+    （后 60 日表现），仅作历史复盘。Musk 买入为 Form 4 申报事实（菱旗落在首个成交日的收盘价上）。
     {esc(foot_extra)}价格轴为对数刻度；悬停标记看明细，悬停曲线看逐日收盘。</p>
   </div>
   <script type="application/json" id="tv-data">{data_json}</script>
@@ -864,30 +1003,39 @@ def render_topbar(conn: sqlite3.Connection, now: datetime) -> str:
     def stat(label: str, dt: datetime | None, extra_cls: str = "", iso_id: str = "") -> str:
         iso = dt.isoformat() if dt else ""
         return (
-            f'<div class="stat {extra_cls}">'
-            f'<div class="stat-label">{label}</div>'
-            f'<div class="stat-value num" data-iso="{esc(iso)}"'
+            f'<div class="stamp {extra_cls}">'
+            f'<div class="k">{label}</div>'
+            f'<div class="v num" data-iso="{esc(iso)}"'
             + (f' id="{iso_id}"' if iso_id else "")
-            + f">{fmt_local(dt)}</div>"
-            f'<div class="stat-sub rel">{esc(fmt_ago(dt, now))}</div></div>'
+            + f">{fmt_local(dt)}"
+            f'<span class="rel">{esc(fmt_ago(dt, now))}</span></div></div>'
         )
 
     return f"""
-<header>
-  <div class="brand">
-    <h1>因果探测器 · 哨兵</h1>
-    <span class="pill {pill_cls}" id="poll-pill"><span class="dot"></span>{pill_txt}</span>
+<div class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <svg class="ic" aria-hidden="true"><use href="#i-radar"/></svg>
+      <div>
+        <h1>因果探测器 · 哨兵</h1>
+        <div class="sub">TSLA CAUSAL SENTINEL — INTEL COMMAND</div>
+      </div>
+      <span class="pill {pill_cls}" id="poll-pill"><span class="dot"></span>{pill_txt}</span>
+    </div>
+    <div class="topmeta">
+      {stat("页面生成于", now, iso_id="gen-ts")}
+      {stat("最后事件入库", last_obs)}
+      {stat("最后轮询", last_poll, "poll-stat" + (" crit-text" if stale else ""), "poll-ts")}
+      <button class="themebtn" id="themebtn" type="button">切换主题</button>
+    </div>
   </div>
-  <div class="stats">
-    {stat("页面生成于", now, iso_id="gen-ts")}
-    {stat("最后事件入库", last_obs)}
-    {stat("最后轮询", last_poll, "poll-stat" + (" crit-text" if stale else ""), "poll-ts")}
+  <div class="topbar-in">
+    <div class="banner" id="stale-banner" hidden>
+      此页面生成已久，数据可能过期——请重新运行 <code>python -m intel.dashboard</code>
+      或加载 launchd 定时任务。
+    </div>
   </div>
-  <div class="banner" id="stale-banner" hidden>
-    此页面生成已久，数据可能过期——请重新运行 <code>python -m intel.dashboard</code>
-    或加载 launchd 定时任务。
-  </div>
-</header>"""
+</div>"""
 
 
 def _fmt_count(v: float | None) -> str:
@@ -953,6 +1101,148 @@ def _det_trades_html(trades: list[dict], now: datetime) -> str:
     )
 
 
+def _ring_svg(state: str, cls: str, phrase: str, cur: dict) -> tuple[str, str]:
+    """标定环表盘（设计稿 §01）：外圈刻度环 + 进度环 + 中心状态词。
+
+    进度语义（标定期为设计稿方案；正式期设计稿未预留，此处自定并在页脚注明）：
+      CALIBRATING → baseline_days / CALIB_BDAYS（基线累积）
+      RISK_ON     → musk_count / dense_thr（放风腿密度占比，阈值未出则 0）
+      RISK_OFF    → F 窗已行进比例（state_date → risk_off_until，工作日近似）
+    返回 (svg, 环下标注文本)。
+    """
+    if state == "CALIBRATING":
+        days = int(cur.get("baseline_days") or 0)
+        pct = min(100.0, days / CALIB_BDAYS * 100)
+        prog_txt = f"{days} / {CALIB_BDAYS} 交易日"
+        sub_txt = f"基线累积 {pct:.0f}% · 不出信号"
+        cap = f"标定环 · 期满出信号"
+    elif state == "RISK_OFF":
+        until = None
+        try:
+            until = date.fromisoformat(str(cur.get("risk_off_until")))
+        except (TypeError, ValueError):
+            pass
+        sd = date.fromisoformat(str(cur["state_date"]))
+        left = bdays_between(sd, until) if until else 0
+        pct = min(100.0, max(0.0, (PERSIST_BDAYS - left) / PERSIST_BDAYS * 100))
+        prog_txt = f"F{PERSIST_BDAYS} 剩 {left} 交易日" if until else f"F{PERSIST_BDAYS} 窗内"
+        sub_txt = ("至 " + str(until) + " · 期满自动恢复") if until else "重叠触发顺延"
+        cap = "避险环 · F 窗行进度"
+    else:  # RISK_ON 及未知态
+        mc, thr = cur.get("musk_count"), cur.get("dense_thr")
+        pct = min(100.0, mc / thr * 100) if (mc and thr) else 0.0
+        prog_txt = (
+            f"密度 {_fmt_count(mc)} / 阈 {_fmt_count(thr)}" if thr else "阈值未生效"
+        )
+        sub_txt = "放风腿密度占比 · 两腿未同时命中"
+        cap = "警戒环 · 放风腿占比"
+    code = state if state in DET_STATE else (state or "?")
+    svg = (
+        f'<svg class="ring {cls}" viewBox="0 0 224 224" role="img" '
+        f'aria-label="{esc(phrase)}，{esc(prog_txt)}">'
+        '<circle class="wash" cx="112" cy="112" r="72"/>'
+        '<circle class="dial" cx="112" cy="112" r="104" fill="none" stroke-width="5" '
+        'pathLength="120" stroke-dasharray=".55 1.45" opacity=".7"/>'
+        '<circle class="track" cx="112" cy="112" r="90" fill="none" stroke-width="8"/>'
+        '<circle class="prog" cx="112" cy="112" r="90" fill="none" stroke-width="8" '
+        f'pathLength="100" stroke-dasharray="{pct:.1f} {100 - pct:.1f}" '
+        'stroke-dashoffset="0" transform="rotate(-90 112 112)"/>'
+        f'<text class="t-state" x="112" y="106" text-anchor="middle">{esc(phrase)}</text>'
+        f'<text class="t-code" x="112" y="128" text-anchor="middle">{esc(code)}</text>'
+        f'<text class="t-prog" x="112" y="150" text-anchor="middle">{esc(prog_txt)}</text>'
+        f'<text class="t-sub" x="112" y="166" text-anchor="middle">{esc(sub_txt)}</text>'
+        "</svg>"
+    )
+    return svg, cap
+
+
+def _lamps_html(state: str) -> str:
+    """三灯信号组：RISK_ON / CALIBRATING / RISK_OFF，当前态点亮。"""
+    rows = []
+    for st, dot_cls, zh in (
+        ("RISK_ON", "g", "正常持仓"),
+        ("CALIBRATING", "w", "标定中"),
+        ("RISK_OFF", "c", "假想减仓"),
+    ):
+        on = " on" if st == state else ""
+        zh_txt = zh + (" · 当前" if on else "")
+        rows.append(
+            f'<div class="lamp {dot_cls}{on}"><span class="bulb"></span>'
+            f'<span class="name">{st}</span><span class="zh">{esc(zh_txt)}</span></div>'
+        )
+    return '<div class="lamps" role="list" aria-label="状态灯组">' + "".join(rows) + "</div>"
+
+
+def _sparks_html(cur: dict) -> str:
+    """腿 B 火花条：musk_window_json 的日计数（最多 14 日），p95 线 = 密集阈值。"""
+    try:
+        win = json.loads(cur.get("musk_window_json") or "{}")
+        vals = [float(win[k]) for k in sorted(win)][-14:]
+    except (ValueError, TypeError):
+        vals = []
+    if not vals:
+        return ""
+    thr = cur.get("dense_thr")
+    mx = max(vals + ([thr] if thr else [])) * 1.15 or 1.0
+    bars = "".join(
+        f'<i class="{"hi" if (thr and v >= thr) else ""}" '
+        f'style="height:{v / mx * 100:.0f}%" title="{v:.0f} 帖"></i>'
+        for v in vals
+    )
+    p95 = (
+        f'<span class="p95" style="top:{100 - thr / mx * 100:.0f}%"></span>' if thr else ""
+    )
+    return (
+        f'<div class="sparks" aria-label="近 {len(vals)} 日发帖密度">{p95}{bars}</div>'
+    )
+
+
+def _hypo_summary(trades: list[dict]) -> str:
+    """假想单判分小结（kv 行，供 hero 右栏；明细表另在下方保留）。"""
+    if not trades:
+        return (
+            '<div class="kv"><span class="k">值班期</span>'
+            '<span class="v">尚无假想单记录</span></div>'
+        )
+    rows, open_reduce = [], None
+    n_right = n_wrong = n_open = 0
+    hn = 0
+    for t in trades:
+        if t["action"] == "REDUCE":
+            hn += 1
+            open_reduce = (hn, t)
+        elif t["action"] == "RESTORE" and open_reduce is not None:
+            k, r0 = open_reduce
+            if r0["price"] is not None and t["price"] is not None:
+                ret = t["price"] / r0["price"] - 1
+                ok = ret < COST_LINE
+                n_right, n_wrong = n_right + ok, n_wrong + (not ok)
+                v = (
+                    f'<span class="good-text">判对 · 避损 {ret:+.2%}</span>'
+                    if ok
+                    else f'<span class="crit-text">判错 · 错过 {ret:+.2%}</span>'
+                )
+            else:
+                v = "缺价格快照"
+            rows.append(
+                f'<div class="kv"><span class="k">H{k} · {esc(r0["state_date"])} 减仓</span>'
+                f'<span class="v">{v}</span></div>'
+            )
+            open_reduce = None
+    if open_reduce is not None:
+        k, r0 = open_reduce
+        n_open += 1
+        rows.append(
+            f'<div class="kv"><span class="k">H{k} · {esc(r0["state_date"])} 减仓</span>'
+            '<span class="v">待定 · 未平仓</span></div>'
+        )
+    rows.append(
+        f'<div class="kv"><span class="k">累计</span>'
+        f'<span class="v">{hn} 单 · {n_right} 对 · {n_wrong} 错 · {n_open} 待定</span></div>'
+    )
+    return "".join(rows[-4:])
+
+
 def render_detector(data: dict | None, now: datetime) -> str:
     if not data:
         return ""
@@ -960,115 +1250,140 @@ def render_detector(data: dict | None, now: datetime) -> str:
     state = cur["state"]
     cls, phrase, why = DET_STATE.get(state, ("off", state, ""))
     upd = parse_ts(cur.get("updated_utc"))
+    ring, ring_cap = _ring_svg(state, cls, phrase, cur)
 
-    # -- 状态徽章
-    badge_sub = f"{esc(phrase)} · {esc(why)}"
-    if state == "RISK_OFF" and cur.get("risk_off_until"):
-        badge_sub += f" · F{PERSIST_BDAYS} 至 {esc(cur['risk_off_until'])}"
-    badge = (
-        f'<div class="det-state {cls}">'
-        f'<div class="det-state-name">{esc(state)}</div>'
-        f'<div class="det-state-sub">{badge_sub}</div>'
-        f'<div class="det-state-meta num">状态日 {esc(cur["state_date"])}'
-        f'<span class="sub rel" data-iso="{esc(upd.isoformat() if upd else "")}">'
-        f"更新于 {esc(fmt_ago(upd, now))}</span></div></div>"
-    )
-
-    # -- 两腿读数
-    musk_sub = "口径日 " + esc(cur.get("musk_count_day") or "—") + " · nitter 口径"
-    leg_musk = (
-        '<div class="det-leg"><div class="leg-label">放风腿 · Musk 日发帖</div>'
-        f'<div class="leg-value num">{_fmt_count(cur.get("musk_count"))}'
-        '<span class="leg-unit">帖/日</span></div>'
-        f'<div class="leg-sub">{musk_sub}</div></div>'
-    )
-    chg = cur.get("short_chg_pct")
-    upjump = bool(cur.get("short_upjump_recent"))
-    jump_html = (
-        f'<span class="warn-text">回看 {LOOKBACK_BDAYS} 交易日内有 up-jump</span>'
-        if upjump
-        else f"回看 {LOOKBACK_BDAYS} 交易日内无 up-jump"
-    )
-    leg_short = (
-        '<div class="det-leg"><div class="leg-label">空头腿 · 最新期变化</div>'
-        f'<div class="leg-value num">{f"{chg:+.2f}" if chg is not None else "—"}'
-        '<span class="leg-unit">%</span></div>'
-        f'<div class="leg-sub">结算 {esc(cur.get("short_settlement") or "—")} · '
-        f"{jump_html}</div></div>"
-    )
-
-    # -- 第四格：标定进度条（标定期）或密集阈值（正式期）
+    # -- 中栏：态势陈述 + 两腿读数
     if state == "CALIBRATING":
-        days = int(cur.get("baseline_days") or 0)
-        pct = min(100.0, days / CALIB_BDAYS * 100)
-        leg4 = (
-            '<div class="det-leg"><div class="leg-label">标定进度 · 基线累积</div>'
-            f'<div class="leg-value num">{days}<span class="leg-unit">/ {CALIB_BDAYS} '
-            "交易日</span></div>"
-            f'<div class="prog" role="img" aria-label="标定进度 {days}/{CALIB_BDAYS}">'
-            f'<span style="width:{pct:.0f}%"></span></div>'
-            '<div class="leg-sub">期满后阈值 = 基线同分位数，出信号</div></div>'
+        stmt = (
+            "重建 nitter 口径基线中，两腿读数仅观测、<b>不触发信号</b>；"
+            "两腿需同时命中且各自持续，方转入假想减仓。"
+        )
+    elif state == "RISK_OFF":
+        stmt = (
+            "空头 up-jump × Musk 密集同窗命中，<b>假想减仓生效</b>；"
+            f"F{PERSIST_BDAYS} 窗内维持，重叠触发顺延。"
         )
     else:
-        thr = cur.get("dense_thr")
-        leg4 = (
-            '<div class="det-leg"><div class="leg-label">密集阈值 · 当日生效</div>'
-            f'<div class="leg-value num">{_fmt_count(thr)}'
-            '<span class="leg-unit">帖/日</span></div>'
-            '<div class="leg-sub">nitter 基线分位映射 · 扩张窗每日重算</div></div>'
+        stmt = (
+            "两腿未同时命中，<b>正常持仓</b>；"
+            "空头利益与 Musk 发帖密度按各自周期滚动监测。"
         )
-
-    # -- 最近状态切换
-    switches_html = ""
+    since_bits = [f"状态日 {esc(cur['state_date'])}"]
     if data["switches"]:
-        items = []
-        for s in data["switches"]:
-            t = parse_ts(s["event_time_utc"])
-            s_cls = DET_STATE.get(s.get("state") or "", ("off",))[0]
-            items.append(
-                '<li class="ev">'
-                f'<span class="ev-time num">{fmt_local(t)}</span>'
-                f'<span class="pill sm {s_cls}"><span class="dot"></span>'
-                f'{esc(s.get("state") or "?")}</span>'
-                f'<span class="ev-title" title="{esc(s["title"])}">{esc(s["title"])}</span>'
-                "</li>"
-            )
-        switches_html = (
-            f'<div class="det-sub"><h3>状态切换 <span class="h-sub">最近 '
-            f'{len(items)} 次</span></h3>'
-            f'<ol class="feed">{"".join(items)}</ol></div>'
+        s0 = data["switches"][0]
+        since_bits.append(
+            f"最近切换 {fmt_local(parse_ts(s0['event_time_utc']))} · "
+            f"{esc((s0.get('title') or '')[:40])}"
         )
+    since = " · ".join(since_bits) + (
+        f'<span class="rel" data-iso="{esc(upd.isoformat() if upd else "")}">'
+        f" · 更新于 {esc(fmt_ago(upd, now))}</span>"
+    )
+
+    chg = cur.get("short_chg_pct")
+    upjump = bool(cur.get("short_upjump_recent"))
+    a_pill = (
+        '<span class="pill warn"><span class="dot"></span>命中</span>'
+        if upjump
+        else '<span class="pill"><span class="dot"></span>未命中</span>'
+    )
+    a_w = min(100.0, max(0.0, (chg or 0.0) / SHORT_JUMP_PCT * 100))
+    leg_a = (
+        '<div class="leg"><div class="leg-h">'
+        '<svg class="ic" aria-hidden="true"><use href="#i-scales"/></svg>'
+        f"腿 A · 空头利益跳变{a_pill}</div>"
+        f'<div class="val num">{f"{chg:+.2f}%" if chg is not None else "—"}</div>'
+        f'<div class="ref">阈值 +{SHORT_JUMP_PCT:.1f}% · FINRA 双周口径 · '
+        f'结算 {esc(cur.get("short_settlement") or "—")} · 回看 {LOOKBACK_BDAYS}bd</div>'
+        f'<div class="gauge{" hit" if upjump else ""}">'
+        f'<i style="width:{a_w:.1f}%"></i><span class="th"></span></div></div>'
+    )
+
+    mc, thr = cur.get("musk_count"), cur.get("dense_thr")
+    if state == "CALIBRATING":
+        b_pill = '<span class="pill warn"><span class="dot"></span>标定中</span>'
+        b_ref = f"阈值待标定（基线分位映射） · 口径日 {esc(cur.get('musk_count_day') or '—')}"
+    elif thr and mc is not None and mc >= thr:
+        b_pill = '<span class="pill warn"><span class="dot"></span>命中</span>'
+        b_ref = f"密集阈值 {_fmt_count(thr)} 帖/日 · 口径日 {esc(cur.get('musk_count_day') or '—')}"
+    else:
+        b_pill = '<span class="pill"><span class="dot"></span>未命中</span>'
+        b_ref = (
+            f"密集阈值 {_fmt_count(thr)} 帖/日 · " if thr else "阈值未生效 · "
+        ) + f"口径日 {esc(cur.get('musk_count_day') or '—')}"
+    leg_b = (
+        '<div class="leg"><div class="leg-h">'
+        '<svg class="ic" aria-hidden="true"><use href="#i-mega"/></svg>'
+        f"腿 B · Musk 发帖密度{b_pill}</div>"
+        f'<div class="val num">{_fmt_count(mc)}<span class="unit"> 帖/日</span></div>'
+        f'<div class="ref">{b_ref}</div>'
+        f"{_sparks_html(cur)}</div>"
+    )
+
+    legnote = (
+        '<div class="legnote"><svg class="ic" aria-hidden="true">'
+        '<use href="#i-shield"/></svg><span>'
+        f"判定冻结参数：两腿同窗命中（LOOKBACK {LOOKBACK_BDAYS}bd）且持续"
+        f"（PERSIST {PERSIST_BDAYS}bd）→ RISK_OFF；假想单成本线 {COST_LINE:+.2%}。"
+        "标定期读数灰示，不参与判定。</span></div>"
+    )
+
+    # -- 右栏：三灯组 + 最近切换 + 假想单判分小结
+    sw_rows = "".join(
+        f'<div class="kv"><span class="k num">{fmt_local(parse_ts(s["event_time_utc"]))}</span>'
+        f'<span class="v" title="{esc(s["title"])}">{esc(s.get("state") or "?")}</span></div>'
+        for s in data["switches"][:5]
+    ) or '<div class="kv"><span class="k">—</span><span class="v">暂无切换记录</span></div>'
+    right = (
+        _lamps_html(state)
+        + '<div class="sideblock"><div class="bt">'
+        '<svg class="ic" aria-hidden="true"><use href="#i-lamp"/></svg>最近状态切换</div>'
+        + sw_rows
+        + "</div>"
+        + '<div class="sideblock"><div class="bt">'
+        '<svg class="ic" aria-hidden="true"><use href="#i-pulse"/></svg>假想单判分</div>'
+        + _hypo_summary(data["trades"])
+        + "</div>"
+    )
 
     footnote = (
         f"冻结规则 N3-H：Musk 密集发帖（act=次交易日）× 回看 {LOOKBACK_BDAYS} 交易日内"
         f"空头 change_pct ≥ +{SHORT_JUMP_PCT:.0f}% 发布 → RISK_OFF 持续 "
         f"F{PERSIST_BDAYS}（{PERSIST_BDAYS} 交易日，重叠触发顺延）。"
         f"标定期 {CALIB_BDAYS} 交易日只累积基线，不出信号。假想推演，不碰真钱。"
+        "表盘进度语义：标定期 = 基线累积（设计稿方案）；正常持仓 = 放风腿密度占比、"
+        "避险期 = F 窗行进度（设计稿未预留正式期方案，自定口径）。"
     )
     return f"""
 <section>
-  <h2>因果探测器 <span class="h-sub">N3-H 冻结规则 · 空头 up-jump × Musk 密集 · 前向虚拟推演</span></h2>
-  <div class="card">
-    <div class="det-grid">
-      {badge}
-      {leg_musk}
-      {leg_short}
-      {leg4}
+  <h2><span class="sec-no">__NO__</span>态势总览<span class="h-sub">N3-H 冻结规则 · 探测器状态机 · 两腿读数 · 前向虚拟推演</span></h2>
+  <div class="card hero">
+    <div class="ringwrap">
+      {ring}
+      <div class="ring-cap">{esc(ring_cap)}</div>
     </div>
-    {switches_html}
+    <div>
+      <p class="statement st-{cls}">{stmt}</p>
+      <div class="since num">{since}</div>
+      <div class="legs">{leg_a}{leg_b}</div>
+      {legnote}
+    </div>
+    <div>{right}</div>
+  </div>
+  <div class="card det-more">
     {_det_trades_html(data["trades"], now)}
     <p class="footnote">{footnote}</p>
   </div>
 </section>"""
 
 
-TIER_ICON = {  # 层级 → sprite symbol id（雷达/盾牌/天平/扩音器）
-    "T0": "ic-t0", "T1": "ic-t1", "T2": "ic-t2", "T3": "ic-t3",
+TIER_ICON = {  # 层级 → sprite symbol id（雷达/盾牌/天平/扩音器，设计稿 §四）
+    "T0": "i-radar", "T1": "i-shield", "T2": "i-scales", "T3": "i-mega",
 }
 
 
 def tier_icon(tier: str | None, cls: str = "t-ic") -> str:
-    sid = TIER_ICON.get(tier or "", "ic-t3")
+    sid = TIER_ICON.get(tier or "", "i-mega")
     return (
         f'<svg class="{cls}" aria-hidden="true" focusable="false">'
         f'<use href="#{sid}"/></svg>'
@@ -1153,7 +1468,7 @@ def render_health(rows: list[dict], now: datetime) -> str:
         )
     return f"""
 <section>
-  <h2>渠道矩阵 <span class="h-sub">按层级分组 · 组内按权重排序</span></h2>
+  <h2><span class="sec-no">__NO__</span>渠道健康<span class="h-sub">{len(rows)} 渠道 · 按层级分组 · 组内按权重排序 · 权重 = 四维评分先验</span></h2>
   <div class="card">{"".join(blocks)}</div>
 </section>"""
 
@@ -1173,478 +1488,630 @@ def render_timeline(rows: list[dict], now: datetime) -> str:
         )
         items.append(
             '<li class="ev">'
-            f"{tier_icon(e.get('tier'), 'ev-ic')}"
             f'<span class="ev-time num" title="观察时刻（本机时区）">{fmt_local(obs)}</span>'
             f"{tier_badge(e.get('tier'))}"
             f'<span class="ev-src">{esc(e["source_id"])}</span>'
             f'<span class="ev-title">{title_html}</span>'
-            f'<span class="ev-type sub">{esc(e.get("type") or "")}</span>'
+            f'<span class="ev-type micro">{esc(e.get("type") or "")}</span>'
             "</li>"
         )
     return f"""
 <section>
-  <h2>最新情报流 <span class="h-sub">最近 {len(rows)} 条 · 按观察时刻倒序</span></h2>
+  <h2><span class="sec-no">__NO__</span>最新情报流<span class="h-sub">最近 {len(rows)} 条 · 按观察时刻倒序</span></h2>
   <div class="card">
     <ol class="feed">{"".join(items)}</ol>
   </div>
 </section>"""
 
 
-def render_latency(rows: list[dict], sources: dict) -> str:
-    if not rows:
-        return ""
-    trs = []
+# 时延对数轴上限：7 天（分钟计）
+_LAT_MAX_MIN = 7 * 24 * 60.0
+
+
+def _fmt_lat(s: float | None) -> str:
+    """紧凑时延格式（等宽栏用）：26h / 3.9d 风格。"""
+    if s is None:
+        return "—"
+    neg = "-" if s < 0 else ""
+    s = abs(s)
+    if s < 90:
+        return f"{neg}{s:.0f}s"
+    if s < 5400:
+        return f"{neg}{s / 60:.0f}m"
+    if s < 2 * 86400:
+        return f"{neg}{s / 3600:.1f}h"
+    return f"{neg}{s / 86400:.1f}d"
+
+
+def _lat_pos(seconds: float | None) -> float | None:
+    """秒 → 对数轴位置 0..1（1 分钟 → 7 天）。"""
+    if seconds is None:
+        return None
+    m = max(1.0, seconds / 60.0)
+    return min(1.0, math.log10(m) / math.log10(_LAT_MAX_MIN))
+
+
+def _latency_card(rows: list[dict], sources: dict) -> str:
+    """入库时延卡：每渠道 p50 → p90 对数轴标尺（设计稿 05 右卡）。"""
+    ticks = "".join(
+        f'<span class="tk" style="left:calc(150px + (100% - 150px - 120px)*{_lat_pos(m * 60):.4f})">{lab}</span>'
+        for m, lab in ((1, "1m"), (60, "1h"), (1440, "1d"), (10080, "7d"))
+    )
+    lrows = []
     for r in rows:
         sid = r["source_id"]
         src = sources.get(sid, {})
+        t = src.get("tier") if src.get("tier") in TIERS else "T3"
         notes = []
         if (r.get("lag_min_s") or 0) < 0:
             notes.append("日历预告（lag 为负 = 事件在未来，正常）")
         interval = src.get("poll_interval_s") or 0
         if r["p50"] is not None and interval and r["p50"] > 12 * max(interval, 300):
             notes.append("回填主导，偏大")
-        trs.append(
-            "<tr>"
-            f"<td>{tier_badge(src.get('tier'))}</td>"
-            f"<td><strong>{esc(sid)}</strong></td>"
-            f'<td class="num">{r["n_events"]:,}</td>'
-            f'<td class="num">{esc(fmt_dur(r["p50"])) if r["p50"] is not None else "—"}</td>'
-            f'<td class="num">{esc(fmt_dur(r["p90"])) if r["p90"] is not None else "—"}</td>'
-            f'<td class="num">{esc(fmt_dur(r["lag_min_s"])) if r.get("lag_min_s") is not None else "—"}</td>'
-            f'<td class="detail">{esc("；".join(notes))}</td></tr>'
-        )
-    return f"""
-<section>
-  <h2>渠道时延 <span class="h-sub">observed − event</span></h2>
-  <div class="card">
-    <div class="scroll-x">
-      <table>
-        <thead><tr><th>层级</th><th>渠道</th><th>n</th><th>中位</th><th>p90</th>
-        <th>最小</th><th>备注</th></tr></thead>
-        <tbody>{"".join(trs)}</tbody>
-      </table>
-    </div>
-    <p class="footnote">口径注：首采期的 p50/p90 被回填支配（老事件今天才开始观察），
-    显著高于稳态时延；稳态 ≈ 轮询间隔 + 源侧发布延迟，随增量事件积累自动收敛。
-    「最小」列更接近该渠道的稳态下限。</p>
-  </div>
-</section>"""
-
-
-def _bar_panel(title: str, tiers: list[str], counts: dict, key: str, maxc: int) -> str:
-    """内联 SVG 手绘水平条形图（右端 4px 圆角、基线端方角）。"""
-    row_h, bar_h, x0, vw = 30, 18, 52, 340
-    max_w = vw - x0 - 44
-    vh = len(tiers) * row_h + 6
-    parts = [
-        f'<svg viewBox="0 0 {vw} {vh}" role="img" aria-label="{esc(title)}按层级事件计数">'
-    ]
-    for i, t in enumerate(tiers):
-        n = counts.get(t, {}).get(key, 0)
-        y = i * row_h + 4
-        cy = y + bar_h / 2
-        parts.append(
-            f'<text x="{x0 - 10}" y="{cy}" class="svg-label" text-anchor="end" '
-            f'dominant-baseline="central">{esc(t)}</text>'
-        )
-        if n > 0 and maxc > 0:
-            w = max(4.0, n / maxc * max_w)
-            r = min(4.0, w)
-            d = (
-                f"M{x0},{y} h{w - r:.1f} a{r},{r} 0 0 1 {r},{r} v{bar_h - 2 * r} "
-                f"a{r},{r} 0 0 1 -{r},{r} h-{w - r:.1f} z"
+        a, b = _lat_pos(r["p50"]), _lat_pos(r["p90"])
+        col = f"var(--tier{t[1]})"
+        if a is not None and b is not None:
+            rail = (
+                '<span class="rail"><span class="base"></span>'
+                f'<span class="range" style="left:{a * 100:.1f}%;width:{max(0.8, (b - a) * 100):.1f}%;'
+                f'background:{col};opacity:.45"></span>'
+                f'<span class="p50" style="left:{a * 100:.1f}%;background:{col}"></span>'
+                f'<span class="p50 p90" style="left:{b * 100:.1f}%;background:{col}"></span></span>'
             )
-            parts.append(f'<path d="{d}" class="bar-{t[1]}"/>')
-            lx = x0 + w + 8
         else:
-            lx = x0 + 8
-        parts.append(
-            f'<text x="{lx:.1f}" y="{cy}" class="svg-value" '
-            f'dominant-baseline="central">{n:,}</text>'
+            rail = '<span class="rail"><span class="base"></span></span>'
+        p50t = _fmt_lat(r["p50"])
+        p90t = _fmt_lat(r["p90"])
+        mint = fmt_dur(r["lag_min_s"]) if r.get("lag_min_s") is not None else "—"
+        title = f"n={r['n_events']:,} · 最小 {mint}" + ("；" + "；".join(notes) if notes else "")
+        lrows.append(
+            f'<div class="lrow" title="{esc(title)}">'
+            f'<span class="lbl">{tier_badge(src.get("tier"))}'
+            f'<span class="sid">{esc(sid)}</span></span>'
+            f'{rail}<span class="n">{esc(p50t)} / {esc(p90t)}</span></div>'
         )
-    parts.append("</svg>")
     return (
-        f'<div class="chart"><h3>{esc(title)}</h3>{"".join(parts)}</div>'
+        '<div class="card duo-card"><h3><svg class="ic" aria-hidden="true">'
+        '<use href="#i-clock"/></svg>入库时延 p50 → p90</h3>'
+        '<div class="cap">observed − event · 对数轴 1m → 7d · 悬停看 n / 最小 / 备注</div>'
+        f'<div class="lat-scale">{ticks}</div>{"".join(lrows)}'
+        "</div>"
     )
 
 
-def render_tier_chart(counts: dict[str, dict]) -> str:
-    if not counts:
-        return ""
+def _counts_card(counts: dict[str, dict]) -> str:
+    """事件计数卡：层级双条（深 = 今日，浅 = 近 7 日；设计稿 05 左卡）。"""
     tiers = [t for t in TIERS if t in counts]
-    if not tiers:
-        return ""
     maxc = max(
         [c["today"] for c in counts.values()] + [c["week"] for c in counts.values()]
+    ) or 1
+    brows = []
+    for t in tiers:
+        c = counts.get(t, {})
+        col = f"var(--tier{t[1]})"
+        brows.append(
+            f'<div class="brow">{tier_badge(t)}'
+            '<span class="bars">'
+            f'<i class="b" style="width:{max(c.get("today", 0) / maxc * 100, 0.7):.1f}%;background:{col}"></i>'
+            f'<i class="b dim" style="width:{max(c.get("week", 0) / maxc * 100, 0.7):.1f}%;background:{col}"></i>'
+            "</span>"
+            f'<span class="n">{c.get("today", 0):,} / {c.get("week", 0):,}</span></div>'
+        )
+    return (
+        '<div class="card duo-card"><h3><svg class="ic" aria-hidden="true">'
+        '<use href="#i-pulse"/></svg>事件计数</h3>'
+        '<div class="cap">深色 = 今日（UTC 日） · 浅色 = 近 7 日 · observed 口径 · 同标尺</div>'
+        + "".join(brows)
+        + "</div>"
     )
-    legend = " · ".join(
-        f'<span class="lg"><span class="sw sw-{t[1]}"></span>{esc(TIER_LABEL.get(t, t))}</span>'
-        for t in tiers
+
+
+def render_counts_latency(
+    counts: dict[str, dict], lat_rows: list[dict], sources: dict
+) -> str:
+    """⑤ 计数与时延（设计稿 05 双栏；任一侧数据缺失则单栏降级）。"""
+    left = _counts_card(counts) if counts else ""
+    right = _latency_card(lat_rows, sources) if lat_rows else ""
+    if not (left or right):
+        return ""
+    foot = (
+        '<p class="footnote">时延口径注：首采期的 p50/p90 被回填支配'
+        "（老事件今天才开始观察），显著高于稳态时延；稳态 ≈ 轮询间隔 + 源侧发布延迟，"
+        "随增量事件积累自动收敛。悬停行内可见「最小」列，更接近该渠道的稳态下限。</p>"
     )
+    duo_cls = "duo" if (left and right) else "duo one"
     return f"""
 <section>
-  <h2>事件计数 <span class="h-sub">按层级 · observed 口径 · 两图同标尺</span></h2>
-  <div class="card">
-    <div class="charts">
-      {_bar_panel("今日（UTC 日）", tiers, counts, "today", maxc)}
-      {_bar_panel("近 7 日", tiers, counts, "week", maxc)}
-    </div>
-    <p class="footnote legend-line">{legend}</p>
-  </div>
+  <h2><span class="sec-no">__NO__</span>计数与时延<span class="h-sub">按层级计数 · 按渠道时延</span></h2>
+  <div class="{duo_cls}">{left}{right}</div>
+  {foot if right else ""}
 </section>"""
 
 
 # ---------------------------------------------------------------- page shell
 
-# 层级小图标 sprite：T0 雷达（布局痕迹）/ T1 盾牌（法定披露）/
-# T2 天平（官方承诺）/ T3 扩音器（放风叙事）。线条继承 CSS stroke。
+# 手绘图标 sprite（设计稿 §四：24 视框 / stroke 1.6 / 圆帽圆角）
+# 雷达=探测器 盾牌=避险 天平=两腿判定 扩音器=舆情腿 信号灯=状态机
+# 脉冲=情报流 时钟=时延；g-t0..3 = 层级形状（色深+形状双编码）；
+# hatch45 = 避险段 45° 影线图案（全页共用）。
 _ICON_SPRITE = """
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
-<symbol id="ic-t0" viewBox="0 0 24 24">
-  <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/>
-  <path d="M12 12 L18.4 5.7"/>
-  <circle cx="15.8" cy="14.6" r="1.4" fill="currentColor" stroke="none"/>
+<symbol id="i-radar" viewBox="0 0 24 24">
+  <circle cx="12" cy="12" r="8.6"/>
+  <circle cx="12" cy="12" r="4.6" opacity=".45"/>
+  <path d="M12 12 L18.1 5.9"/>
+  <circle cx="18.1" cy="5.9" r="1.3" fill="currentColor" stroke="none"/>
 </symbol>
-<symbol id="ic-t1" viewBox="0 0 24 24">
-  <path d="M12 3 L19.5 6 V11.5 C19.5 16.5 16.4 20 12 21.5 C7.6 20 4.5 16.5 4.5 11.5 V6 Z"/>
+<symbol id="i-shield" viewBox="0 0 24 24">
+  <path d="M12 3.4 L19 6.1 V11.6 C19 16.4 16.2 19.4 12 20.9 C7.8 19.4 5 16.4 5 11.6 V6.1 Z"/>
+  <path d="M9 11.8 L11.2 14.2 L15.2 9.6"/>
 </symbol>
-<symbol id="ic-t2" viewBox="0 0 24 24">
-  <path d="M12 4.5 V19"/><path d="M5 7 H19"/><path d="M8.5 21 H15.5"/>
-  <path d="M5 7 L2.5 12.5 M5 7 L7.5 12.5 M2 12.5 a3 3 0 0 0 6 0"/>
-  <path d="M19 7 L16.5 12.5 M19 7 L21.5 12.5 M16 12.5 a3 3 0 0 0 6 0"/>
+<symbol id="i-scales" viewBox="0 0 24 24">
+  <path d="M12 4.5 V19.5 M8.6 19.5 H15.4 M4.5 7 H19.5"/>
+  <path d="M4.5 7 L2.4 12.2 A2.35 2.35 0 0 0 6.6 12.2 Z"/>
+  <path d="M19.5 7 L17.4 12.2 A2.35 2.35 0 0 0 21.6 12.2 Z"/>
 </symbol>
-<symbol id="ic-t3" viewBox="0 0 24 24">
-  <path d="M3.5 10 V14 H7 L16.5 19.5 V4.5 L7 10 Z"/>
-  <path d="M19.5 9.5 a4.5 4.5 0 0 1 0 5"/>
+<symbol id="i-mega" viewBox="0 0 24 24">
+  <path d="M4 10.2 H7.2 L16.4 5.2 V18.8 L7.2 13.8 H4 Z"/>
+  <path d="M8.4 14 V17.6"/>
+  <path d="M19.2 9.4 A3.7 3.7 0 0 1 19.2 14.6"/>
 </symbol>
+<symbol id="i-lamp" viewBox="0 0 24 24">
+  <rect x="8.6" y="3.2" width="6.8" height="17.6" rx="3.4"/>
+  <circle cx="12" cy="7.4" r="1.5"/>
+  <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/>
+  <circle cx="12" cy="16.6" r="1.5"/>
+</symbol>
+<symbol id="i-pulse" viewBox="0 0 24 24">
+  <path d="M3 12 H7.4 L9.8 6.4 L13.8 17.6 L16.2 12 H21"/>
+</symbol>
+<symbol id="i-clock" viewBox="0 0 24 24">
+  <circle cx="12" cy="12" r="8.6"/>
+  <path d="M12 7.4 V12 L15.2 14.2"/>
+</symbol>
+<symbol id="g-t0" viewBox="0 0 10 10"><path d="M5 .6 9.4 5 5 9.4 .6 5Z" fill="currentColor"/></symbol>
+<symbol id="g-t1" viewBox="0 0 10 10"><path d="M5 .9 9.4 9.1 H.6Z" fill="currentColor"/></symbol>
+<symbol id="g-t2" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4.2" fill="currentColor"/></symbol>
+<symbol id="g-t3" viewBox="0 0 10 10"><circle cx="5" cy="5" r="3.6" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+<pattern id="hatch45" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+  <line x1="0" y1="0" x2="0" y2="7" stroke="var(--crit)" stroke-width="1" opacity=".22"/>
+</pattern>
 </defs></svg>"""
 
-_CSS = """
-:root {
+# 亮色 token 组（设计稿 §一）：写两处——[data-theme=light] 属性覆盖（页内按钮）
+# 与 prefers-color-scheme 媒体回退（无 JS / 未显式选择时跟随系统）。
+_LIGHT_TOKENS = """
   color-scheme: light;
-  --bg: #f9f9f7; --surface: #fcfcfb;
-  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-  --border: rgba(11,11,11,0.10); --grid: #e1e0d9;
-  --good: #0ca30c; --good-text: #006300;
-  --warn: #fab219; --warn-text: #7a5200;
-  --crit: #d03b3b; --crit-text: #b02a2a;
-  --good-wash: rgba(12,163,12,0.08);
-  --warn-wash: rgba(250,178,25,0.12);
-  --crit-wash: rgba(208,59,59,0.07); --off: #898781;
-  --tier0: #1c5cab; --tier0-ink: #ffffff;
-  --tier1: #2a78d6; --tier1-ink: #ffffff;
-  --tier2: #5598e7; --tier2-ink: #0b0b0b;
-  --tier3: #86b6ef; --tier3-ink: #0b0b0b;
-  --link: #1c5cab;
-  /* 走势图（金/蓝已过配色六检；灰为刻意中性槽位，身份由形状▽承担） */
-  --chart-line: #2f2e2b; --band: rgba(208,59,59,0.12);
-  --mk-gold: #b07d00; --mk-blue: #1c5cab; --mk-trap: #898781;
+  --bg:#f9f9f7; --surface:#fcfcfb; --surface-2:#f2f1ec;
+  --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --border:rgba(11,11,11,.10); --grid:#e1e0d9; --baseline:#c3c2b7;
+  --good:#0ca30c; --good-text:#006300; --good-wash:rgba(12,163,12,.08);
+  --warn:#fab219; --warn-text:#7a5200; --warn-wash:rgba(250,178,25,.14);
+  --crit:#d03b3b; --crit-text:#b02a2a; --crit-wash:rgba(208,59,59,.07);
+  --tier0:#1c5cab; --tier0-ink:#ffffff;
+  --tier1:#2a78d6; --tier1-ink:#ffffff;
+  --tier2:#5598e7; --tier2-ink:#0b0b0b;
+  --tier3:#86b6ef; --tier3-ink:#0b0b0b;
+  --m-insider:#2a78d6; --m-pit:#008300; --m-fake:#c98500; --m-hypo:#e87ba4;
+  --link:#1c5cab;
+"""
+
+_CSS = """
+/* ===== tokens（设计稿色板：暗色默认，亮色经 data-theme 或系统偏好） ===== */
+:root {
+  color-scheme: dark;
+  --bg:#0d0d0d; --surface:#1a1a19; --surface-2:#232322;
+  --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
+  --border:rgba(255,255,255,.10); --grid:#2c2c2a; --baseline:#383835;
+  --good:#0ca30c; --good-text:#0ca30c; --good-wash:rgba(12,163,12,.16);
+  --warn:#fab219; --warn-text:#fab219; --warn-wash:rgba(250,178,25,.13);
+  --crit:#d03b3b; --crit-text:#e66767; --crit-wash:rgba(208,59,59,.14);
+  --off:#898781;
+  --tier0:#9ec5f4; --tier0-ink:#0b0b0b;
+  --tier1:#5598e7; --tier1-ink:#0b0b0b;
+  --tier2:#256abf; --tier2-ink:#ffffff;
+  --tier3:#184f95; --tier3-ink:#ffffff;
+  --m-insider:#3987e5; --m-pit:#008300; --m-fake:#c98500; --m-hypo:#d55181;
+  --link:#86b6ef;
+  --font-serif:"Songti SC","STSong","Noto Serif CJK SC","Source Han Serif SC",serif;
+  --font-sans:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --bg: #0d0d0d; --surface: #1a1a19;
-    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-    --border: rgba(255,255,255,0.10); --grid: #2c2c2a;
-    --good: #0ca30c; --good-text: #0ca30c;
-    --warn: #fab219; --warn-text: #fab219;
-    --crit: #d03b3b; --crit-text: #e66767;
-    --good-wash: rgba(12,163,12,0.16);
-    --warn-wash: rgba(250,178,25,0.14);
-    --crit-wash: rgba(208,59,59,0.14);
-    --tier0: #9ec5f4; --tier0-ink: #0b0b0b;
-    --tier1: #5598e7; --tier1-ink: #0b0b0b;
-    --tier2: #256abf; --tier2-ink: #ffffff;
-    --tier3: #184f95; --tier3-ink: #ffffff;
-    --link: #86b6ef;
-    --chart-line: #e4e3da; --band: rgba(208,59,59,0.22);
-    --mk-gold: #bd8600; --mk-blue: #4f94e4; --mk-trap: #898781;
-  }
+:root[data-theme="light"] { __LIGHT__ }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) { __LIGHT__ }
 }
+/* ===== base（字阶：rem 基 14px；数据一律等宽 + tabular-nums） ===== */
 * { box-sizing: border-box; }
+html, body { margin: 0; }
 body {
-  margin: 0; background: var(--bg); color: var(--ink);
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC",
-        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--ink);
+  font: 14px/1.6 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
-main, header { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
-header { padding-top: 22px; }
+main, .topbar-in { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
-.num, td.num, .stat-value { font-variant-numeric: tabular-nums; }
-
-.brand { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-h1 { font-size: 19px; margin: 0; letter-spacing: 0.02em; }
-h2 { font-size: 15px; margin: 26px 0 10px; }
-h3 { font-size: 13px; margin: 0 0 6px; color: var(--ink-2); font-weight: 600; }
-.h-sub { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 8px; }
-
-.stats { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 14px; }
-.stat-label { font-size: 12px; color: var(--muted); }
-.stat-value { font-size: 17px; font-weight: 600; }
-.stat-sub { font-size: 12px; color: var(--muted); }
-.crit-text, .crit-text .stat-value, .stat.crit-text .stat-value { color: var(--crit-text); }
-.stat.crit-text .stat-label { color: var(--crit-text); }
+code { font-family: var(--font-mono); font-size: 0.92em; }
+.num, td.num, th.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.small { font-size: 12px; }
+.micro { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; }
+.muted { color: var(--muted); }
 .good-text { color: var(--good-text); }
 .warn-text { color: var(--warn-text); }
+.crit-text { color: var(--crit-text); }
+svg.ic { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
-.banner {
-  margin-top: 14px; padding: 8px 12px; border: 1px solid var(--crit);
-  border-radius: 6px; background: var(--crit-wash); color: var(--crit-text);
-  font-size: 13px;
-}
+/* ===== top bar ===== */
+.topbar { border-bottom: 1px solid var(--border); background: var(--surface); }
+.topbar-in { display: flex; align-items: center; gap: 16px;
+  padding-top: 14px; padding-bottom: 14px; flex-wrap: wrap; }
+.topbar-in:empty, .topbar-in:has(> [hidden]:only-child) { display: none; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand > svg.ic { width: 26px; height: 26px; color: var(--warn); }
+h1 { font: 600 21px/1.3 var(--font-serif); margin: 0; letter-spacing: .04em; }
+.brand .sub { font-family: var(--font-mono); font-size: 11px; letter-spacing: .22em;
+  color: var(--muted); text-transform: uppercase; margin-top: 1px; }
+.topmeta { margin-left: auto; display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+.stamp { text-align: right; }
+.stamp .k { font-size: 11px; color: var(--muted); letter-spacing: .06em; }
+.stamp .v { font-family: var(--font-mono); font-size: 12.5px;
+  font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.stamp .rel::before { content: " · "; }
+.stamp.crit-text .k, .stamp.crit-text .v { color: var(--crit-text); }
+.themebtn { font: 12px/1 var(--font-mono); letter-spacing: .1em; color: var(--ink-2);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 7px 12px; cursor: pointer; }
+.themebtn:hover { color: var(--ink); border-color: var(--muted); }
+.banner { flex: 1; padding: 8px 12px; border: 1px solid var(--crit);
+  border-radius: 4px; background: var(--crit-wash); color: var(--crit-text);
+  font-size: 13px; }
 
-.pill {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; font-weight: 600; padding: 2px 10px;
-  border: 1px solid var(--border); border-radius: 999px; color: var(--ink-2);
-  white-space: nowrap;
-}
-.pill.sm { padding: 1px 8px; }
-.pill .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.pill.good .dot { background: var(--good); }
-.pill.good { color: var(--good-text); }
-.pill.warn .dot { background: var(--warn); }
-.pill.warn { color: var(--warn-text); }
-.pill.crit .dot { background: var(--crit); }
-.pill.crit { color: var(--crit-text); }
-.pill.off .dot { background: var(--off); }
+/* ===== sections（宋体衬线板块题 + 等宽序号 + 延展线） ===== */
+section { margin-top: 48px; }
+h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px;
+  font: 600 17px/1.4 var(--font-serif); letter-spacing: .05em; flex-wrap: wrap; }
+h2 .sec-no { font: 400 11px var(--font-mono); letter-spacing: .18em; color: var(--muted); }
+h2 .h-sub { font: 400 12px var(--font-sans); color: var(--muted); letter-spacing: 0; }
+h2::after { content: ""; flex: 1; border-top: 1px solid var(--border);
+  align-self: center; margin-left: 6px; min-width: 40px; }
+h3 { font: 600 13.5px var(--font-sans); margin: 0 0 6px; color: var(--ink-2); }
+.h-sub { font-size: 12px; font-weight: 400; color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
 
-.card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 8px; padding: 4px 0;
-}
-.scroll-x { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; min-width: 720px; }
-th, td { text-align: left; padding: 7px 14px; white-space: nowrap; }
-thead th {
-  font-size: 12px; font-weight: 600; color: var(--muted);
-  border-bottom: 1px solid var(--grid);
-}
-tbody tr { border-bottom: 1px solid var(--grid); }
-tbody tr:last-child { border-bottom: none; }
-tr.row-crit { background: var(--crit-wash); }
-tr.row-off { color: var(--muted); }
-td .sub, .src .sub { display: block; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
-td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
-            overflow: hidden; text-overflow: ellipsis; }
+/* ===== pills ===== */
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+  font-weight: 600; font-family: var(--font-mono); letter-spacing: .06em;
+  padding: 2px 9px; border: 1px solid var(--border); border-radius: 3px;
+  color: var(--ink-2); white-space: nowrap; }
+.pill.sm { padding: 1px 7px; }
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--off); flex: none; }
+.pill.good { color: var(--good-text); } .pill.good .dot { background: var(--good); }
+.pill.warn { color: var(--warn-text); } .pill.warn .dot { background: var(--warn); }
+.pill.crit { color: var(--crit-text); } .pill.crit .dot { background: var(--crit); }
 
-.tier {
-  display: inline-block; min-width: 30px; text-align: center;
-  font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 5px;
-  font-variant-numeric: tabular-nums;
-}
+/* ===== 层级徽章（色深 + 形状双编码） ===== */
+.tier { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono);
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 1px 7px 1px 5px;
+  border-radius: 3px; border: 1px solid transparent; font-variant-numeric: tabular-nums; }
+.tier svg { width: 9px; height: 9px; flex: none; }
 .tier-0 { background: var(--tier0); color: var(--tier0-ink); }
 .tier-1 { background: var(--tier1); color: var(--tier1-ink); }
 .tier-2 { background: var(--tier2); color: var(--tier2-ink); }
 .tier-3 { background: var(--tier3); color: var(--tier3-ink); }
 
-/* ---- 探测器面板（状态用语义色：good/warn/crit，不用层级色） ---- */
-.det-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
-  gap: 14px; padding: 14px;
-}
-.det-state {
-  border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;
-  display: flex; flex-direction: column; justify-content: center; gap: 3px;
-}
-.det-state.good { background: var(--good-wash); border-color: var(--good); }
-.det-state.good .det-state-name { color: var(--good-text); }
-.det-state.warn { background: var(--warn-wash); border-color: var(--warn); }
-.det-state.warn .det-state-name { color: var(--warn-text); }
-.det-state.crit { background: var(--crit-wash); border-color: var(--crit); }
-.det-state.crit .det-state-name { color: var(--crit-text); }
-.det-state-name { font-size: 27px; font-weight: 800; letter-spacing: 0.04em;
-                  line-height: 1.15; }
-.det-state-sub { font-size: 12px; color: var(--ink-2); }
-.det-state-meta { font-size: 12px; color: var(--muted); }
-.det-state-meta .sub { display: inline; margin-left: 8px; }
-.det-leg { padding: 12px 2px; }
-.leg-label { font-size: 12px; color: var(--muted); }
-.leg-value { font-size: 24px; font-weight: 700; margin: 2px 0; }
-.leg-unit { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 5px; }
-.leg-sub { font-size: 12px; color: var(--muted); }
-.prog {
-  height: 8px; border-radius: 4px; background: var(--grid);
-  overflow: hidden; margin: 7px 0 5px; max-width: 220px;
-}
-.prog span { display: block; height: 100%; border-radius: 4px;
-             background: var(--warn); min-width: 4px; }
-.det-sub { border-top: 1px solid var(--grid); }
-.det-sub h3 { margin: 10px 14px 4px; }
-.det-sub .feed { padding-bottom: 6px; }
+/* ===== 01 态势总览 hero ===== */
+.hero { display: grid; grid-template-columns: 264px minmax(0,1fr) 300px; gap: 0;
+  overflow: hidden; }
+.hero > div { padding: 20px; min-width: 0; }
+.hero > div + div { border-left: 1px solid var(--border); }
+@media (max-width: 980px){ .hero { grid-template-columns: 1fr; }
+  .hero > div + div { border-left: none; border-top: 1px solid var(--border); } }
+
+.ringwrap { display: flex; flex-direction: column; align-items: center;
+  justify-content: center; }
+.ring { width: 224px; height: 224px; }
+.ring .dial { stroke: var(--baseline); }
+.ring .track { stroke: var(--grid); }
+.ring text { font-family: var(--font-mono); }
+.ring .t-state { font: 600 34px var(--font-serif); fill: var(--ink); letter-spacing: .08em; }
+.ring .t-code { font-size: 11px; letter-spacing: .3em; }
+.ring .t-prog { font-size: 13px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ring .t-sub  { font-size: 10px; fill: var(--muted); letter-spacing: .05em; }
+.ring .wash { animation: breathe 4.5s ease-in-out infinite; transform-origin: 112px 112px; }
+@keyframes breathe { 0%,100%{opacity:.55;} 50%{opacity:1;} }
+@media (prefers-reduced-motion: reduce){ .ring .wash { animation: none; } }
+.ring.warn .prog { stroke: var(--warn); } .ring.warn .wash { fill: var(--warn-wash); }
+.ring.warn .t-code { fill: var(--warn-text); }
+.ring.good .prog { stroke: var(--good); } .ring.good .wash { fill: var(--good-wash); }
+.ring.good .t-code { fill: var(--good-text); }
+.ring.crit .prog { stroke: var(--crit); } .ring.crit .wash { fill: var(--crit-wash); }
+.ring.crit .t-code { fill: var(--crit-text); }
+.ring.off .prog { stroke: var(--muted); } .ring.off .wash { fill: var(--surface-2); }
+.ring.off .t-code { fill: var(--muted); }
+.ring-cap { margin-top: 10px; font-size: 11px; color: var(--muted);
+  letter-spacing: .06em; font-family: var(--font-mono); }
+
+.statement { font: 400 15px/1.7 var(--font-serif); color: var(--ink-2); margin: 0 0 4px; }
+.statement b { font-weight: 600; }
+.st-warn b { color: var(--warn-text); } .st-good b { color: var(--good-text); }
+.st-crit b { color: var(--crit-text); } .st-off b { color: var(--muted); }
+.since { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+.legs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+@media (max-width: 620px){ .legs { grid-template-columns: 1fr; } }
+.leg { background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 14px 16px; min-width: 0; }
+.leg-h { display: flex; align-items: center; gap: 8px; font-size: 12px;
+  color: var(--ink-2); flex-wrap: wrap; }
+.leg-h svg.ic { width: 16px; height: 16px; color: var(--muted); }
+.leg-h .pill { margin-left: auto; }
+.leg .val { font: 600 22px/1.2 var(--font-mono); font-variant-numeric: tabular-nums;
+  margin: 8px 0 2px; }
+.leg .val .unit { font-size: 12px; font-weight: 400; color: var(--muted); }
+.leg .ref { font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); }
+.gauge { height: 5px; background: var(--grid); border-radius: 2px; margin-top: 10px;
+  position: relative; overflow: visible; }
+.gauge > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--muted);
+  border-radius: 2px; }
+.gauge.hit > i { background: var(--warn); }
+.gauge .th { position: absolute; right: 0; top: -3px; bottom: -3px; width: 2px;
+  background: var(--crit); }
+.sparks { display: flex; align-items: flex-end; gap: 2px; height: 34px; margin-top: 10px;
+  border-bottom: 1px solid var(--baseline); position: relative; }
+.sparks > i { flex: 1; max-width: 18px; background: var(--grid); min-height: 2px; }
+.sparks > i.hi { background: var(--warn); }
+.sparks .p95 { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--muted); }
+.legnote { margin-top: 14px; font-size: 12px; color: var(--muted); display: flex;
+  gap: 8px; align-items: flex-start; }
+.legnote svg.ic { width: 15px; height: 15px; margin-top: 2px; }
+
+.lamps { display: flex; flex-direction: column; gap: 2px; }
+.lamp { display: flex; align-items: center; gap: 12px; padding: 9px 6px; border-radius: 6px; }
+.lamp .bulb { width: 16px; height: 16px; border-radius: 50%; flex: none;
+  border: 1.6px solid var(--muted); background: transparent; }
+.lamp .name { font-family: var(--font-mono); font-size: 11px; letter-spacing: .14em;
+  color: var(--muted); width: 88px; }
+.lamp .zh { font-size: 12.5px; color: var(--muted); }
+.lamp.g .bulb { border-color: var(--good); }
+.lamp.w .bulb { border-color: var(--warn); }
+.lamp.c .bulb { border-color: var(--crit); }
+.lamp.on .zh { color: var(--ink); font-weight: 600; }
+.lamp.on.w { background: var(--warn-wash); }
+.lamp.on.w .bulb { background: var(--warn); border-color: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-wash), 0 0 14px 1px var(--warn-wash); }
+.lamp.on.w .name { color: var(--warn-text); }
+.lamp.on.g { background: var(--good-wash); }
+.lamp.on.g .bulb { background: var(--good); border-color: var(--good);
+  box-shadow: 0 0 0 3px var(--good-wash), 0 0 14px 1px var(--good-wash); }
+.lamp.on.g .name { color: var(--good-text); }
+.lamp.on.c { background: var(--crit-wash); }
+.lamp.on.c .bulb { background: var(--crit); border-color: var(--crit);
+  box-shadow: 0 0 0 3px var(--crit-wash), 0 0 14px 1px var(--crit-wash); }
+.lamp.on.c .name { color: var(--crit-text); }
+.sideblock { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.sideblock .bt { display: flex; gap: 8px; align-items: center; font-size: 12px;
+  color: var(--ink-2); margin-bottom: 8px; }
+.sideblock .bt svg.ic { width: 15px; height: 15px; color: var(--muted); }
+.kv { display: flex; justify-content: space-between; gap: 12px; font-size: 12px;
+  padding: 3px 0; }
+.kv .k { color: var(--muted); }
+.kv .v { font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  color: var(--ink-2); text-align: right; }
+.det-more { margin-top: 12px; }
+.det-sub h3 { margin: 12px 16px 4px; }
 .det-table { min-width: 640px; }
 
-/* ---- 渠道权重（数值条按层级色阶着色） ---- */
-td.wt { min-width: 96px; }
-.wt-cell { display: inline-flex; align-items: center; gap: 8px; }
-.wt-bar {
-  width: 52px; height: 6px; border-radius: 3px; background: var(--grid);
-  overflow: hidden; flex: none;
-}
-.wt-bar span { display: block; height: 100%; border-radius: 3px; }
-.wtf-0 { background: var(--tier0); } .wtf-1 { background: var(--tier1); }
-.wtf-2 { background: var(--tier2); } .wtf-3 { background: var(--tier3); }
-tr.row-off .wt-bar span { opacity: 0.45; }
+/* ===== 表格 ===== */
+.scroll-x { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 720px; }
+th, td { text-align: left; padding: 8px 14px; white-space: nowrap; }
+thead th { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .08em;
+  font-family: var(--font-mono); border-bottom: 1px solid var(--grid); }
+tbody tr { border-bottom: 1px solid var(--grid); }
+tbody tr:last-child { border-bottom: none; }
+tr.row-crit { background: var(--crit-wash); }
+td .sub { display: block; font-size: 11px; color: var(--muted);
+  font-family: var(--font-mono); white-space: nowrap; }
+td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
+  overflow: hidden; text-overflow: ellipsis; }
 
-.feed { list-style: none; margin: 0; padding: 2px 0; }
-.ev {
-  display: flex; align-items: baseline; gap: 10px;
-  padding: 6px 14px; border-bottom: 1px solid var(--grid);
-}
-.ev:last-child { border-bottom: none; }
-.ev-time { flex: none; width: 84px; color: var(--ink-2); font-size: 12.5px; }
-.ev .tier { flex: none; }
-.ev-src { flex: none; width: 74px; font-size: 12px; color: var(--muted); }
-.ev-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ev-type { flex: none; font-size: 11.5px; color: var(--muted); }
-
-.charts {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 18px; padding: 12px 14px 4px;
-}
-.chart svg { width: 100%; height: auto; display: block; }
-.svg-label { font-size: 12px; font-weight: 700; fill: var(--ink-2);
-             font-variant-numeric: tabular-nums; }
-.svg-value { font-size: 12px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
-.bar-0 { fill: var(--tier0); } .bar-1 { fill: var(--tier1); }
-.bar-2 { fill: var(--tier2); } .bar-3 { fill: var(--tier3); }
-.legend-line { display: flex; gap: 16px; flex-wrap: wrap; }
-.lg { display: inline-flex; align-items: center; gap: 6px; }
-.sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-.sw-0 { background: var(--tier0); } .sw-1 { background: var(--tier1); }
-.sw-2 { background: var(--tier2); } .sw-3 { background: var(--tier3); }
-
-/* ---- 标的标签栏（多标的预留位） ---- */
-.sym-tabs {
-  display: flex; align-items: center; gap: 6px;
-  margin-top: 26px; margin-bottom: -10px; padding-bottom: 2px;
-}
-.sym-tab {
-  font-size: 13px; font-weight: 700; letter-spacing: 0.03em;
-  padding: 5px 18px; border: 1px solid var(--border); border-radius: 7px;
-  color: var(--muted); background: transparent;
-}
-.sym-tab.act { background: var(--tier0); color: var(--tier0-ink);
-               border-color: var(--tier0); }
-.sym-hint { font-size: 11.5px; color: var(--muted); margin-left: 6px; }
-
-/* ---- 走势与历史判断 ---- */
-.tv-bar {
-  display: flex; justify-content: space-between; align-items: center;
-  gap: 12px; flex-wrap: wrap; padding: 12px 14px 6px;
-}
-.tv-ranges {
-  display: inline-flex; border: 1px solid var(--border);
-  border-radius: 6px; overflow: hidden; flex: none;
-}
-.tv-rb {
-  appearance: none; border: none; background: transparent; cursor: pointer;
-  color: var(--ink-2); font: inherit; font-size: 12.5px; font-weight: 600;
-  padding: 4px 14px; border-right: 1px solid var(--border);
-}
+/* ===== 02 战场走势 ===== */
+.sym-tabs { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
+.sym-tab { font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .06em; padding: 4px 16px; border: 1px solid var(--border);
+  border-radius: 4px; color: var(--muted); background: transparent; }
+.sym-tab.act { background: var(--surface-2); color: var(--ink);
+  border-color: var(--muted); }
+.sym-hint { font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  margin-left: 6px; letter-spacing: .06em; }
+.chartcard { padding: 16px 18px 10px; }
+.legendrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  margin-bottom: 12px; padding: 0; }
+.legendrow .spacer { flex: 1; }
+.tv-ranges { display: inline-flex; border: 1px solid var(--border);
+  border-radius: 4px; overflow: hidden; flex: none; }
+.tv-rb { appearance: none; border: none; background: transparent; cursor: pointer;
+  color: var(--ink-2); font: 600 11px var(--font-mono); letter-spacing: .08em;
+  padding: 6px 14px; border-right: 1px solid var(--border); }
 .tv-rb:last-child { border-right: none; }
-.tv-rb.act { background: var(--tier0); color: var(--tier0-ink); }
+.tv-rb.act { background: var(--surface-2); color: var(--ink); }
 .tv-layers { display: flex; gap: 8px; flex-wrap: wrap; }
-.tv-lb {
-  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
-  appearance: none; font: inherit; font-size: 12px; font-weight: 600;
-  color: var(--ink-2); background: transparent;
-  border: 1px solid var(--border); border-radius: 999px; padding: 3px 11px;
-}
-.tv-lb .cnt { color: var(--muted); font-weight: 400;
-              font-variant-numeric: tabular-nums; }
-.tv-lb.off { opacity: 0.4; }
-.tv-lb[disabled] { opacity: 0.4; cursor: not-allowed; }
-.sw-band { width: 10px; height: 10px; border-radius: 2px; flex: none;
-           background: var(--band); border: 1px solid var(--crit); }
-.sw-tri { width: 0; height: 0; flex: none;
-          border-left: 5px solid transparent; border-right: 5px solid transparent; }
-.sw-tri.up { border-bottom: 9px solid var(--mk-gold); }
-.sw-tri.dn { border-top: 9px solid var(--mk-trap); }
-.sw-dot { width: 9px; height: 9px; border-radius: 50%; flex: none;
-          background: var(--mk-blue); }
-.sw-dia { width: 8px; height: 8px; flex: none; background: var(--crit);
-          transform: rotate(45deg); }
-.tv-wrap { position: relative; padding: 2px 8px 0; }
+.lg { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  user-select: none; appearance: none; font: inherit; border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 10px; font-size: 12px; color: var(--ink-2);
+  background: var(--surface-2); }
+.lg svg { width: 20px; height: 14px; flex: none; }
+.lg .ct { font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums; }
+.lg.off { opacity: .38; border-style: dashed; }
+.lg:hover:not([disabled]) { border-color: var(--muted); }
+.lg[disabled] { opacity: .38; cursor: not-allowed; border-style: dashed; }
+.tv-wrap { position: relative; padding: 2px 0 0; }
 .tv-view { display: none; }
 .tv-view.act { display: block; }
 .tv-svg { width: 100%; height: auto; display: block; }
 .tv-grid line { stroke: var(--grid); stroke-width: 1; }
-.tv-tick { font-size: 11px; fill: var(--muted);
-           font-variant-numeric: tabular-nums; }
-.tv-price { fill: none; stroke: var(--chart-line); stroke-width: 2;
-            stroke-linejoin: round; stroke-linecap: round; }
-.ly-risk rect { fill: var(--band); }
-.mk { stroke: var(--surface); stroke-width: 2; paint-order: stroke; }
-.mk-gold { fill: var(--mk-gold); }
-.mk-trap { fill: var(--mk-trap); }
-.mk-musk { fill: var(--mk-blue); }
-.mk-trd-r { fill: var(--crit); }
-.mk-trd-g { fill: var(--good); }
+.tv-tick { font-family: var(--font-mono); font-size: 10.5px; fill: var(--muted);
+  font-variant-numeric: tabular-nums; }
+.tv-price { fill: none; stroke: var(--ink-2); stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round; }
+.tv-end { fill: var(--ink); }
+.tv-endlab { font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  fill: var(--ink); }
+.band-wash { fill: var(--crit-wash); }
+.band-edge { stroke: var(--crit); stroke-width: 1; stroke-dasharray: 3 3; opacity: .6; }
+.band-tag { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px;
+  fill: var(--crit-text); }
+.mk-halo { stroke: var(--surface); stroke-width: 4.5; fill: none; }
+.mk-tag { font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; }
 .tv-hit { fill: transparent; cursor: pointer; }
 .tv-ov { fill: transparent; }
-.xh line { stroke: var(--muted); stroke-width: 1; }
-.xh circle { fill: var(--chart-line); stroke: var(--surface); stroke-width: 2; }
+.xh line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; }
+.xh circle { fill: none; stroke: var(--ink); stroke-width: 1.6; }
 #tv.hide-risk .ly-risk, #tv.hide-pitg .ly-pitg, #tv.hide-pitt .ly-pitt,
 #tv.hide-musk .ly-musk, #tv.hide-trade .ly-trade { display: none; }
-#tv-tip {
-  position: absolute; z-index: 5; pointer-events: none;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 6px; padding: 6px 10px; font-size: 12px;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.18); max-width: 280px;
-}
+#tv-tip { position: absolute; z-index: 5; pointer-events: none;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 10px; font-family: var(--font-mono); font-size: 11.5px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.25); max-width: 300px; }
 #tv-tip div { color: var(--ink-2); white-space: nowrap;
-              font-variant-numeric: tabular-nums; }
-#tv-tip .tt-head { font-weight: 700; color: var(--ink); }
-.tv-table { margin: 4px 14px 8px; font-size: 12.5px; }
+  font-variant-numeric: tabular-nums; }
+#tv-tip .tt-head { font-weight: 600; color: var(--ink); }
+.axis-note { display: flex; gap: 18px; padding: 8px 2px 6px; font-size: 11px;
+  color: var(--muted); font-family: var(--font-mono); flex-wrap: wrap; }
+.tv-table { margin: 4px 0 8px; font-size: 12.5px; }
 .tv-table summary { cursor: pointer; color: var(--muted); font-size: 12px;
-                    padding: 4px 0; }
+  padding: 4px 0; }
 .tv-table table { min-width: 640px; }
 
-/* ---- 层级小图标 + 渠道矩阵 ---- */
-.t-ic, .ev-ic {
-  fill: none; stroke: currentColor; stroke-width: 2;
-  stroke-linecap: round; stroke-linejoin: round; color: var(--ink-2);
-}
-.t-ic { width: 18px; height: 18px; flex: none; }
-.ev-ic { width: 14px; height: 14px; flex: none; align-self: center;
-         stroke-width: 2.2; color: var(--muted); }
-.tier-group { border-bottom: 1px solid var(--grid); padding: 10px 14px 14px; }
+/* ===== 03 渠道健康（层级分组卡片） ===== */
+.t-ic { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+  color: var(--ink-2); }
+.tier-group { border-bottom: 1px solid var(--grid); padding: 12px 16px 16px; }
 .tier-group:last-child { border-bottom: none; }
-.tier-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.tier-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .tier-head h3 { margin: 0; }
-.src-cards {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
-  gap: 10px;
-}
-.src-card {
-  border: 1px solid var(--grid); border-radius: 8px; padding: 9px 12px;
-  display: flex; flex-direction: column; gap: 3px; min-width: 0;
-}
+.tier-head .h-sub { font-family: var(--font-mono); font-size: 11px; }
+.src-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  gap: 12px; }
+.src-card { border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); padding: 10px 12px; display: flex;
+  flex-direction: column; gap: 4px; min-width: 0; }
 .src-card.crit { background: var(--crit-wash); border-color: var(--crit); }
-.src-card.offline { color: var(--muted); }
-.sc-top { display: flex; justify-content: space-between; align-items: center;
-          gap: 8px; }
+.src-card.offline { color: var(--muted); opacity: .75; }
+.sc-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sc-top strong { font-family: var(--font-mono); font-size: 12.5px; letter-spacing: .02em; }
 .sc-name { font-size: 11.5px; color: var(--muted); overflow: hidden;
-           text-overflow: ellipsis; white-space: nowrap; }
+  text-overflow: ellipsis; white-space: nowrap; }
 .sc-met { display: flex; gap: 12px; align-items: center; font-size: 12px;
-          color: var(--ink-2); flex-wrap: wrap; }
-.sc-sub { font-size: 11.5px; color: var(--muted); }
+  color: var(--ink-2); flex-wrap: wrap; }
+.sc-sub { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .sc-sub .rel { margin-left: 6px; }
+.wt-cell { display: inline-flex; align-items: center; gap: 8px; }
+.wt-bar { width: 52px; height: 4px; border-radius: 2px; background: var(--grid);
+  overflow: hidden; flex: none; }
+.wt-bar span { display: block; height: 100%; background: var(--ink-2); }
+.wtf-0, .wtf-1, .wtf-2, .wtf-3 { background: var(--ink-2); }
 
-.footnote { font-size: 12px; color: var(--muted); margin: 8px 14px 10px; }
-.empty { color: var(--muted); padding: 30px 14px; }
-footer { max-width: 1080px; margin: 24px auto 40px; padding: 0 20px;
-         font-size: 12px; color: var(--muted); }
+/* ===== 04 最新情报流 ===== */
+.feed { list-style: none; margin: 0; padding: 6px 0; }
+.ev { display: flex; align-items: baseline; gap: 12px; padding: 8px 16px;
+  border-bottom: 1px solid var(--grid); }
+.ev:last-child { border-bottom: none; }
+.ev-time { flex: none; width: 86px; color: var(--muted); font-size: 11.5px; }
+.ev .tier { flex: none; }
+.ev-src { flex: none; width: 96px; font-size: 12px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; }
+.ev-title { min-width: 0; flex: 1; font-size: 13px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.ev-title a { color: inherit; }
+.ev-title a:hover { color: var(--link); }
+.ev-type { flex: none; color: var(--muted); }
+
+/* ===== 05 计数与时延 ===== */
+.duo { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.duo.one { grid-template-columns: 1fr; }
+@media (max-width: 860px){ .duo { grid-template-columns: 1fr; } }
+.duo-card { padding: 16px 18px; }
+.duo-card h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; }
+.duo-card h3 svg.ic { width: 15px; height: 15px; color: var(--muted); }
+.duo-card .cap { font-size: 11px; color: var(--muted); margin-bottom: 12px;
+  font-family: var(--font-mono); }
+.brow { display: grid; grid-template-columns: 64px 1fr 96px; gap: 10px;
+  align-items: center; padding: 7px 0; }
+.brow .bars { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.brow .b { height: 8px; border-radius: 0 2px 2px 0; min-width: 2px; display: block; }
+.brow .b.dim { opacity: .42; }
+.brow .n { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums; text-align: right; line-height: 1.5; }
+.lat-scale { position: relative; height: 14px; margin: 2px 0 10px; }
+.lat-scale .tk { position: absolute; top: 0; font-family: var(--font-mono);
+  font-size: 10px; color: var(--muted); transform: translateX(-50%); }
+.lrow { display: grid; grid-template-columns: 140px 1fr 122px; gap: 10px;
+  align-items: center; padding: 8px 0; }
+@media (max-width: 1100px){ .lrow { grid-template-columns: 120px 1fr 110px; } }
+.lrow .lbl { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.lrow .sid { font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrow .rail { position: relative; height: 14px; min-width: 0; }
+.lrow .rail .base { position: absolute; left: 0; right: 0; top: 6.5px; height: 1px;
+  background: var(--grid); }
+.lrow .range { position: absolute; top: 5px; height: 4px; border-radius: 2px; }
+.lrow .p50 { position: absolute; top: 2px; width: 10px; height: 10px;
+  border-radius: 50%; transform: translateX(-50%); border: 2px solid var(--surface); }
+.lrow .p50.p90 { width: 7px; height: 7px; top: 3.5px; border-radius: 1px; }
+.lrow .n { font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums; text-align: right; }
+
+/* ===== footer ===== */
+.footnote { font-size: 12px; color: var(--muted); margin: 8px 16px 12px; }
+section > .footnote { margin-left: 2px; margin-right: 2px; }
+.empty { color: var(--muted); padding: 30px 16px; }
+footer { max-width: 1200px; margin: 56px auto 40px; padding: 16px 24px 0;
+  border-top: 1px solid var(--border); display: flex; gap: 10px; flex-wrap: wrap;
+  align-items: center; font-size: 12px; color: var(--muted); }
+.chip { font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 3px; padding: 3px 9px;
+  font-variant-numeric: tabular-nums; letter-spacing: .03em; }
+footer .end { margin-left: auto; font-family: var(--font-mono); font-size: 11px;
+  color: var(--muted); letter-spacing: .06em; }
 @media (max-width: 640px) {
   .ev-title { white-space: normal; }
   .ev { flex-wrap: wrap; }
 }
-"""
+""".replace("__LIGHT__", _LIGHT_TOKENS)
 
 _JS = """
+/* 主题：默认跟随系统（prefers-color-scheme），URL ?theme= 或页内按钮显式覆盖 */
+(function () {
+  var root = document.documentElement;
+  var q = null;
+  try { q = new URLSearchParams(location.search).get("theme"); } catch (e) {}
+  if (q === "light" || q === "dark") {
+    root.dataset.theme = q;
+  } else if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: light)");
+    root.dataset.theme = mq.matches ? "light" : "dark";
+    if (mq.addEventListener)
+      mq.addEventListener("change", function (e) {
+        if (!root.dataset.userTheme)
+          root.dataset.theme = e.matches ? "light" : "dark";
+      });
+  }
+  var btn = document.getElementById("themebtn");
+  if (!btn) return;
+  function label() {
+    btn.textContent = root.dataset.theme === "dark" ? "切换亮色" : "切换暗色";
+  }
+  btn.addEventListener("click", function () {
+    root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+    root.dataset.userTheme = "1";
+    label();
+  });
+  label();
+})();
 (function () {
   var STALE_MS = %(stale_ms)d;
   function ago(iso) {
@@ -1671,7 +2138,7 @@ _JS = """
     var pill = document.getElementById("poll-pill");
     if (pt && pt.getAttribute("data-iso")) {
       var stale = Date.now() - Date.parse(pt.getAttribute("data-iso")) > STALE_MS;
-      var stat = pt.closest(".stat");
+      var stat = pt.closest(".stamp");
       if (stat) stat.classList.toggle("crit-text", stale);
       if (pill && stale) {
         pill.className = "pill crit";
@@ -1791,7 +2258,7 @@ def render(db_path: Path = DB_PATH) -> str:
         has_trades_table = has_table(conn, "detector_trades")
         body = [_ICON_SPRITE, render_topbar(conn, now)]
         dates, closes = load_daily_closes()
-        symbol_block = render_symbol_tabs() + render_symbol_view(
+        symbol_block = render_symbol_view(
             "TSLA", dates, closes,
             load_risk_segments(), load_pits(), load_musk_buys(),
             det["trades"] if det else [], has_trades_table,
@@ -1801,18 +2268,31 @@ def render(db_path: Path = DB_PATH) -> str:
             symbol_block,
             render_health(load_health(conn, sources), now),
             render_timeline(load_timeline(conn), now),
-            render_latency(load_latency(conn), sources),
-            render_tier_chart(load_tier_counts(conn, now)),
+            render_counts_latency(
+                load_tier_counts(conn, now), load_latency(conn), sources
+            ),
         ]
         rendered = [s for s in sections if s]
+        # 板块等宽序号（01 态势…）：按实际渲染顺序编号，缺板块自动顺延
+        rendered = [
+            s.replace("__NO__", f"{i:02d}", 1) for i, s in enumerate(rendered, start=1)
+        ]
         if not rendered:
             rendered = ['<p class="empty">数据库暂无可展示的表——待哨兵首采后刷新。</p>']
         body.append("<main>" + "".join(rendered) + "</main>")
     finally:
         conn.close()
     body.append(
-        f"<footer>数据源：{esc(str(db_path))} · 只读渲染 · "
-        f"重生成：<code>python -m intel.dashboard</code></footer>"
+        "<footer>"
+        f'<span class="chip">CALIB {CALIB_BDAYS}bd</span>'
+        f'<span class="chip">SHORT_JUMP +{SHORT_JUMP_PCT:.1f}%</span>'
+        f'<span class="chip">LOOKBACK {LOOKBACK_BDAYS}bd</span>'
+        f'<span class="chip">PERSIST {PERSIST_BDAYS}bd</span>'
+        f'<span class="chip">COST {COST_LINE * 1e4:+.2f}bp</span>'
+        f"<span>数据源 {esc(str(db_path))} · 只读渲染 · "
+        "重生成 <code>python -m intel.dashboard</code></span>"
+        '<span class="end">静态快照 · 非实时 · 假想推演不碰真钱</span>'
+        "</footer>"
     )
     return (
         "<!DOCTYPE html>\n"
