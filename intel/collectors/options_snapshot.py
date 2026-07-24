@@ -71,7 +71,8 @@ class OptionsSnapshotCollector(Collector):
         "cost": "free",
         "weight_source": 0.7,
         "notes": "历史不可得，快照从 2026-07-24 起攒；OI 为前一交易日清算数据，"
-                 "volume 为抓取时刻盘中累计；明细进 options_chain 表",
+                 "volume 为抓取时刻盘中累计；明细进 options_chain 表；"
+                 "警告：Yahoo OI 字段有抽风期（整链 0，见 oi_quality 旗标）",
     }
 
     def fetch(self):
@@ -181,6 +182,9 @@ class OptionsSnapshotCollector(Collector):
             "call_oi": coi,
             "put_oi": poi,
             "pc_ratio_oi": round(poi / coi, 3) if coi else None,
+            # 数据质量旗标：yfinance 的 OI 有历史性抽风期（整链返回 0，2026-07-24 实测）；
+            # OI 总量 < 日 volume 的 10% 视为可疑，OI 类特征该日不可用
+            "oi_quality": "suspect_zero" if (coi + poi) < 0.1 * (cvol + pvol) else "ok",
             "prev_snapshot_date": prev,
             "top_oi_changes": oi_jumps,
         }
