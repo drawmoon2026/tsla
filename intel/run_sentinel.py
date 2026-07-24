@@ -31,6 +31,7 @@ from intel.collectors.polymarket import PolymarketCollector
 from intel.collectors.uspto import UsptoCollector
 from intel.collectors.x_nitter import PAID_FALLBACK, XNitterCollector
 from intel.collectors.youtube import YoutubeCollector
+from intel.detector import CausalDetector
 
 COLLECTORS = [
     EdgarCollector,
@@ -44,6 +45,7 @@ COLLECTORS = [
     NewsRssCollector,
     XNitterCollector,
     PolymarketCollector,
+    CausalDetector,   # 值班组件（非采集渠道）：必须排在所有采集器之后跑状态机
 ]
 
 

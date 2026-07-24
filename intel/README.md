@@ -81,8 +81,12 @@ intel/deploy/                 launchd plist 模板（未加载）+ 部署说明
 .venv/bin/python -m intel.collectors.news_rss --once
 .venv/bin/python -m intel.collectors.x_nitter --once
 
-# 全渠道一轮（慢渠道自动节流；--force 忽略节流）
+# 全渠道一轮（慢渠道自动节流；--force 忽略节流；末尾自动跑因果探测器状态机）
 .venv/bin/python -m intel.run_sentinel --once
+
+# 因果探测器：单跑一轮 / 值班报告
+.venv/bin/python -m intel.detector --once
+.venv/bin/python -m intel.detector_report          # --no-price 离线判分
 
 # 库内统计（渠道/事件量/时延分布/最近轮询）
 .venv/bin/python -m intel.run_sentinel --status
@@ -94,6 +98,32 @@ cp intel/deploy/com.tsla.sentinel.plist ~/Library/LaunchAgents/ && \
 
 调度节奏：launchd 每 5 分钟触发 `--once --auto`；盘中（美东 09:30-16:00）每次真跑，
 盘外只在整点/半点后 5 分钟窗口内跑（≈30 分钟一轮）。与 `com.tsla.shadow` label 独立。
+
+## 因果探测器（N3 前向值班，2026-07-24 上线）
+
+`intel/detector.py` 把 N3-H 冻结规则做成哨兵常驻值班组件（`run_sentinel` 每轮在
+全部采集器之后运行，`COLLECTORS` 末位注册，source_id=`detector`）：
+
+- **冻结规则（不许改）**：Musk 密集发帖日（act=次交易日）× 回看 20 交易日内有
+  空头利益 up-jump 发布（events 表 finra_short 的 change_pct >= +10%）→ RISK_OFF，
+  持续 F20（触发日起 20 交易日，重叠触发顺延）。窄谱过滤器定位见
+  docs/strategy-lab.md N3-H 条目。
+- **标定模式（预先声明的校准问题）**：前向放风腿是 x_nitter RSS 口径（post+RT、
+  无 reply），≠ 历史 Sprinklr 归档（含 reply），历史密集参考值 65 帖/日不可直接用。
+  实现 = 分位数映射：65 在 musk_tweets.csv 全档日计数分布（2018-01→2025-05，
+  2683 天，0 补齐）的经验分位数 **0.8789** 写死；前 20 个交易日只累积 nitter 口径
+  日计数基线（状态输出 `CALIBRATING`，不出信号），期满后阈值 = nitter 基线
+  （扩张窗，持续累积）的同分位数，每日重算。这是标定实现，不是改规则。
+- **落库**：每交易日状态写 `detector_state` 表（状态/两腿读数/阈值/基线进度/
+  risk_off_until；盘中多次轮询覆盖更新当日行）；状态切换时向 events 表发一条
+  source=detector 事件（title 含状态与两腿数值，仪表盘情报流自动显示）；
+  RISK_OFF 触发/解除各记一条假想单进 `detector_trades`（yfinance TSLA 价格快照，
+  取价失败 NULL 如实记），周报判分用（判分成本线 -6bp，与 N3-H 日记同口径）。
+- **值班报告**：`intel/detector_report.py` —— 当前状态、两腿最新读数、标定进度、
+  历史状态切换、假想单判分（REDUCE→RESTORE 配对；未平仓用现价浮动判分）。
+- **口径边界（如实声明）**：nitter RT 时间为原帖时间；nitter 宕机期间日计数低估
+  会污染基线（poll_log 可查）；交易日用 numpy busday（周一至五）近似、不剔美股
+  假日，F20 到期日可能偏移 ~1 日。
 
 ## 加一个新渠道的方法
 

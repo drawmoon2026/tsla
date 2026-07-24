@@ -54,6 +54,20 @@ FEATURES = [
 FORBIDDEN_FEATURES = {"outcome", "rebound_t", "rebound_p", "rebound_pct", "bars_to_rebound"}
 assert not (set(FEATURES) & FORBIDDEN_FEATURES), "future-information column in FEATURES"
 
+# E12 intel features (optional; see add_intel_features). Kept OUT of FEATURES so
+# every existing pipeline that does not opt in is byte-identical to before.
+# STATUS: INACTIVE (E12 verdict 2026-07-24) — leave-TSLA-out AUC gain +0.004
+# < pre-registered 0.005 gate (outputs/e12_intel_features/). Not part of any
+# production feature set; kept for the forward re-test once the sentinel's
+# x_nitter stream fills the Musk archive gap.
+INTEL_FEATURES = [
+    "si_chg_recent",     # change_pct of the latest short-interest report PUBLISHED
+                         # at or before the confirm-bar close (anti-lookahead)
+    "si_days_since",     # staleness: days since that report's (approx) publication
+    "musk_daily_posts",  # Musk posts on the event's ET day up to confirm-bar close
+                         # (TSLA only, archive-covered days only; else NaN)
+]
+
 
 def load_events(events_csv: Path) -> pd.DataFrame:
     ev = pd.read_csv(events_csv)
@@ -181,6 +195,106 @@ def build_dataset(ev: pd.DataFrame, bars: pd.DataFrame) -> tuple[pd.DataFrame, d
 
     info = {"drops": drops, "n_ambiguous_bars": n_ambiguous}
     return pd.DataFrame(rows), info
+
+
+# --------------------------------------------------------- intel features (E12)
+def load_short_interest_events(csv_path: Path) -> pd.DataFrame:
+    """Parse a finra_short-schema intel CSV (event_time_utc,source,type,payload)
+    into [pub_time_utc, si_change_pct], sorted by publication time.
+
+    event_time_utc is the APPROXIMATE publication moment (settlement + 9
+    business days 16:00 ET — same convention as N2); using it as the
+    visibility time is the anti-lookahead contract for these features."""
+    import json
+
+    df = pd.read_csv(csv_path)
+    df = df[df["type"] == "short_interest"].copy()
+    df["pub_time_utc"] = pd.to_datetime(df["event_time_utc"], utc=True)
+    df["si_change_pct"] = [
+        json.loads(p).get("change_pct") for p in df["payload"]
+    ]
+    return (
+        df[["pub_time_utc", "si_change_pct"]]
+        .dropna(subset=["pub_time_utc"])
+        .sort_values("pub_time_utc")
+        .reset_index(drop=True)
+    )
+
+
+def load_musk_post_times(csv_path: Path) -> pd.DatetimeIndex:
+    """Timestamps (UTC, sorted) of every archived Musk post/reply/repost."""
+    df = pd.read_csv(csv_path, usecols=["event_time_utc"])
+    return pd.DatetimeIndex(
+        pd.to_datetime(df["event_time_utc"], utc=True, format="ISO8601")
+    ).sort_values()
+
+
+def add_intel_features(
+    ds: pd.DataFrame,
+    si: pd.DataFrame | None = None,
+    musk_times: pd.DatetimeIndex | None = None,
+    bar_minutes: int = 5,
+) -> pd.DataFrame:
+    """Append the E12 intel feature columns to a build_dataset() output.
+
+    Optional, additive helper — pipelines that never call it are unchanged
+    (backward compatible). All features use only information available at the
+    confirm-bar CLOSE (= trough_confirm_t + bar_minutes), per the module's
+    anti-lookahead contract:
+
+    - si_chg_recent : change_pct of the latest short-interest report whose
+      (approx) publication time <= confirm-bar close. NaN before the first
+      report / when `si` is None.
+    - si_days_since : (confirm-bar close - that report's publication) in days.
+    - musk_daily_posts : number of archived Musk posts on the event's ET day
+      with timestamp <= confirm-bar close. NaN when `musk_times` is None or
+      when the event's ET day is outside the archive's fully-covered range
+      (strictly after the first archive day and strictly before the last,
+      which may be truncated mid-day). LightGBM handles NaN natively.
+    """
+    out = ds.copy()
+    asof = pd.to_datetime(out["trough_confirm_t"], utc=True) + pd.Timedelta(
+        minutes=bar_minutes
+    )
+    # naive-UTC datetime64[ns] arrays (tz-aware .to_numpy() yields object dtype)
+    asof_np = asof.dt.tz_convert("UTC").dt.tz_localize(None).to_numpy()
+
+    if si is None or len(si) == 0:
+        out["si_chg_recent"] = np.nan
+        out["si_days_since"] = np.nan
+    else:
+        pub = (
+            si["pub_time_utc"].dt.tz_convert("UTC").dt.tz_localize(None).to_numpy()
+        )
+        chg = si["si_change_pct"].to_numpy(dtype=float)
+        pos = np.searchsorted(pub, asof_np, side="right") - 1
+        safe = np.maximum(pos, 0)
+        have = pos >= 0
+        out["si_chg_recent"] = np.where(have, chg[safe], np.nan)
+        days = (asof_np - pub[safe]) / np.timedelta64(1, "D")
+        out["si_days_since"] = np.where(have, days, np.nan)
+
+    if musk_times is None or len(musk_times) == 0:
+        out["musk_daily_posts"] = np.nan
+    else:
+        mt = musk_times.tz_convert("UTC").tz_localize(None).to_numpy()
+        asof_et = asof.dt.tz_convert(ET)
+        day_start = (
+            asof_et.dt.normalize()
+            .dt.tz_convert("UTC")
+            .dt.tz_localize(None)
+            .to_numpy()
+        )
+        lo = np.searchsorted(mt, day_start, side="left")
+        hi = np.searchsorted(mt, asof_np, side="right")
+        cnt = (hi - lo).astype(float)
+        et_days = np.asarray(asof_et.dt.date)
+        arc = musk_times.tz_convert(ET)
+        first_day, last_day = arc[0].date(), arc[-1].date()
+        covered = (et_days > first_day) & (et_days < last_day)
+        out["musk_daily_posts"] = np.where(covered, cnt, np.nan)
+
+    return out
 
 
 def make_lgbm(seed: int = SEED):

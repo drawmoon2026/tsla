@@ -202,6 +202,29 @@ def load_intel(name: str) -> pd.DataFrame:
     return df.sort_values("event_time_utc").reset_index(drop=True)
 
 
+def si_signature(si: pd.DataFrame, t1: pd.Timestamp) -> tuple[dict, dict | None]:
+    """空头利益签名（只用发布时刻 <= t1 的期次）。返回 (特征 dict, 最新 payload 或 None).
+
+    N4/N5 共用：si_latest_chg_pct、si_days_to_cover、si_chg_6wk_pct
+    （最新一期 vs ~6 周前最近已发布期的水平变化）。
+    """
+    f = {"si_latest_chg_pct": np.nan, "si_days_to_cover": np.nan,
+         "si_chg_6wk_pct": np.nan}
+    hist = si[si["event_time_utc"] <= t1]
+    if not len(hist):
+        return f, None
+    last = hist.iloc[-1]["payload"]
+    f["si_latest_chg_pct"] = last.get("change_pct")
+    f["si_days_to_cover"] = last.get("days_to_cover")
+    older = hist[hist["event_time_utc"] <= t1 - pd.Timedelta(days=42)]
+    if len(older):
+        o = older.iloc[-1]["payload"]
+        f["si_chg_6wk_pct"] = (
+            (last["short_interest"] / o["short_interest"] - 1) * 100
+            if o.get("short_interest") else np.nan)
+    return f, last
+
+
 def rsi14(close: pd.Series) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1 / 14, min_periods=14).mean()
@@ -265,23 +288,11 @@ class IntelBook:
         v60 = v.iloc[max(0, i - 65): max(0, i - 5)].mean()
         f["vol_ratio_5_60"] = v.iloc[max(0, i - 4): i + 1].mean() / v60 if v60 else np.nan
 
-        # 空头利益（发布时刻 <= 坑底收盘）
-        si_hist = self.si[self.si["event_time_utc"] <= t1]
-        if len(si_hist):
-            last = si_hist.iloc[-1]["payload"]
-            f["si_latest_chg_pct"] = last.get("change_pct")
-            f["si_days_to_cover"] = last.get("days_to_cover")
-            older = si_hist[si_hist["event_time_utc"] <= t1 - pd.Timedelta(days=42)]
-            if len(older):
-                o = older.iloc[-1]["payload"]
-                f["si_chg_6wk_pct"] = (
-                    (last["short_interest"] / o["short_interest"] - 1) * 100
-                    if o.get("short_interest") else np.nan)
-            else:
-                f["si_chg_6wk_pct"] = np.nan
-            raw["si_latest"] = last
-        else:
-            f["si_latest_chg_pct"] = f["si_days_to_cover"] = f["si_chg_6wk_pct"] = np.nan
+        # 空头利益（发布时刻 <= 坑底收盘）——公共函数 si_signature（N5 复用）
+        si_f, si_last = si_signature(self.si, t1)
+        f.update(si_f)
+        if si_last is not None:
+            raw["si_latest"] = si_last
 
         # 内部人（Form 4 申报时刻 <= 坑底收盘）
         f4 = self._win(self.form4, t0, t1)
