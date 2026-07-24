@@ -54,6 +54,15 @@ SHORT_JUMP_PCT = 10.0    # up-jump：空头利益双周 change_pct >= +10%
 LOOKBACK_BDAYS = 20      # 密集日回看窗（交易日）
 PERSIST_BDAYS = 20       # F20：触发日起 20 个交易日 risk-off，重叠触发顺延
 
+# ---- 拆股防护（N6 复核加装，数据伪影防御，非规则参数） ----------------------
+# FINRA short_interest 为未复权股数：拆股跨期会产生假 up-jump（历史实例：
+# 2020-08-31 期 5:1 拆股 +345.8%、2022-08-31 期 3:1 拆股 +202.2%，见
+# outputs/n6_split_audit）。修正后 2018-2026 真实双周变动最大 +34.0%；
+# 最小拆股因子 2 在空头仓位不变时产生 ~+100% 跳变。阈值 +50% 居中：
+# chg_pct >= SPLIT_GUARD_PCT 的发布不允许自动触发，改发人工复核事件
+# （确认为真实跳变后由人工处置；防护只拦"疑似拆股"，不放宽也不收紧冻结规则）。
+SPLIT_GUARD_PCT = 50.0
+
 # ---- 标定常量（分位映射实现，非规则参数） ----------------------------------
 DENSE_REF_COUNT = 65     # 历史 Sprinklr 口径密集参考值（帖/日）
 DENSE_QUANTILE = 0.8789  # P(日发帖数<=65)，musk_tweets.csv 2018-01-03→2025-05-08
@@ -147,16 +156,21 @@ def short_releases(conn, now_iso: str) -> list[dict]:
     return out
 
 
-def recent_upjumps(shorts: list[dict], today: date) -> list[dict]:
-    """act（发布次交易日）落在回看 20 交易日内的 up-jump 发布."""
-    out = []
+def recent_upjumps(shorts: list[dict], today: date) -> tuple[list[dict], list[dict]]:
+    """act（发布次交易日）落在回看 20 交易日内的 up-jump 发布.
+
+    返回 (可信 up-jump, 疑似拆股伪影)：chg_pct >= SPLIT_GUARD_PCT 的发布
+    进第二个列表，不参与自动触发（N6 拆股防护，见文件头常量注释）。
+    """
+    out: list[dict] = []
+    suspects: list[dict] = []
     for s in shorts:
         if s["chg_pct"] < SHORT_JUMP_PCT:
             continue
         act = next_bday_after(_et_date(s["pub_time_utc"]))
         if act <= today and int(np.busday_count(act, today)) <= LOOKBACK_BDAYS:
-            out.append(s)
-    return out
+            (suspects if s["chg_pct"] >= SPLIT_GUARD_PCT else out).append(s)
+    return out, suspects
 
 
 def baseline_from_rows(conn, before_date: str | None = None) -> dict[str, int]:
@@ -236,7 +250,24 @@ def evaluate(conn, now: datetime | None = None) -> dict:
     # -- 空头腿
     shorts = short_releases(conn, now_iso)
     latest = shorts[-1] if shorts else None
-    upjumps = recent_upjumps(shorts, today)
+    upjumps, split_suspects = recent_upjumps(shorts, today)
+
+    # -- 拆股防护（N6）：疑似拆股跳变不自动触发，发一次性人工复核事件
+    n_guard = 0
+    for s in split_suspects:
+        n_guard += store.insert_events(conn, "detector", [{
+            "dedupe_key": f"split_guard_{s['settlement']}",
+            "event_time_utc": now_iso,
+            "symbol": "TSLA",
+            "type": "detector_split_guard",
+            "title": (f"拆股防护拦截：空头 change_pct {s['chg_pct']:+.1f}% >= "
+                      f"+{SPLIT_GUARD_PCT:.0f}%（结算 {s['settlement']}）疑似拆股伪影，"
+                      "已从自动触发中排除——需人工复核（确认真实跳变后人工处置）"),
+            "payload": {"settlement": s["settlement"], "chg_pct": s["chg_pct"],
+                        "short_interest": s["short_interest"],
+                        "guard_pct": SPLIT_GUARD_PCT,
+                        "rule": "N6 split guard: excluded from auto-trigger"},
+        }])
 
     # -- 状态决策
     thr = None
@@ -337,10 +368,11 @@ def evaluate(conn, now: datetime | None = None) -> dict:
             )
             conn.commit()
 
-    return {"state": state, "switched": switched, "n_new_events": n_new,
+    return {"state": state, "switched": switched, "n_new_events": n_new + n_guard,
             "note": f"{state} baseline={baseline_days}/{CALIB_BDAYS}"
                     + (f" thr={thr:.1f}" if thr is not None else "")
-                    + (f" until={until}" if state == "RISK_OFF" else "")}
+                    + (f" until={until}" if state == "RISK_OFF" else "")
+                    + (f" split_guard={n_guard}" if n_guard else "")}
 
 
 # ------------------------------------------------------------------ 组件封装

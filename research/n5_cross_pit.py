@@ -286,7 +286,10 @@ def main() -> None:
 
     # ---- TSLA 拆股修正 vs N4 原值 逐坑对照 ----
     n4_catalog = pd.read_csv(ROOT / "outputs" / "n4_golden_pit" / "pits_catalog.csv")
-    tsla_now = pits[pits["symbol"] == "TSLA"][["pit_date", "label", "si_chg_6wk_pct"]]
+    n4_catalog["pit_date"] = n4_catalog["pit_date"].astype(str)
+    tsla_now = pits.loc[pits["symbol"] == "TSLA",
+                        ["pit_date", "label", "si_chg_6wk_pct"]].copy()
+    tsla_now["pit_date"] = tsla_now["pit_date"].astype(str)
     tsla_cmp = n4_catalog[["pit_date", "label", "si_chg_6wk_pct"]].merge(
         tsla_now, on=["pit_date", "label"], suffixes=("_n4_raw", "_n5_adj"))
     tsla_cmp["delta"] = tsla_cmp["si_chg_6wk_pct_n5_adj"] - tsla_cmp["si_chg_6wk_pct_n4_raw"]
