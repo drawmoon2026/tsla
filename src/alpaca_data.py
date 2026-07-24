@@ -115,14 +115,26 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Fetch historical minute bars from Alpaca.")
     ap.add_argument("--symbol", default="TSLA")
     ap.add_argument("--years", type=float, default=2.0, help="How far back to fetch (default 2).")
+    ap.add_argument("--start", default=None,
+                    help="Explicit range start (YYYY-MM-DD, UTC). Overrides --years.")
+    ap.add_argument("--end", default=None,
+                    help="Explicit range end (YYYY-MM-DD, UTC). Requires/implies --start; "
+                         "defaults to now-16min when only --start is given.")
     ap.add_argument("--interval", default="5m", choices=["1m", "5m", "15m", "1h"],
                     help="Bar size (default 5m).")
     ap.add_argument("--out", default=None, help="Output CSV (default data/{SYMBOL}_{interval}_alpaca.csv)")
     args = ap.parse_args()
 
     timeframe = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour"}[args.interval]
-    end = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=16)  # free tier: data older than 15 min
-    start = end - pd.Timedelta(days=int(args.years * 365.25))
+    now_cap = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=16)  # free tier: data older than 15 min
+    if args.end and not args.start:
+        raise SystemExit("--end requires --start")
+    if args.start:
+        start = pd.Timestamp(args.start, tz="UTC")
+        end = min(pd.Timestamp(args.end, tz="UTC"), now_cap) if args.end else now_cap
+    else:
+        end = now_cap
+        start = end - pd.Timedelta(days=int(args.years * 365.25))
     out = Path(args.out) if args.out else Path("data") / f"{args.symbol.upper()}_{args.interval}_alpaca.csv"
 
     key, secret = load_keys()
