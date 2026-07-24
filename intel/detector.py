@@ -61,7 +61,8 @@ PERSIST_BDAYS = 20       # F20：触发日起 20 个交易日 risk-off，重叠�
 # 最小拆股因子 2 在空头仓位不变时产生 ~+100% 跳变。阈值 +50% 居中：
 # chg_pct >= SPLIT_GUARD_PCT 的发布不允许自动触发，改发人工复核事件
 # （确认为真实跳变后由人工处置；防护只拦"疑似拆股"，不放宽也不收紧冻结规则）。
-SPLIT_GUARD_PCT = 50.0
+# 阈值定义在 intel/splits.py（采集器跳变告警与本防护同源引用，单一口径来源）。
+from intel.splits import SPLIT_GUARD_PCT  # noqa: E402  同源阈值
 
 # ---- 标定常量（分位映射实现，非规则参数） ----------------------------------
 DENSE_REF_COUNT = 65     # 历史 Sprinklr 口径密集参考值（帖/日）

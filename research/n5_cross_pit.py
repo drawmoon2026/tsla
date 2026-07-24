@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from intel.splits import SPLITS, adjust_levels  # noqa: E402  拆股表/折算（正式口径共享模块）
 from research.n4_golden_pit import (  # noqa: E402  预登记参数与实现逐一复用
     build_daily,
     find_pits,
@@ -69,18 +70,10 @@ SYMBOLS = [
 ]
 
 # 拆股表：effective_date（该日及之后的结算期为拆后股本）× 因子。
+# 2026-07-24 起表与折算函数移至共享模块 intel/splits.py（全系统正式口径，
+# 本文件顶部 import 保持 research.n5_cross_pit.SPLITS 引用可用，n6 依赖）。
 # 与 SI/ADV 同步跳变侦测（scratch 核对 2026-07-24）交叉验证；
 # COIN 2022-05、QCOM 2019-04 的跳变为真实空头波动，不在表内。
-SPLITS: dict[str, list[tuple[str, float]]] = {
-    "TSLA": [("2020-08-31", 5), ("2022-08-25", 3)],
-    "AAPL": [("2020-08-31", 4)],
-    "NVDA": [("2021-07-20", 4), ("2024-06-10", 10)],
-    "AMZN": [("2022-06-06", 20)],
-    "GOOGL": [("2022-07-18", 20)],
-    "WMT": [("2024-02-26", 3)],
-    "AVGO": [("2024-07-15", 10)],
-    "NFLX": [("2025-11-17", 10)],
-}
 
 N_PERM = 20000
 SEED = 42
@@ -97,17 +90,7 @@ def load_short(symbol: str) -> pd.DataFrame:
     df["event_time_utc"] = pd.to_datetime(df["event_time_utc"], utc=True, format="mixed")
     df["payload"] = df["payload"].map(json.loads)
     df = df.sort_values("event_time_utc").reset_index(drop=True)
-    splits = SPLITS.get(symbol, [])
-    if splits:
-        for p in df["payload"]:
-            sd = p["settlement_date"]
-            factor = 1.0
-            for eff, k in splits:
-                if sd >= eff:
-                    factor *= k
-            if p.get("short_interest") is not None:
-                p["si_unadjusted"] = p["short_interest"]
-                p["short_interest"] = p["short_interest"] / factor
+    adjust_levels(list(df["payload"]), symbol)  # 共享模块（原地折算，N5 口径不变）
     return df
 
 

@@ -125,6 +125,40 @@ cp intel/deploy/com.tsla.sentinel.plist ~/Library/LaunchAgents/ && \
   会污染基线（poll_log 可查）；交易日用 numpy busday（周一至五）近似、不剔美股
   假日，F20 到期日可能偏移 ~1 日。
 
+## 拆股折算口径（FINRA 空头利益，2026-07-24 起全系统正式口径）
+
+FINRA consolidatedShortInterest 的 short_interest 是**未复权股数**：拆股跨期的
+change_pct 会出现假跳变（实测 TSLA 2020-08-31 期 5:1 拆股 +345.8%（真实 -10.8%）、
+2022-08-31 期 3:1 拆股 +202.2%（真实 +0.7%），审计见 `outputs/n6_split_audit/`）。
+N5（跨标的验证）/ N6（紧急复核）的修正逻辑已沉淀为共享模块 **`intel/splits.py`**，
+是唯一口径来源：
+
+- **拆股表 `SPLITS`**（硬编码，出处 research/n5_cross_pit.py N5，与 SI×ADV 同步
+  跳变侦测交叉核对 2026-07-24）：TSLA 2020-08-31×5、2022-08-25×3；AAPL 2020-08-31×4；
+  NVDA 2021-07-20×4、2024-06-10×10；AMZN 2022-06-06×20；GOOGL 2022-07-18×20；
+  WMT 2024-02-26×3；AVGO 2024-07-15×10；NFLX 2025-11-17×10。**未来拆股须人工补表**。
+- **change_pct 折算**（`adjust_change_pct`，采集器入库/落盘前调用）：只重算
+  跨拆股行（本期与上期折算因子不同），其余行保留 FINRA 原值；原值留
+  `change_pct_raw`、标记 `split_adjusted=true`。`finra_short` 与 `finra_short_pool`
+  两个采集器均已接入（治本）；存量 `data/intel/finra_short.csv`、
+  `data/intel/pool_short/*.csv`（8 文件 9 行）与 sentinel.sqlite 的 finra_short
+  事件（2 行，poll_log 有 UPDATE 记录）已按同口径批量修正（2026-07-24，
+  原件备份 `*.precorrection`）。
+- **水平折算**（`adjust_levels`，N5 口径）：short_interest 除以累计因子统一到
+  拆前股本基准，供跨期水平比较（si_chg_6wk_pct 等）；**不落盘**（CSV/库保留
+  FINRA 公布真实股数），由下游（n4_golden_pit / n5_cross_pit）读取时调用。
+- **跳变侦测告警**（`unexplained_jumps`）：折算后 change_pct >= `SPLIT_GUARD_PCT`
+  （+50%，与 detector.py 拆股防护**同源引用**此常量；N6 标定：修正后历史真实双周
+  变动最大 +34%、最小拆股因子 2 产生 ~+100%，+50% 居中）且拆股表无法解释 →
+  疑似未登记拆股：`finra_short` 采集器发 `si_split_alert` 事件入库（不静默），
+  `finra_short_pool` 打印 `[SPLIT-ALERT]`。确认为真实跳变则留档不动（历史上
+  COIN 2022-05、QCOM 2019-04、INTC 2020-08 等为真实空头波动）；确认为拆股则
+  补 `SPLITS` 表后重新折算。
+- **META symbolCode 清洗**（finra_short_pool）：FINRA symbolCode 有复用污染——
+  META 代码 2021-07→2022-01 被 Roundhill Ball Metaverse ETF 占用、FB 代码
+  2025-06 起被 ProShares ETF 复用。META 系列由 FB+META 双 symbolCode 按
+  issueName 白名单（Facebook/Meta Platforms 前缀）过滤拼接，剔除 ETF 行。
+
 ## 加一个新渠道的方法
 
 1. `intel/collectors/` 下新建模块，继承 `base.Collector`：

@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from intel.splits import adjust_levels  # noqa: E402  拆股折算（正式口径，2026-07-24 起）
 from src.common.data_io import ET, load_bars  # noqa: E402
 
 DATA = ROOT / "data"
@@ -244,7 +245,11 @@ class IntelBook:
         self.f144 = load_intel("edgar_144")
         self.k8 = load_intel("edgar_8k")
         self.fomc = load_intel("fomc")
+        # 空头利益：正式口径拆股折算（intel/splits.py，2026-07-24 起）——
+        # 水平折算供 si_chg_6wk_pct 跨拆股比较（与 N5 同口径）；change_pct
+        # 已在 CSV 层修正（跨拆股行，见 outputs/n6_split_audit）
         self.si = load_intel("finra_short")
+        adjust_levels(list(self.si["payload"]), "TSLA")
         self.ats = load_intel("finra_ats")
         tw = pd.read_csv(INTEL / "musk_tweets.csv", usecols=["event_time_utc"])
         tw["event_time_utc"] = pd.to_datetime(
@@ -445,12 +450,15 @@ def write_dossier(path: Path, pit: pd.Series, f: dict, raw: dict,
     ]
     si = raw.get("si_latest")
     if si:
+        # 显示 FINRA 公布的真实股数（si_unadjusted 为拆股折算前原值）；
+        # change_pct 与 ~6 周变化为拆股折算后口径（intel/splits.py）
+        shares = si.get("si_unadjusted", si["short_interest"])
         lines.append(
-            f"- 结算日 {si['settlement_date']}：{si['short_interest']:,} 股，"
+            f"- 结算日 {si['settlement_date']}：{shares:,.0f} 股，"
             f"双周变动 {si['change_pct']:+.1f}%，days-to-cover {si['days_to_cover']:.1f}；"
             f"~6 周跨度变化 {f['si_chg_6wk_pct']:+.1f}%"
             if not np.isnan(f["si_chg_6wk_pct"]) else
-            f"- 结算日 {si['settlement_date']}：{si['short_interest']:,} 股，"
+            f"- 结算日 {si['settlement_date']}：{shares:,.0f} 股，"
             f"双周变动 {si['change_pct']:+.1f}%，days-to-cover {si['days_to_cover']:.1f}")
     else:
         lines.append("- 无已发布数据")
