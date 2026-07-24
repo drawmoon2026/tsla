@@ -5,9 +5,17 @@
 每个分支点标注两类动作：
 
   「系统规则」  冻结实验产物，附实验编号（E11 / N3-H / E8-A / N6 / E10）
-  「个人参数」  data/intel/position.json 里的用户仓位参数——
-                除 position_pct 外默认值一律标"未验证·待用户批准"（黄色）；
-                未设置的分支如实显示"未设置——此分支无预案，建议补全"
+  「个人参数」  data/intel/position.json 里的用户仓位参数——金额/股数按
+                account_value_usd（默认 100000，示例值·请改真实）换算成具体
+                数字；数据背书的默认值标实验出处（应急借款 ≤ 权益 50% = E13
+                实测），其余默认值标"未验证·待用户批准"（黄色）；未设置的
+                参数保留提示但降为次要样式（附 E5/E10/E13 证据旁注）
+  「历史频率」  8 年日线 first-passage 统计（滚动起点采样）：每层分支标注
+                60 交易日内"先到下档 / 先到上档 / 都没到"的历史发生频率
+                ——历史频率 ≠ 概率预测（页脚同文声明）
+  「E13 参考」  代表组合 8 年 4 次干预点（日期/深度/金额）作为参考卡贴在
+                对应深度的下跌节点旁；树顶另有"懒人基准"（30% DCA + 70%
+                现金的 E13 实测合成 XIRR）作机会成本锚
 
 数据源（全部只读，任一缺失降级显示、不炸）：
   - intel.prices.get_price_context   现价 / 252 日滚动高 / 回撤（E11 冻结口径）
@@ -69,29 +77,46 @@ S2_RATIO = 1.0 + S2_LINE_PCT / 100.0   # 0.8：S2 线 = 252 日高 × 0.8
 UNVERIFIED = "未验证·待用户批准"
 
 # 默认仓位参数：个人线全部以"距 252 日滚动高点的百分比"表达（与 S2 同口径，
-# 负数=回撤，如 -20 即 252 日高 × 0.8）。除 position_pct 外默认值未经用户
-# 批准——页面一律黄标，改完本文件重跑 `python -m intel.playbook` 即生效。
+# 负数=回撤，如 -20 即 252 日高 × 0.8）。金额基数 = account_value_usd（示例值，
+# 用户须改为真实）。数据背书的默认值标注实验出处；未经用户批准的一律黄标。
+# 改完本文件重跑 `python -m intel.playbook` 即生效。
 DEFAULT_POSITION: dict = {
     "_说明": {
+        "account_value_usd": "账户总权益（美元）——页面所有金额/股数换算的基数；"
+                             "默认 100000 为示例值·请改为真实",
+        "monthly_inflow_usd": "每月新入金（美元）；默认 4167 = E13 口径（≈¥30k/7.2，"
+                              "每月首个交易日）",
         "position_pct": "当前仓位占可投资金的百分比（0-100）",
         "cost_basis": "持仓成本价（美元/股）；null=未填，页面不显示盈亏",
-        "add_budget_pct": "S2 解除后可动用的加仓预算，占可投资金百分比；"
+        "add_budget_pct": "S2 解除后可动用的加仓预算，占权益百分比；"
                           "只在 S2 解除分支生效，逐笔跟 E8-A 信号分批",
+        "emergency_borrow_cap_pct": "应急过桥借款上限，占借款时点权益的百分比。"
+            "E13 实测背书：借款按权益比例、上限 ≤50%——固定金额授信=小账户隐形"
+            " 3-5 倍杠杆（39 次危险事件 100% 来自固定 3 个月工资档，峰值负债/权益"
+            " 4.9）；比例制 ≤50% 全程零触 30% 维持线（缓冲 ≥0.65）",
         "trim_line_pct": "老仓位减仓线：距 252 日高的百分比（如 -10 → 高×0.90）；"
-                         "null=未设，上行分支将显示'无预案'",
+            "默认 null=不设。E10/E13 证据：择时减仓历史上跑输持有；"
+            "若坚持要设，E5 显示从高点回撤 10-15% 是常见选择但未验证",
         "max_pain_pct": "最大容忍线：距 252 日高的百分比（如 -50 → 高×0.50）；"
-                        "null=未设，下行深跌分支将显示'无预案'",
+            "默认 null=不设。E10/E13 证据同上（E5 的 -30% 强平对照 54 例全部恶化"
+            "收益）；设线属于个人风险偏好而非统计优势",
         "_status": "各参数的验证状态；用户确认某参数后把状态改为'已批准'",
     },
+    "account_value_usd": 100000,
+    "monthly_inflow_usd": 4167,
     "position_pct": 30,
     "cost_basis": None,
     "add_budget_pct": 20,
+    "emergency_borrow_cap_pct": 50,
     "trim_line_pct": None,
     "max_pain_pct": None,
     "_status": {
+        "account_value_usd": "示例值·请改为真实",
+        "monthly_inflow_usd": "示例值·E13 口径",
         "position_pct": "已确认",
         "cost_basis": UNVERIFIED,
         "add_budget_pct": UNVERIFIED,
+        "emergency_borrow_cap_pct": "E13 实测背书·待用户批准",
         "trim_line_pct": UNVERIFIED,
         "max_pain_pct": UNVERIFIED,
     },
@@ -126,9 +151,10 @@ def load_position() -> dict:
     pos = json.loads(POSITION_PATH.read_text(encoding="utf-8"))
     for k, v in DEFAULT_POSITION.items():
         pos.setdefault(k, v)
-    pos.setdefault("_status", {})
-    for k, v in DEFAULT_POSITION["_status"].items():
-        pos["_status"].setdefault(k, v)
+    for nested in ("_status", "_说明"):
+        pos.setdefault(nested, {})
+        for k, v in DEFAULT_POSITION[nested].items():
+            pos[nested].setdefault(k, v)
     return pos
 
 
@@ -191,6 +217,127 @@ def load_e8a_meta() -> dict:
         return {"gate": 0.4325, "tp": 0.5, "sl": 2.0, "timeout": 48}
 
 
+# ------------------------------------------------------ 历史频率（非预测）
+
+FP_HORIZON = 60      # first-passage 视界：60 个交易日
+FP_BAND_PP = 3.0     # 起点采样带宽：回撤中心 ±3 个百分点
+
+E13_GRID = PROJECT_ROOT / "outputs" / "e13_salary_ladder" / "grid_results.csv"
+
+# E13 干预参考案例（代表组合 s15_tp20_6mo_L50，权益 50% 比例额度）：
+# 8 年窗口 W2 仅 4 次出手（首日建仓补足那笔是机械结果、不列），3 年 W1 对照并列。
+# 深度口径 = 距梯子锚点跌幅（非距 252 日高），金额为当时借款额（年化 6.5% 过桥）。
+E13_CASES = {
+    "shallow": [("2018-08-17", "-16.5%", "$4,790", "@21.14", "借后缓冲 0.67"),
+                ("2023-08-11", "-15.1%", "$3,691", "@239.55", "3 年窗口对照")],
+    "deep":    [("2018-09-07", "-31.4%", "$4,947", "@17.37", "借后缓冲 0.67"),
+                ("2023-10-30", "-27.8%", "$7,020", "@203.62", "3 年窗口对照")],
+    "abyss":   [("2019-05-31", "-51.1%", "$16,331", "@12.38", "单次最大·额度打满"),
+                ("2024-04-19", "-47.8%", "$17,495", "@147.11", "当时现金池仅 $6.9k")],
+}
+
+
+def rolling_dd_series(closes: list[float]) -> list[float]:
+    """距 252 日滚动高的回撤 %（含当日、窗口不足时用可得窗口——同 s2_reading）。"""
+    out, n = [], len(closes)
+    for i in range(n):
+        hi = max(closes[max(0, i - 251):i + 1])
+        out.append((closes[i] / hi - 1) * 100)
+    return out
+
+
+def first_passage(closes: list[float], dd: list[float], center_dd: float,
+                  up_move: float | None, down_move: float | None) -> dict | None:
+    """三分 first-passage 频率：从 dd≈center 的滚动起点出发，FP_HORIZON 个
+    交易日内先触上行目标 / 先触下行目标 / 两者都没到 的历史频率。
+
+    口径：起点 = 所有 dd 在 center±FP_BAND_PP 内的交易日（高位上下文
+    center≥-band 时取 dd≥-band），滚动采样、样本高度重叠；目标 = 起点收盘
+    ×(1+move)，逐日收盘首次穿越判定（同日先查下行）；起点需有完整视界。
+    这是历史发生频率，不是概率预测。
+    """
+    n = len(closes)
+    if n < FP_HORIZON + 50:
+        return None
+    n_up = n_dn = n_none = 0
+    for i in range(n - FP_HORIZON):
+        if center_dd >= -FP_BAND_PP:
+            if dd[i] < -FP_BAND_PP:
+                continue
+        elif abs(dd[i] - center_dd) > FP_BAND_PP:
+            continue
+        p0 = closes[i]
+        upt = p0 * (1 + up_move / 100) if up_move is not None else None
+        dnt = p0 * (1 + down_move / 100) if down_move is not None else None
+        hit = None
+        for j in range(i + 1, i + 1 + FP_HORIZON):
+            if dnt is not None and closes[j] <= dnt:
+                hit = "dn"; break
+            if upt is not None and closes[j] >= upt:
+                hit = "up"; break
+        if hit == "up":
+            n_up += 1
+        elif hit == "dn":
+            n_dn += 1
+        else:
+            n_none += 1
+    tot = n_up + n_dn + n_none
+    if tot < 30:  # 样本太少不显示，避免装统计
+        return None
+    return {"n": tot, "up": n_up / tot * 100, "dn": n_dn / tot * 100,
+            "none": n_none / tot * 100}
+
+
+def _xirr(flows: list[tuple[date, float]]) -> float:
+    """现金流 XIRR（二分求解，E13 同口径）。"""
+    d0 = flows[0][0]
+    def npv(r: float) -> float:
+        return sum(a / (1 + r) ** ((d - d0).days / 365.25) for d, a in flows)
+    lo, hi = -0.99, 10.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if npv(mid) > 0:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def load_e13_bench(dates: list[date]) -> dict:
+    """懒人基准：30% 月供买入持有 + 70% 现金 4%（不再平衡）的 E13 实测合成 XIRR.
+
+    终值取 outputs/e13_salary_ladder/grid_results.csv 的对照行（DCA_hold /
+    cash_4pct）按 30/70 合成，月度现金流（每月首个交易日 $4,167）与 E13 同口径
+    求 XIRR。读不到 CSV 或日线时退回 E13 冻结时点算出的常数（口径相同）。
+    """
+    frozen = {"w2": 21.9, "w1": 9.0, "dca_w2": 41.3, "dca_w1": 19.7,
+              "src": "冻结常数（grid_results.csv 不可读）"}
+    try:
+        import csv as _csv
+        fv: dict[tuple[str, str], float] = {}
+        with E13_GRID.open(encoding="utf-8") as f:
+            for r in _csv.DictReader(f):
+                if r["strategy"] in ("DCA_hold", "cash_4pct"):
+                    fv[(r["window"], r["strategy"])] = float(r["final_equity"])
+        out = {"src": "grid_results.csv 对照行 30/70 合成"}
+        for key, start in (("w2", date(2018, 7, 23)), ("w1", date(2023, 7, 1))):
+            dep, seen = [], set()
+            for d in dates:
+                if d >= start and (d.year, d.month) not in seen:
+                    seen.add((d.year, d.month)); dep.append(d)
+            blend = (0.3 * fv[(key.upper(), "DCA_hold")]
+                     + 0.7 * fv[(key.upper(), "cash_4pct")])
+            flows = [(d, -4167.0) for d in dep] + [(dates[-1], blend)]
+            out[key] = _xirr(flows) * 100
+            # DCA-hold 全仓对照同口径求出（与 summary.txt 数字互证）
+            out["dca_" + key] = _xirr(
+                [(d, -4167.0) for d in dep]
+                + [(dates[-1], fv[(key.upper(), "DCA_hold")])]) * 100
+        return out
+    except Exception:  # noqa: BLE001
+        return frozen
+
+
 # ---------------------------------------------------------------- 树模型
 
 
@@ -210,43 +357,117 @@ def act_note(text: str) -> dict:
     return {"kind": "note", "tag": "", "text": text}
 
 
+def act_freq(text: str) -> dict:
+    return {"kind": "freq", "tag": "非预测", "text": text}
+
+
+def act_e13(text: str) -> dict:
+    return {"kind": "e13", "tag": "参考·非推荐", "text": text}
+
+
 def node(direction: str, no: str, cond: str, tag: str = "",
-         acts: list | None = None, children: list | None = None) -> dict:
-    return {"dir": direction, "no": no, "cond": cond, "tag": tag,
+         acts: list | None = None, children: list | None = None,
+         val: str = "") -> dict:
+    return {"dir": direction, "no": no, "cond": cond, "tag": tag, "val": val,
             "acts": acts or [], "children": children or []}
+
+
+def _usd(v: float) -> str:
+    return f"${v:,.0f}"
 
 
 def _price_pct(target: float, live: float) -> str:
     return f"{(target / live - 1) * 100:+.1f}%"
 
 
-def _me_or_unset(pos: dict, param: str, set_text: str | None, unset_hint: str) -> dict:
-    """个人参数动作：已设→黄标预案；未设→'无预案，建议补全'。"""
-    if pos.get(param) is not None and set_text:
-        return act_me(param, set_text)
-    return act_unset(param, f"{unset_hint}——此分支无预案，建议补全（{param}）")
-
-
 def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
-               meta: dict) -> tuple[list[dict], list[str]]:
-    """构建二叉预案树。返回（根分支列表[涨,跌], 备注行）。
+               meta: dict, closes: list[float] | None = None,
+               ) -> tuple[list[dict], list[str], dict | None]:
+    """构建二叉预案树。返回（根分支列表[涨,跌], 备注行, 根节点频率动作）。
 
     分支价位全部由系统真实阈值换算：
       S2 解除/触发线 = 252 日滚动高 × 0.8（E11 冻结：dd < -20% 停用）
       下行档位      = 现价 × 0.9 / × 0.8
       个人线        = 252 日高 × (1 + pct/100)（与 S2 同口径）
+    金额/股数按 position.json 的 account_value_usd 换算（示例值须改真实）；
+    每个分支节点标注该分支价位下的持仓市值重估与历史 first-passage 频率。
     """
     H = s2["high"]
     release = H * S2_RATIO            # S2 解除/触发线
     d10, d20 = live * 0.9, live * 0.8
     dd_of = lambda p: (p / H - 1) * 100  # noqa: E731
+    dd_now = float(s2["drawdown_pct"])
     s2_on = bool(s2["triggered"])
 
     ab = pos.get("add_budget_pct")
     trim = pos.get("trim_line_pct")
     pain = pos.get("max_pain_pct")
+    bc = pos.get("emergency_borrow_cap_pct")
     trim_price = H * (1 + trim / 100) if trim is not None else None
     pain_price = H * (1 + pain / 100) if pain is not None else None
+
+    # ---- 金额换算基数（account_value 为示例值时页面已在局面卡声明）
+    av = float(pos.get("account_value_usd") or 100000)
+    pos_val = av * float(pos.get("position_pct") or 0) / 100
+    sh = pos_val / live if live else 0.0     # 现持股数（估算，随分支价重估市值）
+
+    def mval(p: float) -> str:
+        return f"持仓重估 ≈ {_usd(sh * p)}（{sh:.0f} 股 × {p:.2f}）"
+
+    # ---- 历史频率（first-passage，滚动起点，非预测）
+    ddser = rolling_dd_series(closes) if closes else []
+
+    def freq_act_at(center_dd: float, base: float,
+                    up_price: float, up_label: str,
+                    dn_price: float | None, dn_label: str) -> dict:
+        if not closes:
+            return act_note("日线样本不可用——历史频率缺席（如实声明）")
+        up_mv = (up_price / base - 1) * 100
+        dn_mv = (dn_price / base - 1) * 100 if dn_price is not None else None
+        fp = first_passage(closes, ddser, center_dd, up_mv, dn_mv)
+        if fp is None:
+            return act_note(f"dd≈{center_dd:+.0f}% 附近历史起点不足 30 个，"
+                            "频率不显示（不装统计）")
+        head = (f"从 dd≈{center_dd:+.0f}%±{FP_BAND_PP:.0f}pp 的 <b>{fp['n']}</b> "
+                f"个滚动起点出发，{FP_HORIZON} 交易日内：")
+        if dn_price is not None:
+            body = (f"先到 <b>{dn_price:.2f}</b>（{dn_label} {dn_mv:+.1f}%）"
+                    f"<b>{fp['dn']:.0f}%</b> ｜ 先到 <b>{up_price:.2f}</b>"
+                    f"（{up_label} {up_mv:+.1f}%）<b>{fp['up']:.0f}%</b> ｜ "
+                    f"两者都没到 <b>{fp['none']:.0f}%</b>")
+        else:
+            body = (f"到达 <b>{up_price:.2f}</b>（{up_label} {up_mv:+.1f}%）"
+                    f"<b>{fp['up']:.0f}%</b> ｜ 没到 <b>{fp['none']:.0f}%</b>"
+                    "（下行线未设，无三分口径）")
+        return act_freq(head + body)
+
+    def e13_card(depth_key: str, intro: str) -> dict:
+        rows = "；".join(
+            f"{d} 距锚 <b>{dep}</b> 借 <b>{amt}</b> {px}（{note}）"
+            for d, dep, amt, px, note in E13_CASES[depth_key])
+        return act_e13(
+            f"{intro}：{rows}。口径：深度=距梯子锚点跌幅（非距 252 日高）；"
+            "代表组合 s15_tp20_6mo_L50（权益 50% 比例额度），8 年窗口仅 4 次"
+            "出手、借后缓冲 0.67-0.88、全程零触 30% 维持线")
+
+    # ---- 个人参数动作（含金额换算；未设时降级提示 + 证据旁注）
+    borrow_act = (act_me("emergency_borrow_cap_pct",
+        f"若此深度要动用应急资金（E13 干预点形态）：借款上限 = 借款时点权益 "
+        f"× {bc:g}% —— 按当前权益 {_usd(av)} 即 ≤<b>{_usd(av * bc / 100)}</b>。"
+        "E13 实测：应急借款按权益比例、上限 ≤50%（固定金额授信 = 小账户隐形 "
+        "3-5 倍杠杆，39 次危险事件 100% 来自固定 3 个月工资档；比例制全程零"
+        "触线、缓冲 ≥0.65）。年化 6.5% 过桥、回款优先还清；E13 总判决未变：借款"
+        "只是风控下限，不是收益来源") if bc is not None else
+        act_unset("emergency_borrow_cap_pct",
+                  "应急借款上限未设——建议按 E13 实测设为权益 ≤50%（比例制，"
+                  "非固定金额）→ position.json emergency_borrow_cap_pct"))
+
+    trim_unset = act_unset("trim_line_pct",
+        "减仓线未设（默认不设 = 持有）——E10/E13 证据：择时减仓历史上跑输持有；"
+        "若坚持要设，E5 显示高点回撤 10-15% 是常见选择但未验证 → trim_line_pct")
+    pain_unset = act_unset("max_pain_pct",
+        "容忍线未设（默认不设）——E5 的 -30% 强平对照 54 例全部恶化收益；"
+        "设线属个人风险偏好而非统计优势 → max_pain_pct")
 
     # -- 探测器子分支（触发/解除），标定期内注明不参与
     det_state = (det or {}).get("state")
@@ -291,37 +512,48 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
     gate_s = (f"GBDT 门槛 {meta['gate']:.4f}，几何 tp +{meta['tp']:.1f}% / "
               f"sl -{meta['sl']:.1f}% / 超时 {meta['timeout']}×5m，当日平仓")
 
-    trim_act = _me_or_unset(pos, "trim_line_pct",
-        (f"减仓线 <b>{trim_price:.2f}</b>（252 日高 {trim:+.0f}%）：收盘站上即按"
-         "事先计划减老仓位，减多少待批准时一并写入" if trim is not None else None),
-        "老仓位减仓线未设置")
-    pain_act = _me_or_unset(pos, "max_pain_pct",
-        (f"最大容忍线 <b>{pain_price:.2f}</b>（252 日高 {pain:+.0f}%）：跌破即执行"
-         "事先批准的减仓/清仓纪律" if pain is not None else None),
-        "最大容忍线未设置")
+    trim_act = (act_me("trim_line_pct",
+        f"减仓线 <b>{trim_price:.2f}</b>（252 日高 {trim:+.0f}%，距现价 "
+        f"{_price_pct(trim_price, live)}）：收盘站上即按事先计划减老仓位——届时持仓"
+        f"市值 ≈ {_usd(sh * trim_price)}（{sh:.0f} 股），减多少待批准时一并写入")
+        if trim is not None else trim_unset)
+    pain_act = (act_me("max_pain_pct",
+        f"最大容忍线 <b>{pain_price:.2f}</b>（252 日高 {pain:+.0f}%，距现价 "
+        f"{_price_pct(pain_price, live)}）：跌破即执行事先批准的减仓/清仓纪律——"
+        f"若清仓即卖 {sh:.0f} 股 ≈ {_usd(sh * pain_price)} @线价")
+        if pain is not None else pain_unset)
+
+    if ab is not None:
+        ab_usd = av * ab / 100
+        add_act = act_me("add_budget_pct",
+            f"解除确认后启用加仓预算 {ab:g}% = <b>{_usd(ab_usd)}</b> ≈ "
+            f"<b>{ab_usd / release:.0f} 股</b> @{release:.2f}——分 3-4 笔"
+            f"（每笔 ≤{_usd(ab_usd / 3)} ≈ {ab_usd / 3 / release:.0f} 股），"
+            "每笔以 E8-A 信号为准逐笔执行，不追价、不一次性打满")
+    else:
+        add_act = act_unset("add_budget_pct",
+            "加仓预算未设置——此分支无个人预案 → add_budget_pct")
 
     if s2_on:
         # ---- 当前 S2 已触发：上行主线=解除线，下行主线=-10%/-20% 档位
         up = node("up", "①",
             f"收盘站上 <b>{release:.2f}</b>"
             f"（S2 解除线 = 252 日高 {H:.2f} × 0.8，较现价 {_price_pct(release, live)}）",
-            tag="S2 解除",
+            tag="S2 解除", val=mval(release),
             acts=[
                 act_sys("E11 · E8-A",
                     "E8-A 恢复入场资格（当前 shadow 白跑、未上钱，裁决期 ≥8 周）；"
                     f"信号逐笔出：{gate_s}。S2 以昨日日收盘评估（shift(1)）——"
                     "盘中破线不算，收盘确认次日生效"),
-                (act_me("add_budget_pct",
-                    f"解除确认后启用加仓预算 {ab:g}%：按预算分批（建议 3-4 笔、"
-                    f"每笔 ≤{ab / 3:.0f}%），每笔以 E8-A 信号为准逐笔执行，"
-                    "不追价、不一次性打满") if ab is not None else
-                 act_unset("add_budget_pct", "加仓预算未设置——此分支无个人预案")),
+                add_act,
+                freq_act_at(S2_LINE_PCT, release, H, "收复 252 日高",
+                            release * 0.9, "再回落 10%"),
             ],
             children=[
                 node("up", "①-A",
                     f"继续上行收复 252 日高 <b>{H:.2f}</b>"
                     f"（较现价 {_price_pct(H, live)}）→ 创新高",
-                    tag="S2 线上移",
+                    tag="S2 线上移", val=mval(H),
                     acts=[
                         act_sys("E11 · E10",
                             "S2 停用线随新高跟踪上移：每创新高 H，停用线 = H×0.8"
@@ -329,6 +561,8 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
                             f"由高点 {H:.2f} 而来）。系统在高位不做减仓预测"
                             "——E10 已证日线择时跑输持有"),
                         trim_act,
+                        freq_act_at(0.0, H, H * 1.1, "续涨 10% 持续新高",
+                                    H * 0.8, "自新高回撤 20%"),
                     ],
                     children=[
                         node("up", "①-A-1", "持续创新高",
@@ -337,6 +571,7 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
                                 "的部分继续只跟 E8-A 信号，不因创新高追加")]),
                         node("down", "①-A-2",
                             "自新高 H 回撤 20%（收盘跌破 H×0.8）", tag="S2 再触发",
+                            val=mval(H * 0.8),
                             acts=[
                                 act_sys("E11",
                                     "E8-A 停用、剩余加仓预算冻结；已建仓位按持有"
@@ -346,6 +581,7 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
                     ]),
                 node("down", "①-B",
                     f"解除后收盘跌回 <b>{release:.2f}</b> 之下", tag="S2 复触发",
+                    val=mval(release),
                     acts=[
                         act_sys("E11",
                             "E8-A 再停用、剩余加仓预算冻结；已加部分不因复触发"
@@ -355,45 +591,61 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
             ])
         down = node("down", "②",
             f"跌破 <b>{d10:.2f}</b>（现价 -10%，距 252 日高 {dd_of(d10):.1f}%）",
+            val=mval(d10),
             acts=[
                 act_sys("E11 · E10",
                     "S2 已在触发态——更深回撤不改变开关状态，系统无新增动作；"
                     "系统不做下跌中的择时卖出（E10：预测跑输持有）"),
-                pain_act if pain is not None else
-                act_unset("max_pain_pct",
-                    "最大容忍线未设置——此分支无预案，建议补全（max_pain_pct）"),
+                borrow_act,
+                e13_card("shallow", "历史上走到这类浅坑时，E13 模型建议的出手"),
+                pain_act if pain is not None else pain_unset,
+                freq_act_at(dd_of(d10), d10, release, "收复解除线",
+                            d20, "续跌至 -20% 档"),
             ],
             children=[
                 det_branch,
                 node("down", "②-B",
                     f"跌破 <b>{d20:.2f}</b>（现价 -20%，距 252 日高 {dd_of(d20):.1f}%）",
+                    val=mval(d20),
                     acts=[
                         act_sys("N4 · E10",
                             "如实声明：系统在此深度没有加码/抄底规则——坑底签名"
                             "研究已判死（N4/N5），不猜坑底"),
+                        borrow_act,
+                        e13_card("deep", "历史上走到这类深坑时，E13 模型建议的出手"),
                         pain_act,
+                        freq_act_at(dd_of(d20), d20, release, "收复解除线",
+                                    pain_price, "触最大容忍线"),
                     ],
                     children=[
                         node("up", "②-B-1",
                             f"自低位反弹、收盘站回 <b>{release:.2f}</b>",
+                            val=mval(release),
                             acts=[act_note("转入分支 ①（S2 解除路径），预案同 ①")]),
                         node("down", "②-B-2",
                             (f"继续跌破最大容忍线 <b>{pain_price:.2f}</b>"
                              f"（252 日高 {pain:+.0f}%）" if pain is not None else
-                             "继续下跌（最大容忍线未设置）"),
-                            acts=[pain_act]),
+                             "继续深跌（最大容忍线未设）"),
+                            val=(mval(pain_price) if pain is not None else ""),
+                            acts=[
+                                pain_act,
+                                e13_card("abyss",
+                                         "历史最深处（-48%/-51%）E13 模型的出手"),
+                            ]),
                     ]),
             ])
     else:
         # ---- S2 未触发：上行主线=新高跟踪，下行主线=S2 触发线
         up = node("up", "①",
             f"上行创 252 日新高（收盘超过 <b>{H:.2f}</b>，较现价 {_price_pct(H, live)}）",
-            tag="S2 线上移",
+            tag="S2 线上移", val=mval(H),
             acts=[
                 act_sys("E11 · E8-A",
                     f"E8-A 维持入场资格（shadow 白跑），信号逐笔出：{gate_s}；"
                     "S2 停用线随新高跟踪上移：每创新高 H，停用线 = H×0.8"),
                 trim_act,
+                freq_act_at(0.0, H, H * 1.1, "续涨 10% 持续新高",
+                            H * 0.8, "回撤 20% 触发 S2"),
             ],
             children=[
                 node("up", "①-A", "持续创新高",
@@ -401,7 +653,7 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
                           trim_act]),
                 node("down", "①-B",
                     f"回落、收盘跌破 <b>{release:.2f}</b>（= {H:.2f} × 0.8）",
-                    tag="S2 触发",
+                    tag="S2 触发", val=mval(release),
                     acts=[act_sys("E11",
                         "E8-A 停用入场；已建仓位按持有处理（系统无择时卖出规则，"
                         "E10）"), pain_act]),
@@ -409,37 +661,68 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
         down = node("down", "②",
             f"下行收盘跌破 <b>{release:.2f}</b>"
             f"（S2 触发线 = 252 日高 {H:.2f} × 0.8，较现价 {_price_pct(release, live)}）",
-            tag="S2 触发",
+            tag="S2 触发", val=mval(release),
             acts=[
                 act_sys("E11",
                     "E8-A 停用入场（以昨日日收盘评估，shift(1)）；系统不做下跌中"
                     "的择时卖出（E10）"),
+                borrow_act,
+                e13_card("shallow", "历史上走到这类浅坑时，E13 模型建议的出手"),
                 pain_act,
+                freq_act_at(S2_LINE_PCT, release, H, "收复 252 日高",
+                            d20, "续跌至现价 -20% 档"),
             ],
             children=[
                 det_branch,
                 node("down", "②-B",
                     f"跌破 <b>{d20:.2f}</b>（现价 -20%，距 252 日高 {dd_of(d20):.1f}%）",
+                    val=mval(d20),
                     acts=[
                         act_sys("N4 · E10",
                             "如实声明：系统在此深度没有加码/抄底规则（N4/N5 判死）"),
+                        borrow_act,
+                        e13_card("deep", "历史上走到这类深坑时，E13 模型建议的出手"),
                         pain_act,
+                        freq_act_at(dd_of(d20), d20, release, "收复 S2 线",
+                                    pain_price, "触最大容忍线"),
                     ],
                     children=[
                         node("up", "②-B-1",
                             f"反弹、收盘站回 <b>{release:.2f}</b>",
+                            val=mval(release),
                             acts=[act_note("S2 解除，转回上行路径 ①")]),
                         node("down", "②-B-2",
                             (f"继续跌破最大容忍线 <b>{pain_price:.2f}</b>"
                              f"（252 日高 {pain:+.0f}%）" if pain is not None else
-                             "继续下跌（最大容忍线未设置）"),
-                            acts=[pain_act]),
+                             "继续深跌（最大容忍线未设）"),
+                            val=(mval(pain_price) if pain is not None else ""),
+                            acts=[
+                                pain_act,
+                                e13_card("abyss",
+                                         "历史最深处（-48%/-51%）E13 模型的出手"),
+                            ]),
                     ]),
             ])
+
+    # 根节点三分频率：现价上下文出发，涨支 vs 跌支谁先到
+    if s2_on:
+        root_freq = freq_act_at(dd_now, live, release, "S2 解除线",
+                                d10, "现价 -10% 档")
+    else:
+        root_freq = freq_act_at(dd_now, live, H, "252 日新高",
+                                release, "S2 触发线")
 
     notes = [
         f"档位换算基准：现价 {live:.2f}（生成时刻快照）、252 日滚动高 {H:.2f}"
         f"（{s2['high_date']}）。现价变动后 -10%/-20% 档位价随之变，以收盘确认为准。",
+        f"金额换算基数：账户权益 {_usd(av)}（position.json account_value_usd，"
+        f"示例值·请改为真实）× 仓位 {pos.get('position_pct', 0):g}% = 持仓 "
+        f"{_usd(pos_val)} ≈ {sh:.0f} 股 @{live:.2f}；分支节点的'持仓重估'= 股数不变"
+        "×分支价，未计新加仓。",
+        f"历史频率口径：TSLA 2018-2026 单标的日线（{len(closes) if closes else 0} "
+        f"个交易日）first-passage 统计——起点=回撤中心 ±{FP_BAND_PP:.0f}pp 内全部"
+        f"交易日（滚动采样、样本高度重叠、非独立），视界 {FP_HORIZON} 交易日、"
+        "逐日收盘首次穿越判定。历史频率 ≠ 概率预测。",
     ]
     # 高点滚出窗口的被动位移提示（近似交易日，不剔假日）
     try:
@@ -449,7 +732,7 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
             "S2 线将随窗内新高点下移（被动位移 ≠ 基本面改善，届时重新生成本页）。")
     except Exception:  # noqa: BLE001
         pass
-    return [up, down], notes
+    return [up, down], notes, root_freq
 
 
 # ---------------------------------------------------------------- 渲染
@@ -457,7 +740,8 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
 
 _GLYPH = {"up": "▲", "down": "▼", "det": "◆"}
 _ACT_LABEL = {"sys": "系统规则", "me": f"个人参数 · {UNVERIFIED}",
-              "unset": "个人参数 · 未设置", "note": ""}
+              "unset": "个人参数 · 未设置", "note": "",
+              "freq": "历史频率", "e13": "E13 干预参考"}
 
 
 def _act_html(a: dict) -> str:
@@ -474,11 +758,12 @@ def _node_html(n: dict) -> str:
     acts = "".join(_act_html(a) for a in n["acts"])
     kids = "".join(_node_html(c) for c in n["children"])
     tag = f'<span class="n-tag">{esc(n["tag"])}</span>' if n["tag"] else ""
+    val = f'<span class="n-val">{esc(n["val"])}</span>' if n.get("val") else ""
     return (
         f'<div class="node {n["dir"]}">'
         f'<div class="n-line"><span class="glyph">{_GLYPH[n["dir"]]}</span>'
         f'<span class="n-no">{esc(n["no"])}</span>'
-        f'<span class="cond">{n["cond"]}</span>{tag}</div>'
+        f'<span class="cond">{n["cond"]}</span>{tag}{val}</div>'
         f'{acts}'
         + (f'<div class="kids">{kids}</div>' if kids else "")
         + "</div>")
@@ -536,6 +821,13 @@ def _situation_html(live: float, px: dict, s2: dict, pos: dict,
     pnl_s = (f'盈亏 {(live / cost - 1) * 100:+.1f}%（成本 {cost:g}）'
              if cost else "成本未填 · 不显示盈亏")
 
+    av = float(pos.get("account_value_usd") or 100000)
+    mi = float(pos.get("monthly_inflow_usd") or 0)
+    pos_val = av * float(pos.get("position_pct") or 0) / 100
+    sh = pos_val / live if live else 0.0
+    av_demo = st.get("account_value_usd") == "示例值·请改为真实"
+    av_s = f"账户权益 {av:,.0f}" + ("（示例值·请改真实）" if av_demo else "")
+
     sh_row = ""
     if sh_s2:
         sh_row = (f'<div class="xref">影子引擎读数交叉对照：dd '
@@ -560,12 +852,12 @@ def _situation_html(live: float, px: dict, s2: dict, pos: dict,
 <div class="tile"><div class="t-k">探测器（N3 前向）</div>
   <div class="t-v"><span class="pill {det_cls}"><span class="dot"></span>{esc(det_v)}</span></div>
   <div class="t-r">{esc(det_ref)}</div></div>
-<div class="tile"><div class="t-k">我的仓位</div>
-  <div class="t-v">{pos.get("position_pct", 0):g}%</div>
-  <div class="t-r">{esc(pnl_s)}</div></div>
+<div class="tile"><div class="t-k">我的仓位（{esc(av_s)}）</div>
+  <div class="t-v">{pos.get("position_pct", 0):g}% ≈ ${pos_val:,.0f}</div>
+  <div class="t-r">≈ {sh:.0f} 股 @{live:.2f} · {esc(pnl_s)} · 月入金 ${mi:,.0f}（E13 口径）</div></div>
 <div class="tile"><div class="t-k">个人参数</div>
-  <div class="t-v t-chips">{chip("add_budget_pct", "加仓预算")}{chip("trim_line_pct", "减仓线")}{chip("max_pain_pct", "容忍线")}</div>
-  <div class="t-r">黄 = {UNVERIFIED} · 灰 = 未设置（data/intel/position.json）</div></div>
+  <div class="t-v t-chips">{chip("add_budget_pct", "加仓预算")}{chip("emergency_borrow_cap_pct", "应急借款上限")}{chip("trim_line_pct", "减仓线")}{chip("max_pain_pct", "容忍线")}</div>
+  <div class="t-r">黄 = 待用户批准（含 E13 背书默认值）· 灰 = 未设置（data/intel/position.json）</div></div>
 """
     ages = (age_badge(px.get("price_asof"), now, 3, "价格数据龄")
             + age_badge(date.fromisoformat(det["state_date"]) if det else None,
@@ -700,6 +992,9 @@ h2::after { content: ""; flex: 1; border-top: 1px solid var(--border);
 .n-tag { font: 600 10.5px var(--font-mono); letter-spacing: .06em; padding: 1px 7px;
   border: 1px solid var(--baseline); border-radius: 3px; color: var(--ink-2);
   white-space: nowrap; }
+.n-val { font: 600 10.5px var(--font-mono); font-variant-numeric: tabular-nums;
+  padding: 1px 7px; border: 1px solid var(--border); border-radius: 3px;
+  color: var(--muted); background: var(--surface-2); white-space: nowrap; }
 .kids { margin: 4px 0 0 18px; padding-left: 14px; border-left: 1px dashed var(--baseline); }
 .act { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px;
   font-size: 12.5px; line-height: 1.55; border-radius: 4px; padding: 6px 9px; }
@@ -709,11 +1004,36 @@ h2::after { content: ""; flex: 1; border-top: 1px solid var(--border);
 .act.sys .act-k { color: var(--sys); border: 1px solid var(--sys); }
 .act.me { background: var(--warn-wash); }
 .act.me .act-k { color: var(--warn-text); border: 1px solid var(--warn); }
-.act.unset { border: 1px dashed var(--baseline); color: var(--muted); }
-.act.unset .act-k { color: var(--muted); border: 1px solid var(--baseline); }
+/* 未设置参数：保留提示但降为次要样式（小字、无底色、不抢视觉重量） */
+.act.unset { border: none; border-left: 2px dashed var(--baseline);
+  border-radius: 0; padding: 1px 9px; margin-top: 6px;
+  font-size: 11px; line-height: 1.5; color: var(--muted); opacity: .85; }
+.act.unset .act-k { color: var(--muted); border: none; padding: 0;
+  font-size: 9.5px; line-height: 1.9; letter-spacing: .02em; }
+.act.unset .act-t { color: var(--muted); }
 .act.note { color: var(--muted); font-size: 12px; border-left: 2px solid var(--baseline); }
+/* 历史频率：等宽小字、虚线框——统计注解，不是动作 */
+.act.freq { background: transparent; border: 1px dashed var(--border);
+  font: 11.5px/1.6 var(--font-mono); color: var(--muted); }
+.act.freq .act-k { color: var(--ink-2); border: 1px solid var(--baseline); }
+.act.freq .act-t { color: var(--muted); }
+.act.freq .act-t b { color: var(--ink-2); font-weight: 600; }
+/* E13 干预参考卡：历史案例引用，区别于系统规则与个人参数 */
+.act.e13 { background: var(--surface-2); border-left: 2px solid var(--muted); }
+.act.e13 .act-k { color: var(--ink-2); border: 1px solid var(--muted); }
+.act.e13 .act-t { color: var(--ink-2); font-size: 12px; }
+.act.e13 .act-t b { color: var(--ink); }
 .act .act-t { min-width: 0; color: var(--ink-2); }
 .act.sys .act-t b, .act.me .act-t b { color: var(--ink); }
+
+/* 懒人基准（机会成本锚） */
+.bench-line { margin-bottom: 12px; padding: 9px 12px; border: 1px solid var(--border);
+  border-left: 3px solid var(--sys); border-radius: 6px; background: var(--sys-wash);
+  font-size: 12.5px; line-height: 1.6; color: var(--ink-2); }
+.bench-line .bench-k { font: 700 10.5px var(--font-mono); letter-spacing: .06em;
+  color: var(--sys); border: 1px solid var(--sys); border-radius: 3px;
+  padding: 0 7px; margin-right: 8px; white-space: nowrap; }
+.bench-line b { color: var(--ink); }
 
 .notes { margin-top: 14px; font: 12px/1.7 var(--font-mono); color: var(--muted); }
 .notes li { margin-top: 4px; }
@@ -787,24 +1107,41 @@ def render() -> str:
     else:
         s2 = px["s2"]
         live = float(px.get("live_price") or px["closes"][-1])
-        # 树价位以序列最后一根为准（与 S2 读数同源）；live 仅展示
+        # 树价位以序列最后一根为准（与 S2 读数同源）；live 仅展示。
+        # 历史频率用纯 CSV 日线（2018-2026，E13 同源样本），不掺临时今日点。
         ref = float(s2["ref_price"])
-        tree, notes = build_tree(ref, s2, pos, det, meta)
+        tree, notes, root_freq = build_tree(ref, s2, pos, det, meta,
+                                            closes=csv_closes)
         situ = _situation_html(ref, px, s2, pos, det, sh_s2, now)
         s2_state_s = ("S2 已触发（E8-A 停用）" if s2["triggered"]
                       else "S2 未触发（E8-A 可入场）")
+
+        # 懒人基准：任何分支动作的机会成本参照（E13 实测合成）
+        bench = load_e13_bench(csv_dates)
+        bench_html = (
+            '<div class="bench-line"><span class="bench-k">懒人基准</span>'
+            "同月供 <b>30% DCA + 70% 现金(4%)</b>（不再平衡，E13 对照行合成）："
+            f"8 年 XIRR <b>{bench['w2']:+.1f}%</b> / 3 年 <b>{bench['w1']:+.1f}%</b>"
+            f"（全仓 DCA-hold {bench['dca_w2']:+.1f}% / {bench['dca_w1']:+.1f}%，"
+            "现金 +4.0%）——树里任何分支动作若说不清凭什么赢过这一行，"
+            "就不值得做（机会成本锚，出处 E13 §5）。</div>")
+
+        av = float(pos.get("account_value_usd") or 100000)
+        pos_val = av * float(pos.get("position_pct") or 0) / 100
         root_line = (f'<div class="root-line">当前局面：<span class="rp">'
                      f'{ref:.2f}</span> · 距 252 日高 <span class="rp">'
                      f'{s2["drawdown_pct"]:+.1f}%</span> · {esc(s2_state_s)}'
-                     f' · 仓位 <span class="rp">{pos.get("position_pct", 0):g}%</span>'
-                     "——以下每条分支都有应手：")
+                     f' · 仓位 <span class="rp">{pos.get("position_pct", 0):g}%'
+                     f' ≈ {_usd(pos_val)}</span>（账户 <span class="rp">{_usd(av)}'
+                     "</span>）——以下每条分支都有应手：</div>")
+        root_freq_html = _act_html(root_freq) if root_freq else ""
         notes_html = "".join(f"<li>{esc(t)}</li>" for t in notes)
         body = (f"<main><section><h2><span class='sec-no'>01</span>当前局面"
                 f"<span class='h-sub'>换算基准与开关状态</span></h2>{situ}</section>"
                 f"<section><h2><span class='sec-no'>02</span>二叉预案树"
                 f"<span class='h-sub'>▲ 涨支 / ▼ 跌支 / ◆ 探测器支——"
                 f"价位为系统真实阈值换算</span></h2>"
-                f'<div class="tree card">{root_line}'
+                f'<div class="tree card">{bench_html}{root_line}{root_freq_html}'
                 + "".join(_node_html(n) for n in tree)
                 + f'<ul class="notes">{notes_html}</ul></div></section>'
                 "<footer>"
@@ -815,6 +1152,14 @@ def render() -> str:
                 "冻结规则前向值班（虚拟推演，不碰真钱）；E8-A 处于 shadow 白跑期"
                 "（≥8 周），全系统未上真钱。个人参数出自 data/intel/position.json，"
                 f"黄色 = {UNVERIFIED}。</div>"
+                "<div>历史频率 ≠ 概率预测：样本为 TSLA 2018-2026 单标的日线，"
+                "first-passage 滚动起点采样（样本高度重叠、非独立），过去八年"
+                "以强趋势上涨为主、频率随行情形态漂移（E13 已证'最优心里价'"
+                "不可学习）——频率行只回答'历史上走到这里之后发生过什么'，"
+                "不回答'接下来会发生什么'。E13 干预参考卡同理：历史案例引用，"
+                "非操作推荐（E13 判决：该策略族 0/180 跑赢 DCA，残值仅风控规则"
+                "与出手形态）。金额换算基于 account_value_usd（默认为示例值），"
+                "均为四舍五入估算，不构成任何投资建议。</div>"
                 "<div>生成：<code>python -m intel.playbook</code>；"
                 "计划由 com.tsla.dashboard 周期任务在仪表盘生成后串带执行"
                 "（plist 归仪表盘域，主线稍后接线）。</div>"

@@ -49,8 +49,9 @@ import csv
 import html as html_mod
 import json
 import math
+import re
 import sqlite3
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -93,6 +94,7 @@ STATES_CSV = PROJECT_ROOT / "outputs" / "n3h_deduction" / "daily_states.csv"
 PITS_CSV = PROJECT_ROOT / "outputs" / "n4_golden_pit" / "pits_catalog.csv"
 FORM4_CSV = PROJECT_ROOT / "data" / "intel" / "edgar_form4.csv"
 DIARY_MD = PROJECT_ROOT / "outputs" / "n3h_deduction" / "trigger_diary.md"
+APP_CSV = PROJECT_ROOT / "outputs" / "n3h_deduction" / "application_results.csv"
 FINRA_CSV = PROJECT_ROOT / "data" / "intel" / "finra_short.csv"
 
 # 视图盒尺寸（viewBox 单位；渲染时宽度 100% 自适应）
@@ -436,6 +438,22 @@ def load_daily_closes() -> tuple[list[date], list[float]]:
         return [], []
 
 
+def load_daily_opens() -> dict[date, float]:
+    """ET 交易日日线开盘价 {日期: 开盘}（假想交易执行价用）；失败返回空 dict。"""
+    try:
+        import sys
+        root = str(PROJECT_ROOT)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from src.common.data_io import load_bars
+        df = load_bars(str(BARS_CSV))
+        et = df.index.tz_convert("America/New_York")
+        s = df["Open"].groupby(et.date).first()
+        return {d: float(v) for d, v in zip(s.index, s.values)}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def load_risk_segments() -> list[tuple[date, date]] | None:
     """daily_states.csv 中 RISK_OFF 连续区段（交易日口径的起止日期）。"""
     try:
@@ -613,6 +631,28 @@ def load_replay_days() -> list[dict] | None:
                     }
                 )
         return out or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_app_results() -> dict | None:
+    """application_results.csv → 应用 A 收益对比与 p 值；缺失/坏行 → None（总结卡降级）。"""
+    try:
+        out: dict = {}
+        with APP_CSV.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                key = ((row.get("application") or "").strip(),
+                       (row.get("variant") or "").strip())
+                if key == ("A_bh", "buy_and_hold"):
+                    out["bh"] = _ffloat(row.get("total_ret"))
+                elif key[0] == "A_overlay":
+                    out["ov"] = _ffloat(row.get("total_ret"))
+                    out["p_boot"] = _ffloat(row.get("p_boot"))
+                    out["off_days"] = _ffloat(row.get("off_days"))
+                    out["switches"] = _ffloat(row.get("switches"))
+        if out.get("bh") is None or out.get("ov") is None:
+            return None
+        return out
     except Exception:  # noqa: BLE001
         return None
 
@@ -1576,10 +1616,13 @@ def _replay_segs(days: list[dict], key: str) -> list[tuple[date, date]]:
 def render_replay_view(days: list[dict] | None, price_dates: list[date],
                        price_closes: list[float],
                        finra: list[dict] | None,
-                       cards: dict[str, dict] | None) -> str:
-    """模拟探测页：N3-H 考场逐日回放播放器 + 指标面板 + 触发日记卡。
+                       cards: dict[str, dict] | None,
+                       opens: dict[date, float] | None = None,
+                       app: dict | None = None) -> str:
+    """模拟探测页：N3-H 考场逐日回放播放器 + 推演日志 + 假想交易 + 总结卡。
 
-    数据全部预计算内嵌 JSON；daily_states/价格任一缺失 → 降级空态卡。
+    数据全部预计算内嵌 JSON；daily_states/价格任一缺失 → 降级空态卡；
+    开盘价/application_results 缺失 → 交易表与总结卡对应项降级为缺口说明。
     """
     price_map = dict(zip(price_dates, price_closes))
     rows: list[dict] = []
@@ -1611,6 +1654,52 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
         while j + 1 < len(rels) and rels[j + 1]["pub_date"] <= r["date"]:
             j += 1
         si_idx.append(j)
+
+    # ---- 假想交易：避险开始=生效日开盘清仓卖出；解除=期满次日开盘买回 ----
+    cards = cards or {}
+    opens = opens or {}
+    open_dates = sorted(opens)
+    row_pos = {r["date"]: k for k, r in enumerate(rows)}
+    trig_no: dict[date, int] = {}
+    tn = 0
+    for r in rows:
+        if r["trig"]:
+            tn += 1
+            trig_no[r["date"]] = tn
+    ep_bh: dict[int, float] = {}  # 日记口径：risk-off 期间 B&H %
+    for c in cards.values():
+        mm = re.search(r"risk-off 期间 B&H ([+-]?\d+(?:\.\d+)?)%", c.get("after") or "")
+        if mm and c.get("ep"):
+            ep_bh[c["ep"]] = float(mm.group(1))
+    off_segs = _replay_segs(rows, "off")
+    trades: list[dict] = []
+    for ei, (a, b) in enumerate(off_segs, start=1):
+        k = bisect_right(open_dates, b)
+        nxt = open_dates[k] if k < len(open_dates) else None
+        sp = opens.get(a)
+        bp = opens.get(nxt) if nxt else None
+        res = (sp - bp) / sp * 100 if sp is not None and bp is not None else None
+        ra = rows[row_pos[a]]
+        si = si_idx[row_pos[a]]
+        rd = rels[si] if si >= 0 else None
+        t_txt = "—" if ra["tweets"] is None else f"{ra['tweets']:.0f}"
+        h_txt = "—" if ra["thr"] is None else f"{ra['thr']:.1f}"
+        chg_txt = "—" if rd is None else f"{rd['chg']:+.1f}%"
+        trades.append({
+            "ep": ei, "sd": str(a), "bd": str(nxt) if nxt else None,
+            "sp": None if sp is None else round(sp, 2),
+            "bp": None if bp is None else round(bp, 2),
+            "res": None if res is None else round(res, 2),
+            "bh": ep_bh.get(ei),
+            "sb": (f"第 {trig_no.get(a, '?')} 次触发：前日发帖 {t_txt} 条 > 阈值 {h_txt}"
+                   f"（365 日 90 分位）；回看 {LOOKBACK_BDAYS}bd 内空头 up-jump {chg_txt}"
+                   + (f"（结算 {rd['settle']}）" if rd else "")
+                   + " → risk-off 生效日开盘清仓转现金"),
+            "sbs": f"第 {trig_no.get(a, '?')} 次触发 · 帖 {t_txt}>{h_txt} · 空头 {chg_txt}",
+            "bb": (f"E{ei} risk-off {a} → {b}（F{PERSIST_BDAYS} 重叠触发顺延后期满），"
+                   + (f"{nxt} 开盘买回" if nxt else "买回日超出价格数据")),
+            "bbs": f"F{PERSIST_BDAYS} 期满解除",
+        })
 
     # ---- SVG（几何同战场走势：对数 y，日期 x）----
     d0o, d1o = d0.toordinal(), d1.toordinal()
@@ -1684,7 +1773,6 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
            f'aria-label="N3-H 考场回放：TSLA 日线收盘（对数）与探测器状态">{"".join(parts)}</svg>')
 
     # ---- 内嵌 JSON（精简字段控体积）----
-    cards = cards or {}
     card_out = {}
     for r in rows:
         k = str(r["date"])
@@ -1708,6 +1796,7 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
             "SI": si_idx,
             "R": [[str(r["pub_date"]), r["settle"], round(r["chg"], 2)] for r in rels],
             "cards": card_out,
+            "trades": trades,
             "epoch": _EPOCH_ORD,
             "meta": {"d0": d0o, "ds": dspan, "ml": _ML, "pw": pw,
                      "mt": _MT, "ph": ph, "ly0": round(llo, 6),
@@ -1743,14 +1832,102 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
     </div>
   </div>"""
 
+    # ---- 假想交易记录小表（2 段 = 4 笔；开盘价缺口降级）----
+    if trades:
+        t_rows = []
+        for t in trades:
+            res = t["res"]
+            if res is None:
+                res_td = '<td class="num" rowspan="2">—</td>'
+            else:
+                cls = "good-text" if res >= 0 else "crit-text"
+                res_td = (f'<td class="num rp-res {cls}" rowspan="2">'
+                          f'{"躲掉" if res >= 0 else "错过"} {res:+.1f}%</td>')
+            sp_txt = "—" if t["sp"] is None else f"{t['sp']:,.2f}"
+            bp_txt = "—" if t["bp"] is None else f"{t['bp']:,.2f}"
+            t_rows.append(
+                f'<tr class="tr-sell"><td class="num">{esc(t["sd"])}</td>'
+                f'<td>卖出 → 现金</td><td class="num">{sp_txt}</td>'
+                f'<td class="rp-basis">{esc(t["sbs"])}</td>{res_td}</tr>'
+                f'<tr class="tr-buy"><td class="num">{esc(t["bd"] or "—")}</td>'
+                f'<td>买回</td><td class="num">{bp_txt}</td>'
+                f'<td class="rp-basis">{esc(t["bbs"])}</td></tr>'
+            )
+        trades_tbl = ('<table class="rp-trades"><thead><tr><th>日期</th><th>动作</th>'
+                      '<th>开盘价</th><th>依据</th><th>该段结果</th></tr></thead>'
+                      f'<tbody>{"".join(t_rows)}</tbody></table>')
+    else:
+        trades_tbl = '<p class="lg-empty">开盘价数据或 risk-off 区段缺失——无法推导假想交易。</p>'
+
+    # ---- 推演总结卡（数字全部现算/读取；缺失降级为缺口说明）----
+    n_ep = len(off_segs)
+    eps_ok: dict[int, bool | None] = {}
+    for c in cards.values():
+        if c.get("ep"):
+            eps_ok[c["ep"]] = c.get("ok")
+    ok_n = sum(1 for v in eps_ok.values() if v is True)
+    judged_txt = f"{ok_n} / {n_ep} 对" if eps_ok and n_ep else "—"
+    wins = sum(1 for t in trades if t["res"] is not None and t["res"] > 0)
+    tot_tr = sum(1 for t in trades if t["res"] is not None)
+    wr_txt = f"{wins} / {tot_tr}（{wins / tot_tr * 100:.0f}%）" if tot_tr else "—"
+    if app:
+        ov_p, bh_p = app["ov"] * 100, app["bh"] * 100
+        ret_v = f'{ov_p:+.1f}% <span class="sub">vs 裸持 {bh_p:+.1f}%</span>'
+        ret_line = (f"覆盖策略（risk-off 转现金，开盘执行含成本）考场总收益 <b>{ov_p:+.1f}%</b> "
+                    f"vs 裸持有 <b>{bh_p:+.1f}%</b>，少亏/多赚 <b>{ov_p - bh_p:+.1f}pp</b>"
+                    + (f"（切换 {app['switches']:.0f} 次 · risk-off {app['off_days']:.0f} 交易日）。"
+                       if app.get("switches") is not None and app.get("off_days") is not None
+                       else "。"))
+        p_txt = f"{app['p_boot']:.2f}" if app.get("p_boot") is not None else "—"
+    else:
+        ret_v = "—"
+        ret_line = "application_results.csv 不可读——收益对比本次缺席（数据缺口，非零改善）。"
+        p_txt = "—"
+    ep_lines = []
+    for t in trades:
+        res, bh = t["res"], t["bh"]
+        seg = f"E{t['ep']} {t['sd']} → {t['bd'] or '—'}"
+        mid = "" if bh is None else f"期间 B&amp;H {bh:+.1f}%，"
+        if res is None:
+            tail = "开盘价缺失，无法结算"
+        else:
+            cls = "good-text" if res >= 0 else "crit-text"
+            tail = (f"假想 {t['sp']:,.2f} 卖出 → {t['bp']:,.2f} 买回，"
+                    f'<b class="{cls}">{"躲掉" if res >= 0 else "错过"} {res:+.1f}%</b>')
+        ep_lines.append(f'<p class="rs-ep"><b class="num">{esc(seg)}</b>：{mid}{tail}</p>')
+    sum_card = f"""
+  <div class="rp-sum" id="rp-sum" hidden role="dialog" aria-label="推演总结">
+    <div class="rs-h"><span>推演总结 · N3-H 考场 {esc(str(d0))} → {esc(str(d1))}</span>
+      <button class="rp-btn" id="rp-sum-close" type="button">关闭</button></div>
+    <p class="rs-model">模型：FINRA 空头 change ≥ +{SHORT_JUMP_PCT:.0f}% 发布（腿 A）×
+      Musk 日发帖 &gt; 365 日 90 分位（腿 B），回看 {LOOKBACK_BDAYS}bd 同窗命中才触发 →
+      risk-off {PERSIST_BDAYS} 交易日（重叠触发顺延）；参数 2018→2023-06 发现段冻结，考场内未改。</p>
+    <div class="rs-grid">
+      <div class="rs-cell"><div class="rs-k">触发 → 避险段</div>
+        <div class="rs-v num">{n_trig} 次 → {n_ep} 段</div></div>
+      <div class="rs-cell"><div class="rs-k">段判定</div>
+        <div class="rs-v num">{judged_txt}</div></div>
+      <div class="rs-cell"><div class="rs-k">假想交易胜率</div>
+        <div class="rs-v num">{wr_txt}</div></div>
+      <div class="rs-cell"><div class="rs-k">覆盖 vs 裸持</div>
+        <div class="rs-v num">{ret_v}</div></div>
+    </div>
+    {"".join(ep_lines)}
+    <p class="rs-ep">{ret_line}</p>
+    <div class="rs-note">诚实注脚：仅 {n_ep} 段 risk-off 样本、块 bootstrap p = {p_txt}——以上属
+      <b>方向性证据</b>，不是统计结论，不构成任何上钱依据；另有 {n_blind} 个交易日
+      （Musk 归档尽头之后）放风腿失明，该段「无触发」是覆盖缺口，不是安全判定。</div>
+  </div>"""
+
     return f"""
 <section id="rp">
-  <h2><span class="sec-no">R1</span>推演播放器<span class="h-sub">N3-H 考场 {esc(str(d0))} → {esc(str(d1))} · {n} 交易日 · 触发 {n_trig} 次 · 失明 {n_blind} 日 · 触发日自动暂停弹日记卡</span></h2>
+  <h2><span class="sec-no">R1</span>推演播放器<span class="h-sub">N3-H 考场 {esc(str(d0))} → {esc(str(d1))} · {n} 交易日 · 触发 {n_trig} 次 · 失明 {n_blind} 日 · 事件实时写入推演日志 · 播完出总结</span></h2>
   {spec_card}
   <div class="card chartcard">
     <div class="rp-controls">
       <button id="rp-play" class="rp-btn primary" type="button">开始推演</button>
       <button id="rp-step" class="rp-btn" type="button">单步</button>
+      <button id="rp-sum-btn" class="rp-btn" type="button">总结</button>
       <div class="tv-ranges" role="group" aria-label="速度">
         <button class="tv-rb rp-speed act" data-s="1">1x</button>
         <button class="tv-rb rp-speed" data-s="5">5x</button>
@@ -1763,18 +1940,6 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
     </div>
     <div class="tv-wrap rp-wrap" id="rp-wrap">
       {svg}
-      <div class="rp-card" id="rp-card" hidden>
-        <div class="rp-card-h"><span id="rp-card-title" class="num"></span>
-          <span class="pill sm" id="rp-card-pill"><span class="dot"></span><span id="rp-card-pilltxt"></span></span></div>
-        <div class="rc-row"><span class="rc-k">看到什么</span><span class="rc-v" id="rp-card-seen"></span></div>
-        <div class="rc-row"><span class="rc-k">决定</span><span class="rc-v" id="rp-card-decide"></span></div>
-        <div class="rc-row"><span class="rc-k">之后 20 日实际</span><span class="rc-v" id="rp-card-after"></span></div>
-        <div class="rc-row"><span class="rc-k">判定</span><span class="rc-v" id="rp-card-verdict"></span></div>
-        <div class="rp-card-foot">
-          <button class="rp-btn primary" id="rp-resume" type="button">继续推演</button>
-          <button class="rp-btn" id="rp-close" type="button">关闭卡片</button>
-        </div>
-      </div>
     </div>
     <div class="rp-panel">
       <div class="leg"><div class="leg-h"><svg class="ic" aria-hidden="true"><use href="#i-scales"/></svg>
@@ -1790,12 +1955,27 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
         <div class="val"><span class="pill" id="rp-st-pill"><span class="dot"></span><span id="rp-st-txt">RISK_ON</span></span></div>
         <div class="ref" id="rp-st-ref">—</div></div>
     </div>
+    <div class="rp-lower">
+      <div class="rp-logcard">
+        <div class="lg-h">推演日志<span class="lg-cnt num" id="rp-log-cnt">0 条</span></div>
+        <div class="lg-empty" id="rp-log-empty">按「开始推演」逐日回放：触发 / 连环确认 /
+          避险开始 / 避险解除 / 失明期与假想买卖会实时追加到这里；点击行可展开当次完整日记。</div>
+        <div class="lg-scroll" id="rp-log" role="log" aria-live="polite"></div>
+      </div>
+      <div class="rp-tradecard">
+        <div class="lg-h">假想交易记录<span class="lg-cnt">避险=生效日开盘卖出 · 解除=次日开盘买回</span></div>
+        {trades_tbl}
+      </div>
+    </div>
     <p class="footnote">回放为 N3-H 历史推演的逐日重演（outputs/n3h_deduction/daily_states.csv +
-    trigger_diary.md），触发日自动暂停并弹出当次日记卡；空头读数来自拆股修正后
-    finra_short.csv，按发布日对齐（当日只见已发布的最新一期）。灰底 = Musk 归档缺口
-    （2025-05-08 后 {n_blind} 个交易日放风腿无数据，探测器无法触发——该段"无触发"是失明，
-    不是安全）。假想推演，不碰真钱。</p>
+    trigger_diary.md），播放不中断：光标经过事件日自动追加推演日志，点击行展开完整日记；
+    假想交易由 risk-off 区段推导——避险生效日开盘清仓、F{PERSIST_BDAYS} 期满次日开盘买回
+    （开盘价取自 data/TSLA_1h_alpaca.csv 日线）。空头读数来自拆股修正后 finra_short.csv，
+    按发布日对齐（当日只见已发布的最新一期）。灰底 = Musk 归档缺口（2025-05-08 后 {n_blind}
+    个交易日放风腿无数据，探测器无法触发——该段"无触发"是失明，不是安全）。播放到达终点自动
+    弹出推演总结，也可随时点「总结」查看。假想推演，不碰真钱。</p>
   </div>
+  {sum_card}
   <script type="application/json" id="rp-data">{data_json}</script>
 </section>"""
 
@@ -3294,19 +3474,94 @@ main > .sym-tabs { margin-top: 26px; }
 #rp-legb.blind .val { color: var(--muted); font-size: 15px; }
 .rp-statecell .val { margin: 10px 0 6px; }
 .rp-statecell .pill { font-size: 13px; padding: 5px 14px; }
-.rp-card { position: absolute; z-index: 8; top: 8%; left: 50%;
-  transform: translateX(-50%); width: min(560px, 92%);
-  background: var(--surface); border: 1px solid var(--warn); border-radius: 8px;
-  padding: 14px 18px 12px; box-shadow: 0 10px 34px rgba(0,0,0,.35); }
-.rp-card-h { display: flex; align-items: center; gap: 10px; justify-content: space-between;
-  border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 8px; }
-.rp-card-h > span:first-child { font-size: 13.5px; font-weight: 700; color: var(--ink); }
-.rc-row { display: grid; grid-template-columns: 96px 1fr; gap: 10px; padding: 5px 0;
-  font-size: 12.5px; }
-.rc-k { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em;
-  color: var(--muted); padding-top: 2px; }
-.rc-v { color: var(--ink-2); line-height: 1.6; min-width: 0; }
-.rp-card-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 10px; }
+/* -- 推演日志 + 假想交易记录 -- */
+.rp-lower { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 12px; margin-top: 14px; }
+@media (max-width: 980px){ .rp-lower { grid-template-columns: 1fr; } }
+.rp-logcard, .rp-tradecard { border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); min-width: 0; }
+.lg-h { display: flex; align-items: baseline; gap: 10px; justify-content: space-between;
+  font: 600 11px var(--font-mono); letter-spacing: .1em; color: var(--ink-2);
+  padding: 9px 12px; border-bottom: 1px solid var(--border); }
+.lg-cnt { color: var(--muted); font-weight: 500; letter-spacing: .04em; }
+.lg-empty { font-size: 12px; color: var(--muted); padding: 14px 12px; margin: 0;
+  line-height: 1.7; }
+.lg-scroll { overflow-y: auto; max-height: 320px; }
+.lg-row { border-bottom: 1px solid var(--border); }
+.lg-row:last-child { border-bottom: 0; }
+.lg-line { display: flex; align-items: baseline; gap: 8px; padding: 6px 12px;
+  font-size: 12px; }
+.lg-row.click .lg-line { cursor: pointer; }
+.lg-row.click .lg-line:hover { background: var(--surface-2); }
+.lg-d { font-size: 11px; color: var(--muted); flex: 0 0 76px; }
+.lg-tag { font: 600 10.5px var(--font-mono); letter-spacing: .05em; border-radius: 3px;
+  padding: 2px 7px; white-space: nowrap; background: var(--surface-2);
+  color: var(--ink-2); border: 1px solid var(--border); }
+.lg-trig .lg-tag { background: var(--warn-wash); border-color: var(--warn);
+  color: var(--warn-text); }
+.lg-chain .lg-tag { border-color: var(--warn); color: var(--warn-text); }
+.lg-on .lg-tag { background: var(--good-wash); border-color: var(--good);
+  color: var(--good-text); }
+.lg-blind .lg-tag { color: var(--muted); }
+.lg-b { color: var(--ink-2); min-width: 0; line-height: 1.55; }
+.lg-x { margin-left: auto; color: var(--muted); font-size: 10px; flex: 0 0 auto;
+  transition: transform .15s; }
+.lg-row.open .lg-x { transform: rotate(90deg); }
+.lg-exp { padding: 2px 12px 10px 96px; }
+.lg-kv { display: grid; grid-template-columns: 72px 1fr; gap: 8px; font-size: 12px;
+  padding: 3px 0; }
+.lg-kv > span:first-child { font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: .08em; color: var(--muted); padding-top: 2px; }
+.lg-kv > span:last-child { color: var(--ink-2); line-height: 1.6; min-width: 0; }
+.lg-trade .lg-line { font-weight: 600; }
+.lg-trade.sell .lg-line { background: var(--crit-wash); }
+.lg-trade.buy .lg-line { background: var(--good-wash); }
+.lg-trade.sell .lg-tag { background: var(--surface); border-color: var(--crit);
+  color: var(--crit-text); }
+.lg-trade.buy .lg-tag { background: var(--surface); border-color: var(--good);
+  color: var(--good-text); }
+.rp-tradecard { overflow-x: auto; }
+.rp-trades { width: 100%; min-width: 0; border-collapse: collapse;
+  font-size: 12px; table-layout: fixed; }
+.rp-trades th, .rp-trades td { white-space: normal; }
+.rp-trades th { font: 600 10px var(--font-mono); letter-spacing: .06em;
+  color: var(--muted); text-align: left; padding: 7px 8px;
+  border-bottom: 1px solid var(--border); }
+.rp-trades th:nth-child(1) { width: 96px; }
+.rp-trades th:nth-child(2) { width: 58px; }
+.rp-trades th:nth-child(3) { width: 64px; }
+.rp-trades th:nth-child(5) { width: 78px; }
+.rp-trades td.num { white-space: nowrap; }
+.rp-trades td { padding: 7px 8px; border-bottom: 1px solid var(--border);
+  color: var(--ink-2); vertical-align: top; line-height: 1.5;
+  overflow-wrap: anywhere; }
+.rp-trades tbody tr:last-child td { border-bottom: 0; }
+.rp-trades .rp-basis { font-size: 11px; color: var(--muted); }
+.rp-res { font-weight: 700; }
+/* -- 推演总结卡 -- */
+.rp-sum { position: fixed; z-index: 40; top: 50%; left: 50%;
+  transform: translate(-50%, -50%); width: min(720px, 94vw); max-height: 86vh;
+  overflow-y: auto; background: var(--surface); border: 1px solid var(--warn);
+  border-radius: 8px; padding: 14px 20px 16px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.4); }
+.rs-h { display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  border-bottom: 1px solid var(--border); padding-bottom: 9px; margin-bottom: 10px; }
+.rs-h > span { font-size: 13.5px; font-weight: 700; color: var(--ink); }
+.rs-model { margin: 0 0 4px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+.rs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+  margin: 12px 0; }
+@media (max-width: 640px){ .rs-grid { grid-template-columns: 1fr 1fr; } }
+.rs-cell { border: 1px solid var(--border); border-radius: 6px; padding: 9px 11px;
+  background: var(--surface-2); }
+.rs-k { font: 600 10px var(--font-mono); letter-spacing: .08em; color: var(--muted);
+  margin-bottom: 5px; }
+.rs-v { font-size: 16px; font-weight: 700; color: var(--ink);
+  font-variant-numeric: tabular-nums; }
+.rs-v .sub { font-size: 11px; color: var(--muted); font-weight: 500; }
+.rs-ep { margin: 6px 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.7; }
+.rs-note { border: 1px solid var(--warn); background: var(--warn-wash);
+  border-radius: 6px; padding: 10px 12px; margin-top: 12px; font-size: 12.5px;
+  font-weight: 600; color: var(--warn-text); line-height: 1.75; }
 
 /* ===== footer ===== */
 .footnote { font-size: 12px; color: var(--muted); margin: 8px 16px 12px; }
@@ -3516,7 +3771,7 @@ _RP_JS = """
   var h = (location.hash || "").slice(1);
   if (h === "replay" || h === "live") setView(h);
 })();
-/* 推演播放器：逐日回放 N3-H 考场；触发日自动暂停弹日记卡 */
+/* 推演播放器：逐日回放 N3-H 考场；事件写入推演日志，播放不中断；播完弹总结 */
 (function () {
   var sec = document.getElementById("rp");
   var dataEl = document.getElementById("rp-data");
@@ -3528,11 +3783,112 @@ _RP_JS = """
   function $(id) { return document.getElementById(id); }
   var curLine = $("rp-cur-line"), curDot = $("rp-cur-dot"), curPx = $("rp-cur-px");
   var range = $("rp-range"), dateLab = $("rp-date"), countLab = $("rp-count");
-  var playBtn = $("rp-play"), stepBtn = $("rp-step"), card = $("rp-card");
-  var idx = 0, timer = null, speed = 1, lastCard = -1, BASE_MS = 320;
+  var playBtn = $("rp-play"), stepBtn = $("rp-step");
+  var log = $("rp-log"), logEmpty = $("rp-log-empty"), logCnt = $("rp-log-cnt");
+  var sumCard = $("rp-sum"), sumBtn = $("rp-sum-btn"), sumClose = $("rp-sum-close");
+  var idx = 0, timer = null, speed = 1, BASE_MS = 320;
+  var logPos = 0, nLog = 0, sumSeen = false;
+
+  var tradeBy = {};
+  (D.trades || []).forEach(function (t) {
+    if (t.sd) (tradeBy[t.sd] = tradeBy[t.sd] || []).push(["s", t]);
+    if (t.bd) (tradeBy[t.bd] = tradeBy[t.bd] || []).push(["b", t]);
+  });
 
   function isoOf(i) {
     return new Date((D.D[i] - D.epoch) * 86400000).toISOString().slice(0, 10);
+  }
+  function fmtPct(v) { return (v >= 0 ? "+" : "") + v.toFixed(1) + "%"; }
+  function legBrief(i) {
+    var s = [], t = D.T[i], h = D.H[i], si = D.SI[i];
+    if (D.B[i] === 1) s.push("放风腿失明");
+    else if (t != null && h != null)
+      s.push("帖 " + t + (t > h ? " > " : " ≤ ") + h.toFixed(1));
+    if (si >= 0) s.push("空头 " + fmtPct(D.R[si][2]));
+    return s.join(" · ");
+  }
+  function mkRow(cls, iso, tag, brief, exp) {
+    var d = document.createElement("div");
+    d.className = "lg-row " + cls + (exp ? " click" : "");
+    d.innerHTML = '<div class="lg-line"><span class="lg-d num">' + iso + "</span>" +
+      '<span class="lg-tag">' + tag + "</span>" +
+      '<span class="lg-b">' + brief + "</span>" +
+      (exp ? '<span class="lg-x num" aria-hidden="true">\\u25b8</span>' : "") +
+      "</div>" + (exp ? '<div class="lg-exp" hidden>' + exp + "</div>" : "");
+    if (exp) {
+      d.querySelector(".lg-line").addEventListener("click", function () {
+        var e2 = d.querySelector(".lg-exp");
+        e2.hidden = !e2.hidden;
+        d.classList.toggle("open", !e2.hidden);
+      });
+    }
+    return d;
+  }
+  function kv(k, v) {
+    return '<div class="lg-kv"><span>' + k + "</span><span>" + (v || "—") +
+      "</span></div>";
+  }
+  function cardExp(c) {
+    if (!c) return kv("说明", "日记卡缺失");
+    return kv("看到什么", c.s) + kv("决定", c.d) + kv("之后实际", c.a) +
+      kv("判定", c.v);
+  }
+  function dayRows(i) {
+    var iso = isoOf(i), out = [];
+    if (D.B[i] === 1 && (i === 0 || D.B[i - 1] === 0))
+      out.push(mkRow("lg-blind", iso, "失明期进入",
+        "Musk 归档尽头——放风腿无数据，无触发 \\u2260 安全",
+        kv("说明", "musk_tweets 归档止于 2025-05-08，此后放风腿无法评估、探测器无法" +
+          "触发；该段覆盖为空，属数据缺口而非安全判定。")));
+    var firstOff = D.S[i] === 1 && (i === 0 || D.S[i - 1] === 0);
+    if (D.G[i] === 1) {
+      out.push(mkRow(firstOff ? "lg-trig" : "lg-chain", iso,
+        firstOff ? "触发 · 避险开始" : "连环确认",
+        legBrief(i) + (firstOff ? " · risk_off 生效" : " · F20 顺延"),
+        cardExp(D.cards[iso])));
+    } else if (firstOff) {
+      out.push(mkRow("lg-trig", iso, "避险开始", "risk_off 生效 · F20", ""));
+    }
+    if (i > 0 && D.S[i] === 0 && D.S[i - 1] === 1)
+      out.push(mkRow("lg-on", iso, "避险解除", "F20 期满 · 回到 risk_on", ""));
+    (tradeBy[iso] || []).forEach(function (p) {
+      var t = p[1];
+      if (p[0] === "s") {
+        out.push(mkRow("lg-trade sell", iso, "假想卖出 E" + t.ep,
+          t.sp == null ? "开盘价缺失" : "开盘 " + t.sp.toFixed(2) + " 全仓转现金",
+          kv("依据", t.sb)));
+      } else {
+        var resTxt = t.res == null ? "" :
+          ' · <b class="' + (t.res >= 0 ? "good-text" : "crit-text") + '">' +
+          (t.res >= 0 ? "躲掉 " : "错过 ") + fmtPct(t.res) + "</b>";
+        out.push(mkRow("lg-trade buy", iso, "假想买回 E" + t.ep,
+          (t.bp == null ? "开盘价缺失" : "开盘 " + t.bp.toFixed(2) + " 买回") + resTxt,
+          kv("依据", t.bb) + kv("该段结果", t.res == null ? "—" :
+            "卖 " + t.sp.toFixed(2) + " → 买 " + t.bp.toFixed(2) + "，" +
+            (t.res >= 0 ? "躲掉 " : "错过 ") + fmtPct(t.res) +
+            (t.bh == null ? "" : "（该段 B&H " + fmtPct(t.bh) + "）"))));
+      }
+    });
+    return out;
+  }
+  function appendDay(i) {
+    var rs = dayRows(i), k;
+    for (k = 0; k < rs.length; k++) log.appendChild(rs[k]);
+    nLog += rs.length;
+    return rs.length;
+  }
+  function syncLog(i) {
+    var added = 0, k;
+    if (i >= logPos) {
+      for (k = logPos; k <= i; k++) added += appendDay(k);
+    } else {
+      log.innerHTML = ""; nLog = 0; sumSeen = false;
+      for (k = 0; k <= i; k++) added += appendDay(k);
+    }
+    logPos = i + 1;
+    if (logEmpty) logEmpty.hidden = nLog > 0;
+    if (logCnt) logCnt.textContent = nLog + " 条";
+    if (added) log.scrollTop = log.scrollHeight;
   }
   function X(i) { return m.ml + (D.D[i] - m.d0) / m.ds * m.pw; }
   function Y(i) {
@@ -3589,48 +3945,34 @@ _RP_JS = """
     $("rp-st-ref").textContent = off
       ? "假想减仓生效（F20，重叠触发顺延）"
       : (D.B[i] === 1 ? "未见触发——但放风腿失明，覆盖不完整" : "两腿未同时命中");
+    syncLog(i);
   }
-  function showCard(i) {
-    var c = D.cards[isoOf(i)];
-    if (!c) return;
-    $("rp-card-title").textContent = "触发 " + isoOf(i) + (c.t ? " · Episode " + c.ep : "");
-    $("rp-card-seen").textContent = c.s || "—";
-    $("rp-card-decide").textContent = c.d || "—";
-    $("rp-card-after").textContent = c.a || "—";
-    $("rp-card-verdict").textContent = c.v || "—";
-    $("rp-card-pill").className =
-      "pill sm " + (c.ok === true ? "good" : c.ok === false ? "crit" : "");
-    $("rp-card-pilltxt").textContent =
-      c.ok === true ? "判对" : c.ok === false ? "判错" : "未判";
-    card.hidden = false;
+  function showSum() { if (sumCard) sumCard.hidden = false; }
+  function hideSum() { if (sumCard) sumCard.hidden = true; }
+  function atEnd() {
+    if (!sumSeen) { sumSeen = true; showSum(); }
   }
-  function hideCard() { card.hidden = true; }
   function pause() {
     if (timer) { clearInterval(timer); timer = null; }
     playBtn.textContent = idx >= n - 1 ? "重新推演" : "开始推演";
   }
   function tick() {
-    if (idx >= n - 1) { pause(); return; }
+    if (idx >= n - 1) { pause(); atEnd(); return; }
     draw(idx + 1);
-    if (D.G[idx] === 1 && lastCard !== idx) {
-      lastCard = idx;
-      showCard(idx);
-      pause();  /* 触发日自动暂停 */
-    }
+    if (idx >= n - 1) { pause(); atEnd(); }
   }
   function play() {
-    hideCard();
-    if (idx >= n - 1) { lastCard = -1; draw(0); }
+    if (idx >= n - 1) { hideSum(); draw(0); }
     if (timer) return;
     timer = setInterval(tick, BASE_MS / speed);
     playBtn.textContent = "暂停";
   }
   playBtn.addEventListener("click", function () { if (timer) pause(); else play(); });
   stepBtn.addEventListener("click", function () {
-    pause(); hideCard();
+    pause();
     if (idx >= n - 1) return;
     draw(idx + 1);
-    if (D.G[idx] === 1 && lastCard !== idx) { lastCard = idx; showCard(idx); }
+    if (idx >= n - 1) { pause(); atEnd(); }
   });
   sec.querySelectorAll(".rp-speed").forEach(function (b) {
     b.addEventListener("click", function () {
@@ -3642,13 +3984,17 @@ _RP_JS = """
     });
   });
   range.addEventListener("input", function () {
-    pause(); hideCard(); lastCard = -1;
+    pause(); hideSum();
     draw(Math.max(0, Math.min(n - 1, parseInt(range.value, 10) || 0)));
   });
-  $("rp-resume").addEventListener("click", function () { hideCard(); play(); });
-  $("rp-close").addEventListener("click", hideCard);
+  if (sumBtn) sumBtn.addEventListener("click", function () {
+    if (sumCard) { if (sumCard.hidden) showSum(); else hideSum(); }
+  });
+  if (sumClose) sumClose.addEventListener("click", hideSum);
   window.__rp = { draw: draw, play: play, pause: pause, n: n,
-                  get idx() { return idx; }, get playing() { return !!timer; } };
+                  showSum: showSum, hideSum: hideSum,
+                  get idx() { return idx; }, get playing() { return !!timer; },
+                  get logCount() { return nLog; } };
   draw(0);
 })();
 """
@@ -3726,7 +4072,8 @@ def render(db_path: Path = DB_PATH) -> str:
         if not rendered:
             rendered = ['<p class="empty">数据库暂无可展示的表——待哨兵首采后刷新。</p>']
         replay_html = render_replay_view(
-            load_replay_days(), dates, closes, finra, load_trigger_cards()
+            load_replay_days(), dates, closes, finra, load_trigger_cards(),
+            load_daily_opens(), load_app_results(),
         )
         body.append(
             "<main>" + render_symbol_tabs() + render_view_tabs()
