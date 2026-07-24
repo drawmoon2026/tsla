@@ -249,6 +249,21 @@ footer code { font-size: 12px; }
     <p><strong>AUC 0.602 未能在成本后存活。</strong>过滤器的方向性完全有效（胜率、回撤、亏损全部随阈值单调改善），但 +0.5%/−1% 的不对称障碍结构注定亏损：扣费后止盈 ~44bp、止损 ~106bp，打平需 70.7% 胜率，最高层只有 64.2%。<em>问题在交易结构，不在模型</em>——若要继续，方向是重新设计障碍结构（对称或 TP&gt;SL）并重训重验，但这是新假设，须警惕在同一份数据上反复挖掘。</p>
   </div>
 
+  <h3>策略实验室（E1–E11，累计 ~3000 组合，详见 docs/strategy-lab.md）</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th>实验</th><th>假设</th><th>裁决</th></tr>
+    <tr><td>E1 / E2</td><td>1H 动量跟随（网格 / 随机搜参）</td><td>❌ 24 折样本外无 edge / 🟠 粒度敏感存疑，shadow 白跑中</td></tr>
+    <tr><td>E4 / E5</td><td>"只赚才卖" 朴素版 / 加指标策略族（432 组合）</td><td>❌ 胜率 100% 但跑输存款 / ❌ 无一达标，结构性天花板</td></tr>
+    <tr><td>E6</td><td>恐慌期（高波动/深回撤）开仓期望更高</td><td>❌ 12 桶检验全不显著，高波动方向反而为负</td></tr>
+    <tr><td>E9 / E10</td><td>70% 胜率 + 正期望全网格（778）/ 日线波段（660）</td><td>❌ 零达标——胜率-期望此消彼长曲线上无此点 / ❌ 择时打不过持有</td></tr>
+    <tr><td><strong>E8</strong></td><td>跨标的联合训练解数据量瓶颈</td><td>🟢 迁移成立（26/26 标的，leave-TSLA-out AUC 0.642）→ 产出候选 E8-A：留出段 <strong>80.6% 胜率 / +16bp</strong></td></tr>
+    <tr><td>E8-A 崩盘压测</td><td>候选须全天候</td><td>❌ 崩盘段胜率仍 71% 但期望 −20.7bp（比随机差）——胜率幻觉的活例</td></tr>
+    <tr><td><strong>E11</strong></td><td>熊市停用开关救 E8-A</td><td>🟢 <strong>有条件通过</strong>：回撤>20% 开关砍掉 78% 崩盘损失、保留 118% 晴天收益；已冻结 E8-A+S2 组合交 shadow 裁决</td></tr>
+  </table></div>
+  <div class="verdict good">
+    <p><strong>当前冻结候选：E8-A + S2 熊市开关</strong>（拼接权益 +4.4% vs 无开关 −24.4%）。参数已冻结不得再调，裁决权移交 shadow 前向白跑 ≥8 周（launchd 每交易日自动运行中）。诚实边界：开关靠空仓避损而非选时（开闸时段仍反选）、顶部关闸迟到 27 个交易日。</p>
+  </div>
+
   <h3>关键交付</h3>
   <ul class="tight">
     <li><strong>公共模块</strong>：<code>src/common/data_io.py</code>（统一 UTC 加载 + 正确重采样，7 处副本收敛）与 <code>src/common/execution.py</code>（悲观成交结算，全部模拟器共用）。</li>
