@@ -8,11 +8,16 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
 
 视图（顶部标的标签栏之下切换，hash 记忆）：
   实时值班 = 下列全部板块（默认）；
-  模拟探测（历史推演）= N3-H 考场（2023-07→2026-07）逐日回放播放器——
+  模拟探测（历史推演）= 双模式（模式切换 hash 记忆：#replay 探测器 / #fullsys 全系统）：
+   · 探测器推演（防守层）= N3-H 考场（2023-07→2026-07）逐日回放播放器——
      价格曲线光标推进 + 两腿指标面板同步 + 触发日自动暂停弹日记卡
      （trigger_diary.md：看到什么→决定→之后 20 日实际→判对/错）+
      「使用指标」固定卡（两腿定义/冻结参数/证据等级/walk-forward 口径）+
      失明期灰显；播放数据预计算内嵌 JSON（精简字段控体积）。
+   · 全系统推演（进攻层）= E8-A+S2 留出段（2025-10→2026-07）逐笔回放——
+     outputs/e8a_replay（research/e8a_trades_export.py 由 models/e8a/holdout_ref.csv
+     重放、与 frontier_shift/e11 存档核对一致）54 笔成交 + 8 笔 S2 拦截对照；
+     同款播放器骨架（交易密，速度预设 20x），总结卡年化收益率置顶。
 
 板块（等宽序号按实际渲染顺序编排）：
   顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
@@ -102,6 +107,7 @@ FORM4_CSV = PROJECT_ROOT / "data" / "intel" / "edgar_form4.csv"
 DIARY_MD = PROJECT_ROOT / "outputs" / "n3h_deduction" / "trigger_diary.md"
 APP_CSV = PROJECT_ROOT / "outputs" / "n3h_deduction" / "application_results.csv"
 FINRA_CSV = PROJECT_ROOT / "data" / "intel" / "finra_short.csv"
+E8A_REPLAY_DIR = PROJECT_ROOT / "outputs" / "e8a_replay"  # 全系统推演数据
 
 # 视图盒尺寸（viewBox 单位；渲染时宽度 100% 自适应）
 _VB_W, _VB_H = 1040, 400
@@ -729,6 +735,45 @@ def load_replay_days() -> list[dict] | None:
         return None
 
 
+def load_e8a_replay() -> dict | None:
+    """outputs/e8a_replay/{trades,daily}.csv + summary.json → 全系统推演数据。
+
+    由 research/e8a_trades_export.py 从 models/e8a/holdout_ref.csv 逐笔重放导出，
+    并已与 frontier_shift.csv / e11 switch_table.csv 存档核对；
+    任一文件缺失/坏行 → None（全系统推演页整体降级为空态卡）。
+    """
+    try:
+        trades = []
+        with (E8A_REPLAY_DIR / "trades.csv").open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                trades.append({
+                    "seq": int(row["seq"]),
+                    "et_day": date.fromisoformat(row["et_day"].strip()),
+                    "entry_hm": row["entry_et"].strip()[-5:],
+                    "exit_hm": row["exit_et"].strip()[-5:],
+                    "prob": float(row["prob"]),
+                    "entry_fill": float(row["entry_fill"]),
+                    "exit_px": float(row["exit_px"]),
+                    "exit_type": row["exit_type"].strip(),
+                    "ret": float(row["ret"]),
+                    "blocked": row["blocked"].strip() == "True",
+                    "cum_eq": _ffloat(row.get("cum_eq_s2")),
+                })
+        daily = []
+        with (E8A_REPLAY_DIR / "daily.csv").open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                daily.append({"date": date.fromisoformat(row["et_day"].strip()),
+                              "close": float(row["close"]),
+                              "off": row["s2_off"].strip() == "True"})
+        summary = json.loads(
+            (E8A_REPLAY_DIR / "summary.json").read_text(encoding="utf-8"))
+        if not trades or not daily or "s2" not in summary:
+            return None
+        return {"trades": trades, "daily": daily, "summary": summary}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def load_app_results() -> dict | None:
     """application_results.csv → 应用 A 收益对比与 p 值；缺失/坏行 → None（总结卡降级）。"""
     try:
@@ -1320,8 +1365,8 @@ def render_view_tabs() -> str:
         'aria-selected="false">模拟探测（历史推演）</button>'
         '<a class="vt vt-link" href="playbook.html">棋谱预案 ↗</a>'
         "</div>"
-        '<span class="sym-hint">模拟探测 = N3-H 考场逐日回放（walk-forward，'
-        "探测器未见过的历史段）</span></div>"
+        '<span class="sym-hint">模拟探测 = 历史推演双模式：防守层（N3-H 探测器'
+        "考场回放）／进攻层（E8-A+S2 留出段逐笔回放）</span></div>"
     )
 
 
@@ -2075,6 +2120,325 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
   </div>
   {sum_card}
   <script type="application/json" id="rp-data">{data_json}</script>
+</section>"""
+
+
+# ----------------------------------- 全系统推演（进攻层 E8-A+S2）· rendering
+
+
+def render_replay_modebar() -> str:
+    """模拟探测页内的推演模式切换 + 防守/进攻两层一行对比条（hash 记忆）。"""
+    return (
+        '<div class="rmodebar">'
+        '<div class="viewtabs" role="tablist" aria-label="推演模式">'
+        '<button class="rm act" type="button" data-mode="det" role="tab" '
+        'aria-selected="true">探测器推演（防守层）</button>'
+        '<button class="rm" type="button" data-mode="full" role="tab" '
+        'aria-selected="false">全系统推演（进攻层 E8-A+S2）</button>'
+        "</div>"
+        '<span class="rm-cmp"><b>探测器推演 = 防守层</b>：稀疏出手，只为躲开特定'
+        "类型的大跌（3 年考场仅 2 段避险、4 次假想买卖）；"
+        "<b>全系统推演 = 进攻层</b>：E8-A 高频小额抄底 + 双开关"
+        "（留出 10 个月 54 笔）。——「系统 3 年只交易 2 次」是只看防守层的误读，"
+        "两层并行、各管一件事。</span></div>"
+    )
+
+
+def render_fullsys_view(data: dict | None,
+                        det_days: list[dict] | None = None) -> str:
+    """全系统推演页：E8-A+S2 留出段逐笔回放播放器 + 交易日志 + 总结卡。
+
+    数据全部来自 outputs/e8a_replay（重放导出 + 存档核对）；缺失 → 降级空态卡。
+    det_days（N3-H daily_states）用于窗口内防守层状态行，缺失只减行不炸。
+    """
+    if not data:
+        return """
+<section>
+  <h2><span class="sec-no">R2</span>全系统推演<span class="h-sub">E8-A+S2 留出段逐笔回放（2025-10 → 2026-07）</span></h2>
+  <div class="card"><p class="empty">outputs/e8a_replay/ 不可读——先跑
+  <code>.venv/bin/python research/e8a_trades_export.py</code> 重建逐笔交易，本页降级为空。</p></div>
+</section>"""
+
+    trades, daily, s = data["trades"], data["daily"], data["summary"]
+    s2, alls, blk = s["s2"], s["all"], s["blocked"]
+    dist = s.get("exit_dist_s2", {})
+    d0, d1 = daily[0]["date"], daily[-1]["date"]
+    n_days = len(daily)
+    n_kept = int(s2["n"])
+    n_blk = int(blk["n"])
+    wins = sum(1 for t in trades if not t["blocked"] and t["ret"] > 0)
+    ann10 = s["ann_10mo"] * 100
+    ann_act = s["ann_actual"] * 100
+
+    # ---- 每日推进数组：S2 流累计收益 / 已成交笔数 / 已拦截笔数 ----------------
+    q_day, n_day, k_day = [], [], []
+    eq, n_done, n_b, ti = 1.0, 0, 0, 0
+    kept_no: dict[int, int] = {}  # seq -> 第几笔（S2 流内编号）
+    for t in trades:
+        if not t["blocked"]:
+            kept_no[t["seq"]] = len(kept_no) + 1
+    for r in daily:
+        while ti < len(trades) and trades[ti]["et_day"] <= r["date"]:
+            t = trades[ti]
+            if t["blocked"]:
+                n_b += 1
+            else:
+                eq = t["cum_eq"] if t["cum_eq"] is not None else eq * (1 + t["ret"])
+                n_done += 1
+            ti += 1
+        q_day.append(round((eq - 1) * 100, 2))
+        n_day.append(n_done)
+        k_day.append(n_b)
+
+    # ---- 防守层状态行（窗口内如有触发/避险/失明如实入日志）--------------------
+    det_rows: list[list] = []
+    dw = [r for r in (det_days or []) if d0 <= r["date"] <= d1]
+    if dw and dw[0]["blind"]:
+        det_rows.append([d0.toordinal(), "防守层 · 失明",
+                         "探测器（N3-H）窗口内全程失明：Musk 归档止于 2025-05-08，"
+                         "放风腿无数据、不可能触发——缺席是覆盖缺口，不是安全判定",
+                         ""])
+    for j, r in enumerate(dw):
+        prev = dw[j - 1] if j else None
+        if r["blind"] and prev is not None and not prev["blind"]:
+            det_rows.append([r["date"].toordinal(), "防守层 · 失明进入",
+                             "Musk 归档尽头——放风腿无数据，无触发 ≠ 安全", ""])
+        if r["trig"]:
+            det_rows.append([r["date"].toordinal(), "防守层 · 触发",
+                             r.get("reason") or "两腿同窗命中", ""])
+        if r["off"] and (prev is None or not prev["off"]):
+            det_rows.append([r["date"].toordinal(), "防守层 · 避险开始",
+                             f"risk_off 生效 · F{PERSIST_BDAYS}", ""])
+        if not r["off"] and prev is not None and prev["off"]:
+            det_rows.append([r["date"].toordinal(), "防守层 · 避险解除",
+                             f"F{PERSIST_BDAYS} 期满 · 回到 risk_on", ""])
+
+    # ---- SVG（几何同探测器推演：对数 y，日期 x）------------------------------
+    d0o, d1o = d0.toordinal(), d1.toordinal()
+    dspan = max(1, d1o - d0o)
+    pw, ph = _VB_W - _ML - _MR, _RP_VB_H - _MT - _MB
+    closes = [r["close"] for r in daily]
+    llo, lhi = math.log10(min(closes)), math.log10(max(closes))
+    pad = 0.06 * ((lhi - llo) or 1.0)
+    llo, lhi = llo - pad, lhi + pad
+    lspan = lhi - llo
+
+    def x(o: float) -> float:
+        return _ML + (o - d0o) / dspan * pw
+
+    def y(c: float) -> float:
+        return _MT + (1 - (math.log10(c) - llo) / lspan) * ph
+
+    parts: list[str] = []
+    for a, b in _replay_segs(daily, "off"):  # S2 关闸底纹（窄段不标字免重叠）
+        bx, bw = x(a.toordinal()), x(b.toordinal() + 1) - x(a.toordinal())
+        tag = (f'<text class="band-tag" x="{bx + bw / 2:.1f}" y="{_MT + 13}" '
+               'text-anchor="middle">S2 关闸</text>' if bw > 52 else "")
+        parts.append(
+            f'<rect class="band-wash" x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" height="{ph}">'
+            f"<title>S2 关闸 {a} → {b}：距 252 日高点回撤 &gt; 20%，停止新开仓</title></rect>"
+            f'<rect x="{bx:.1f}" y="{_MT}" width="{bw:.1f}" height="{ph}" '
+            'fill="url(#hatch45)" pointer-events="none"/>' + tag
+        )
+    grid, labels = [], []
+    for t in _log_ticks(10 ** llo, 10 ** lhi):
+        ty = y(t)
+        grid.append(f'<line x1="{_ML}" y1="{ty:.1f}" x2="{_VB_W - _MR}" y2="{ty:.1f}"/>')
+        labels.append(f'<text x="{_ML - 8}" y="{ty:.1f}" class="tv-tick" '
+                      f'text-anchor="end" dominant-baseline="central">{t:,.0f}</text>')
+    for t, lab in _x_ticks(d0, d1):
+        tx = x(t.toordinal())
+        grid.append(f'<line x1="{tx:.1f}" y1="{_MT}" x2="{tx:.1f}" y2="{_MT + ph}"/>')
+        labels.append(f'<text x="{tx:.1f}" y="{_RP_VB_H - 10}" class="tv-tick" '
+                      f'text-anchor="middle">{esc(lab)}</text>')
+    parts.append(f'<g class="tv-grid">{"".join(grid)}</g>{"".join(labels)}')
+    marks = []
+    for t in trades:  # 逐笔小旗刻度：绿盈红亏灰拦截；日内时间微移避免重叠
+        hh, mm = t["entry_hm"].split(":")
+        frac = min(1.0, max(0.0, (int(hh) * 60 + int(mm) - 570) / 390))
+        mx = x(t["et_day"].toordinal() + frac)
+        cls = "b" if t["blocked"] else ("w" if t["ret"] > 0 else "l")
+        marks.append(f'<line class="{cls}" x1="{mx:.1f}" x2="{mx:.1f}" '
+                     f'y1="{_MT}" y2="{_MT + 10}"/>')
+    parts.append(f'<g class="fs-marks">{"".join(marks)}</g>')
+    pts = " ".join(f"{x(r['date'].toordinal()):.1f},{y(r['close']):.1f}" for r in daily)
+    parts.append(f'<polyline class="tv-price" points="{pts}"/>')
+    parts.append(
+        f'<g class="rp-cursor"><line id="fs-cur-line" x1="{_ML}" x2="{_ML}" '
+        f'y1="{_MT}" y2="{_MT + ph}"/>'
+        f'<circle id="fs-cur-dot" cx="{_ML}" cy="{y(daily[0]["close"]):.1f}" r="4"/>'
+        f'<text id="fs-cur-px" x="{_ML + 8}" y="{_MT + 16}" class="rp-curlab"></text></g>'
+    )
+    svg = (f'<svg class="tv-svg" viewBox="0 0 {_VB_W} {_RP_VB_H}" role="img" '
+           f'aria-label="全系统推演：TSLA 日线收盘（对数）与 E8-A+S2 逐笔交易">{"".join(parts)}</svg>')
+
+    # ---- 内嵌 JSON（精简字段控体积）----
+    t_out = [{
+        "o": t["et_day"].toordinal(), "sq": t["seq"],
+        "k": kept_no.get(t["seq"], 0),
+        "e": t["entry_hm"], "x": t["exit_hm"],
+        "p": round(t["prob"], 3),
+        "ep": round(t["entry_fill"], 2), "xp": round(t["exit_px"], 2),
+        "ty": t["exit_type"], "r": round(t["ret"] * 100, 2),
+        "b": int(t["blocked"]),
+        "q": None if t["cum_eq"] is None else round((t["cum_eq"] - 1) * 100, 2),
+    } for t in trades]
+    data_json = json.dumps(
+        {
+            "D": [r["date"].toordinal() for r in daily],
+            "C": [round(r["close"], 2) for r in daily],
+            "S": [int(r["off"]) for r in daily],
+            "Q": q_day, "N": n_day, "K": k_day,
+            "T": t_out, "DET": det_rows,
+            "epoch": _EPOCH_ORD,
+            "meta": {"d0": d0o, "ds": dspan, "ml": _ML, "pw": pw,
+                     "mt": _MT, "ph": ph, "ly0": round(llo, 6),
+                     "lys": round(lspan, 6), "nk": n_kept, "nb": n_blk},
+        },
+        separators=(",", ":"), ensure_ascii=False,
+    )
+
+    # ---- 页头「使用策略」固定卡 ----
+    spec_card = f"""
+  <div class="card rp-spec">
+    <div class="rp-spec-grid">
+      <div><div class="bt">进攻层定义（E8-A）</div>
+        <p>5m V 形反转事件（预登记网格并集去重）→ 池化 GBDT 打分（25 标的留一训练，
+        无 TSLA，训练截止 2025-09-30）→ 门控 prob ≥ 0.4325（gate0.70 保留率匹配，
+        Top≈10%）→ 下一根 5m bar 开盘做多；绑定 <b>S2 开关</b>：距 252 日滚动高点回撤
+        &gt;20%（昨收判定）停止新开仓（E11 冻结）。</p></div>
+      <div><div class="bt">冻结参数</div>
+        <p><span class="chip">gate 0.4325</span>
+        <span class="chip">tp +0.5%</span>
+        <span class="chip">sl −2%</span>
+        <span class="chip">timeout 48×5m</span>
+        <span class="chip">日内平</span>
+        <span class="chip">S2 −20%</span>
+        —— 2026-07-24 冻结（models/e8a/meta.json），参数与开关规则不得再调。</p></div>
+      <div><div class="bt">证据等级</div>
+        <p>留出 62 笔 WR 80.6% / +16.0bp，但 tp/sl/timeout×门控组合出身<b>同一留出段的
+        事后网格</b>（n=62），Bonferroni 校正后不显著（bootstrap p 0.04–0.28）；
+        崩盘段（2021-10→2023-01）门反选 −31.4%，S2 只截后续损失（削减 78%）、救不了
+        顶部 27 个交易日——仅方向性证据。</p></div>
+      <div><div class="bt">口径</div>
+        <p>交易流 = models/e8a/holdout_ref.csv 62 笔入场 × E9 <b>悲观结算</b>重放
+        （费 1bp/边 + 滑点 2bp；TP 限价需严格穿越、SL 停损市价含跳空、同 bar 双触发算
+        SL；日内强平），已与 frontier_shift / e11 存档核对一致
+        （research/e8a_trades_export.py）。S2 拦截 {n_blk} 笔照常结算、灰色对照显示，
+        不入权益。</p></div>
+    </div>
+  </div>"""
+
+    # ---- S2 拦截对照小表（8 笔灰条）----
+    blk_rows = "".join(
+        f'<tr class="fs-blkrow"><td class="num">{esc(str(t["et_day"]))} {esc(t["entry_hm"])}</td>'
+        f'<td class="num">{t["entry_fill"]:,.2f}</td>'
+        f'<td class="num">{t["prob"]:.3f}</td>'
+        f'<td class="num">{t["ret"] * 100:+.2f}%</td></tr>'
+        for t in trades if t["blocked"]
+    )
+    blk_tbl = (
+        '<table class="rp-trades fs-blktbl"><thead><tr><th>入场时刻（ET）</th><th>假想入场价</th>'
+        "<th>GBDT 概率</th><th>若成交结果</th></tr></thead>"
+        f"<tbody>{blk_rows}</tbody></table>"
+        f'<p class="fs-blknote">被拦 {n_blk} 笔若成交合计 {blk["total"] * 100:+.2f}%'
+        f"（净亏）——方向与开关假设一致，但属同一留出段事后观察，不作加分证据。</p>"
+    ) if blk_rows else '<p class="lg-empty">窗口内无 S2 拦截记录。</p>'
+
+    # ---- 总结卡（年化收益率置顶）----
+    dist_txt = (f"止盈 {dist.get('tp', 0)} · 止损 {dist.get('sl', 0)} · "
+                f"超时 {dist.get('timeout', 0)} · 日终 {dist.get('dayend', 0)}")
+    sum_card = f"""
+  <div class="rp-sum" id="fs-sum" hidden role="dialog" aria-label="全系统推演总结">
+    <div class="rs-h"><span>全系统推演总结 · E8-A+S2 留出段 {esc(str(d0))} → {esc(str(d1))}</span>
+      <button class="rp-btn" id="fs-sum-close" type="button">关闭</button></div>
+    <div class="fs-ann"><span class="fs-ann-k">年化收益率</span>
+      <span class="fs-ann-v num">≈ {ann10:+.1f}%</span>
+      <span class="fs-ann-sub">口径：留出 10 个月总收益 {s2["total"] * 100:+.2f}% 复利年化
+      (1{s2["total"] * 100:+.2f}%)^(12/10) − 1；按实际 {s["window"]["cal_days"]} 天算
+      ≈ {ann_act:+.1f}%。假想推演口径，含悲观成本，不含税与资金占用。</span></div>
+    <div class="rs-grid">
+      <div class="rs-cell"><div class="rs-k">交易笔数</div>
+        <div class="rs-v num">{n_kept} 笔 <span class="sub">≈{n_kept / 10:.1f} 笔/月（10 个月口径）</span></div></div>
+      <div class="rs-cell"><div class="rs-k">胜率</div>
+        <div class="rs-v num">{s2["wr"] * 100:.1f}% <span class="sub">{wins}/{n_kept}；S2 前 62 笔 {alls["wr"] * 100:.1f}%</span></div></div>
+      <div class="rs-cell"><div class="rs-k">出场分布</div>
+        <div class="rs-v num" style="font-size:13px">{dist_txt}</div></div>
+      <div class="rs-cell"><div class="rs-k">最大回撤</div>
+        <div class="rs-v num">{s2["mtm_mdd"] * 100:.2f}% <span class="sub">bar 级盯市；逐笔口径 {s2["mdd_closed"] * 100:.2f}%</span></div></div>
+    </div>
+    <p class="rs-ep"><b>S2 开关贡献</b>：拦截 {n_blk} 笔（若成交合计 {blk["total"] * 100:+.2f}%），
+      总收益 {alls["total"] * 100:+.2f}% → <b>{s2["total"] * 100:+.2f}%</b>，盯市 MDD
+      {alls["mtm_mdd"] * 100:.2f}% → {s2["mtm_mdd"] * 100:.2f}%——被删笔净为亏损、方向与
+      假设一致，但这是同一留出段的又一次事后观察（n 62 → {n_kept}），不作为加分证据。</p>
+    <p class="rs-ep"><b>单笔期望</b>：+{s2["avg_bp"]:.1f}bp/笔（tp +0.5% 高频小额），
+      平均 {n_days / max(1, n_kept):.1f} 个交易日一笔——进攻层的「高频小额」与防守层的
+      「稀疏避险」互补，合成整套系统的出手节奏。</p>
+    <div class="rs-note">诚实注脚：① 留出期为 2025-10 → 2026-07 <b>单一时段</b>（TSLA
+      本段整体下跌，抄底事件密集——换一段行情未必复现）；② 配方出身 n=62 的<b>事后网格</b>，
+      Bonferroni 校正后不显著（bootstrap p 0.04–0.28），S2 过滤后的 +12.04% 亦含选择偏差；
+      ③ 策略 2026-07-24 冻结、shadow 前向验证（≥8 周）进行中，效力由前向裁决——本页全部为
+      假想推演，<b>不构成任何上钱依据</b>。</div>
+  </div>"""
+
+    return f"""
+<section id="fs">
+  <h2><span class="sec-no">R2</span>全系统推演<span class="h-sub">E8-A+S2 留出段 {esc(str(d0))} → {esc(str(d1))} · {n_days} 交易日 · 成交 {n_kept} 笔 · S2 拦截 {n_blk} 笔 · 逐笔写入交易日志 · 播完出总结</span></h2>
+  {spec_card}
+  <div class="card chartcard">
+    <div class="rp-controls">
+      <button id="fs-play" class="rp-btn primary" type="button">开始推演</button>
+      <button id="fs-step" class="rp-btn" type="button">单步</button>
+      <button id="fs-sum-btn" class="rp-btn" type="button">总结</button>
+      <div class="tv-ranges" role="group" aria-label="速度">
+        <button class="tv-rb fs-speed" data-s="1">1x</button>
+        <button class="tv-rb fs-speed" data-s="5">5x</button>
+        <button class="tv-rb fs-speed act" data-s="20">20x</button>
+      </div>
+      <input type="range" id="fs-range" min="0" max="{n_days - 1}" value="0" step="1"
+        aria-label="推演进度">
+      <span class="rp-date num" id="fs-date">{esc(str(d0))}</span>
+      <span class="rp-count num" id="fs-count">1 / {n_days}</span>
+    </div>
+    <div class="tv-wrap rp-wrap">
+      {svg}
+    </div>
+    <div class="rp-panel">
+      <div class="leg"><div class="leg-h"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg>
+        S2 开关（回撤 &gt; 20% 关闸）<span class="pill sm good" id="fs-s2-pill"><span class="dot"></span><span id="fs-s2-txt">开闸</span></span></div>
+        <div class="val num" id="fs-s2-val">—</div>
+        <div class="ref">距 252 日滚动高点回撤，昨收判定（E11 冻结口径）</div></div>
+      <div class="leg"><div class="leg-h"><svg class="ic" aria-hidden="true"><use href="#i-pulse"/></svg>
+        累计收益（S2 流）</div>
+        <div class="val num" id="fs-eq-val">+0.00%</div>
+        <div class="ref">已平仓复利 · 悲观成本口径 · 拦截笔不入权益</div></div>
+      <div class="leg"><div class="leg-h"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>
+        成交进度</div>
+        <div class="val num" id="fs-n-val">0 / {n_kept} 笔</div>
+        <div class="ref" id="fs-n-ref">S2 拦截 0 / {n_blk} 笔</div></div>
+    </div>
+    <div class="rp-lower">
+      <div class="rp-logcard">
+        <div class="lg-h">交易日志<span class="lg-cnt num" id="fs-log-cnt">0 条</span></div>
+        <div class="lg-empty" id="fs-log-empty">按「开始推演」逐日回放：每笔入场/出场
+          （绿盈红亏）、S2 拦截灰条、开关关闸/开闸与防守层状态会实时追加到这里；
+          点击行可展开门控概率与结算明细。交易密，速度已预设 20x。</div>
+        <div class="lg-scroll" id="fs-log" role="log" aria-live="polite"></div>
+      </div>
+      <div class="rp-tradecard">
+        <div class="lg-h">S2 拦截对照<span class="lg-cnt">灰条 = 关闸期被拒的入场</span></div>
+        {blk_tbl}
+      </div>
+    </div>
+    <p class="footnote">逐笔交易由 research/e8a_trades_export.py 从 models/e8a/holdout_ref.csv
+    的 62 笔留出入场重放（E9 悲观结算），与 outputs/e8_pooled/frontier_shift.csv、
+    outputs/e11_bear_switch/switch_table.csv 存档核对一致后落盘 outputs/e8a_replay/。
+    S2 关闸底纹 = 距 252 日高点回撤 &gt;20%（昨收判定）。防守层（N3-H 探测器）在本窗口
+    全程失明（Musk 归档止于 2025-05-08）且无触发，日志首行如实标注。播放到达终点自动弹出
+    总结卡（年化收益率置顶），也可随时点「总结」。假想推演，不碰真钱。</p>
+  </div>
+  {sum_card}
+  <script type="application/json" id="fs-data">{data_json}</script>
 </section>"""
 
 
@@ -4217,6 +4581,45 @@ main > .sym-tabs { margin-top: 26px; }
 .rs-note { border: 1px solid var(--warn); background: var(--warn-wash);
   border-radius: 6px; padding: 10px 12px; margin-top: 12px; font-size: 12.5px;
   font-weight: 600; color: var(--warn-text); line-height: 1.75; }
+/* -- 全系统推演（进攻层 E8-A+S2）与推演模式切换 -- */
+.rmodebar { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+  margin: 14px 0 16px; }
+.rmodebar .viewtabs { flex: none; }
+.rm-cmp { flex: 1 1 340px; font-size: 12px; color: var(--muted);
+  line-height: 1.65; padding-top: 2px; }
+.rm-cmp b { color: var(--ink-2); }
+.rmode { display: none; } .rmode.act { display: block; }
+.lg-tw .lg-line, .lg-tl .lg-line { font-weight: 600; }
+.lg-tw .lg-tag { background: var(--good-wash); border-color: var(--good);
+  color: var(--good-text); }
+.lg-tl .lg-tag { background: var(--crit-wash); border-color: var(--crit);
+  color: var(--crit-text); }
+.lg-blk .lg-line { opacity: .62; }
+.lg-blk .lg-tag { border-style: dashed; color: var(--muted); }
+.lg-s2off .lg-tag { background: var(--crit-wash); border-color: var(--crit);
+  color: var(--crit-text); }
+.lg-s2on .lg-tag { background: var(--good-wash); border-color: var(--good);
+  color: var(--good-text); }
+.fs-marks line { stroke-width: 2; }
+.fs-marks line.w { stroke: var(--good); }
+.fs-marks line.l { stroke: var(--crit); }
+.fs-marks line.b { stroke: var(--muted); opacity: .7; }
+.fs-blktbl th:nth-child(1) { width: 132px; }
+.fs-blktbl th:nth-child(2) { width: auto; }
+.fs-blktbl th:nth-child(3) { width: auto; }
+.fs-blktbl th:nth-child(5) { width: auto; }
+.fs-blkrow td { color: var(--muted); }
+.fs-blknote { font-size: 11px; color: var(--muted); margin: 8px 10px 10px;
+  line-height: 1.6; }
+.fs-ann { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  border: 1px solid var(--good); background: var(--good-wash); border-radius: 6px;
+  padding: 9px 14px; margin: 10px 0 2px; }
+.fs-ann-k { font: 600 10px var(--font-mono); letter-spacing: .08em;
+  color: var(--muted); }
+.fs-ann-v { font-size: 21px; font-weight: 800; color: var(--good-text);
+  font-variant-numeric: tabular-nums; }
+.fs-ann-sub { flex: 1 1 260px; font-size: 11px; color: var(--muted);
+  line-height: 1.55; }
 
 /* ===== footer ===== */
 .footnote { font-size: 12px; color: var(--muted); margin: 8px 16px 12px; }
@@ -4402,10 +4805,13 @@ _TV_JS = """
 
 # 视图切换 + 推演播放器（模拟探测页）。不经 %-格式化，直接拼接。
 _RP_JS = """
-/* 视图切换：实时值班｜模拟探测；location.hash 记忆，meta refresh 后不丢 */
+/* 视图切换：实时值班｜模拟探测（页内再分两种推演模式）；location.hash 记忆
+   （#live / #replay 探测器推演 / #fullsys 全系统推演），meta refresh 后不丢 */
 (function () {
   var tabs = document.querySelectorAll(".vt");
   if (!tabs.length) return;
+  var modes = document.querySelectorAll(".rm");
+  var curMode = "det";
   function setView(v) {
     tabs.forEach(function (b) {
       var on = b.getAttribute("data-view") === v;
@@ -4416,15 +4822,36 @@ _RP_JS = """
       w.classList.toggle("act", w.id === "view-" + v);
     });
   }
+  function setMode(mo) {
+    curMode = mo;
+    modes.forEach(function (b) {
+      var on = b.getAttribute("data-mode") === mo;
+      b.classList.toggle("act", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    document.querySelectorAll(".rmode").forEach(function (w) {
+      w.classList.toggle("act", w.id === "rmode-" + mo);
+    });
+  }
+  function writeHash(v) {
+    try { history.replaceState(null, "", "#" + v); } catch (e) {}
+  }
   tabs.forEach(function (b) {
     b.addEventListener("click", function () {
-      setView(b.getAttribute("data-view"));
-      try { history.replaceState(null, "", "#" + b.getAttribute("data-view")); }
-      catch (e) {}
+      var v = b.getAttribute("data-view");
+      setView(v);
+      writeHash(v === "replay" && curMode === "full" ? "fullsys" : v);
+    });
+  });
+  modes.forEach(function (b) {
+    b.addEventListener("click", function () {
+      setMode(b.getAttribute("data-mode"));
+      writeHash(curMode === "full" ? "fullsys" : "replay");
     });
   });
   var h = (location.hash || "").slice(1);
-  if (h === "replay" || h === "live") setView(h);
+  if (h === "fullsys") { setView("replay"); setMode("full"); }
+  else if (h === "replay" || h === "live") setView(h);
 })();
 /* 推演播放器：逐日回放 N3-H 考场；事件写入推演日志，播放不中断；播完弹总结 */
 (function () {
@@ -4655,6 +5082,193 @@ _RP_JS = """
 """
 
 
+# 全系统推演播放器（进攻层 E8-A+S2）。不经 %-格式化，直接拼接。
+_FS_JS = """
+/* 全系统推演播放器：E8-A+S2 留出段逐日回放；逐笔交易/S2 拦截/开关切换写入日志 */
+(function () {
+  var sec = document.getElementById("fs");
+  var dataEl = document.getElementById("fs-data");
+  if (!sec || !dataEl) return;
+  var D = null;
+  try { D = JSON.parse(dataEl.textContent); } catch (e) {}
+  if (!D) return;
+  var m = D.meta, n = D.D.length;
+  function $(id) { return document.getElementById(id); }
+  var curLine = $("fs-cur-line"), curDot = $("fs-cur-dot"), curPx = $("fs-cur-px");
+  var range = $("fs-range"), dateLab = $("fs-date"), countLab = $("fs-count");
+  var playBtn = $("fs-play"), stepBtn = $("fs-step");
+  var log = $("fs-log"), logEmpty = $("fs-log-empty"), logCnt = $("fs-log-cnt");
+  var sumCard = $("fs-sum"), sumBtn = $("fs-sum-btn"), sumClose = $("fs-sum-close");
+  var idx = 0, timer = null, speed = 20, BASE_MS = 320; // 交易密：默认 20x
+  var logPos = 0, nLog = 0, sumSeen = false;
+  var TY = { tp: "止盈", sl: "止损", timeout: "超时平", dayend: "日终平" };
+
+  var tradeBy = {}, detBy = {};
+  (D.T || []).forEach(function (t) {
+    (tradeBy[t.o] = tradeBy[t.o] || []).push(t);
+  });
+  (D.DET || []).forEach(function (r) {
+    (detBy[r[0]] = detBy[r[0]] || []).push(r);
+  });
+
+  function isoOf(i) {
+    return new Date((D.D[i] - D.epoch) * 86400000).toISOString().slice(0, 10);
+  }
+  function fmtPct(v) { return (v >= 0 ? "+" : "") + v.toFixed(2) + "%"; }
+  function mkRow(cls, iso, tag, brief, exp) {
+    var d = document.createElement("div");
+    d.className = "lg-row " + cls + (exp ? " click" : "");
+    d.innerHTML = '<div class="lg-line"><span class="lg-d num">' + iso + "</span>" +
+      '<span class="lg-tag">' + tag + "</span>" +
+      '<span class="lg-b">' + brief + "</span>" +
+      (exp ? '<span class="lg-x num" aria-hidden="true">\\u25b8</span>' : "") +
+      "</div>" + (exp ? '<div class="lg-exp" hidden>' + exp + "</div>" : "");
+    if (exp) {
+      d.querySelector(".lg-line").addEventListener("click", function () {
+        var e2 = d.querySelector(".lg-exp");
+        e2.hidden = !e2.hidden;
+        d.classList.toggle("open", !e2.hidden);
+      });
+    }
+    return d;
+  }
+  function kv(k, v) {
+    return '<div class="lg-kv"><span>' + k + "</span><span>" + (v || "—") +
+      "</span></div>";
+  }
+  function tradeRow(iso, t) {
+    var geo = kv("门控", "GBDT prob " + t.p.toFixed(3) + " ≥ 0.4325（Top≈10%）") +
+      kv("几何", "tp +0.5% / sl −2% / 48×5m / 日内强平 · 费 1bp/边 + 滑点 2bp");
+    if (t.b === 1) {
+      return mkRow("lg-blk", iso, "被开关拦截",
+        t.e + " 事件过门（prob " + t.p.toFixed(2) + "）· S2 关闸未成交 · 若成交 " +
+        fmtPct(t.r),
+        geo + kv("拦截", "S2：距 252 日高点回撤 > 20%（昨收判定）——关闸期不开新仓；" +
+          "本笔照常结算仅作对照，不入权益"));
+    }
+    var win = t.r >= 0;
+    return mkRow(win ? "lg-tw" : "lg-tl", iso, "第 " + t.k + " 笔",
+      t.e + " 入 " + t.ep.toFixed(2) + " → " + t.x + " 出 " + t.xp.toFixed(2) +
+      " · " + (TY[t.ty] || t.ty) + ' · <b class="' +
+      (win ? "good-text" : "crit-text") + '">' + fmtPct(t.r) + "</b> · 累计 " +
+      fmtPct(t.q),
+      geo + kv("结算", t.e + " 开盘入 " + t.ep.toFixed(2) + "（含滑点）→ " + t.x +
+        " " + (TY[t.ty] || t.ty) + "出 " + t.xp.toFixed(2) + "，单笔 " + fmtPct(t.r) +
+        "，S2 流累计 " + fmtPct(t.q)));
+  }
+  function dayRows(i) {
+    var iso = isoOf(i), o = D.D[i], out = [];
+    (detBy[o] || []).forEach(function (r) {
+      out.push(mkRow("lg-blind", iso, r[1], r[2], r[3] ? kv("说明", r[3]) : ""));
+    });
+    if (D.S[i] === 1 && (i === 0 || D.S[i - 1] === 0))
+      out.push(mkRow("lg-s2off", iso, "S2 关闸",
+        "距 252 日高点回撤 > 20%（昨收判定）——进攻层停止新开仓", ""));
+    if (i > 0 && D.S[i] === 0 && D.S[i - 1] === 1)
+      out.push(mkRow("lg-s2on", iso, "S2 开闸", "回撤收窄回阈值内——恢复入场", ""));
+    (tradeBy[o] || []).forEach(function (t) { out.push(tradeRow(iso, t)); });
+    return out;
+  }
+  function appendDay(i) {
+    var rs = dayRows(i), k;
+    for (k = 0; k < rs.length; k++) log.appendChild(rs[k]);
+    nLog += rs.length;
+    return rs.length;
+  }
+  function syncLog(i) {
+    var added = 0, k;
+    if (i >= logPos) {
+      for (k = logPos; k <= i; k++) added += appendDay(k);
+    } else {
+      log.innerHTML = ""; nLog = 0; sumSeen = false;
+      for (k = 0; k <= i; k++) added += appendDay(k);
+    }
+    logPos = i + 1;
+    if (logEmpty) logEmpty.hidden = nLog > 0;
+    if (logCnt) logCnt.textContent = nLog + " 条";
+    if (added) log.scrollTop = log.scrollHeight;
+  }
+  function X(i) { return m.ml + (D.D[i] - m.d0) / m.ds * m.pw; }
+  function Y(i) {
+    return m.mt + (1 - (Math.log(D.C[i]) / Math.LN10 - m.ly0) / m.lys) * m.ph;
+  }
+  function draw(i) {
+    idx = i;
+    var x = X(i), y = Y(i);
+    curLine.setAttribute("x1", x); curLine.setAttribute("x2", x);
+    curDot.setAttribute("cx", x); curDot.setAttribute("cy", y);
+    curPx.textContent = D.C[i].toFixed(2);
+    if (x > m.ml + m.pw * 0.75) {
+      curPx.setAttribute("x", x - 8); curPx.setAttribute("text-anchor", "end");
+    } else {
+      curPx.setAttribute("x", x + 8); curPx.setAttribute("text-anchor", "start");
+    }
+    range.value = i;
+    dateLab.textContent = isoOf(i);
+    countLab.textContent = (i + 1) + " / " + n;
+    var off = D.S[i] === 1;
+    $("fs-s2-pill").className = "pill sm " + (off ? "crit" : "good");
+    $("fs-s2-txt").textContent = off ? "关闸" : "开闸";
+    $("fs-s2-val").textContent = off ? "停止新开仓" : "允许入场";
+    var q = D.Q[i];
+    var ev = $("fs-eq-val");
+    ev.textContent = fmtPct(q);
+    ev.className = "val num " + (q >= 0 ? "good-text" : "crit-text");
+    $("fs-n-val").textContent = D.N[i] + " / " + m.nk + " 笔";
+    $("fs-n-ref").textContent = "S2 拦截 " + D.K[i] + " / " + m.nb + " 笔";
+    syncLog(i);
+  }
+  function showSum() { if (sumCard) sumCard.hidden = false; }
+  function hideSum() { if (sumCard) sumCard.hidden = true; }
+  function atEnd() { if (!sumSeen) { sumSeen = true; showSum(); } }
+  function pause() {
+    if (timer) { clearInterval(timer); timer = null; }
+    playBtn.textContent = idx >= n - 1 ? "重新推演" : "开始推演";
+  }
+  function tick() {
+    if (idx >= n - 1) { pause(); atEnd(); return; }
+    draw(idx + 1);
+    if (idx >= n - 1) { pause(); atEnd(); }
+  }
+  function play() {
+    if (idx >= n - 1) { hideSum(); draw(0); }
+    if (timer) return;
+    timer = setInterval(tick, BASE_MS / speed);
+    playBtn.textContent = "暂停";
+  }
+  playBtn.addEventListener("click", function () { if (timer) pause(); else play(); });
+  stepBtn.addEventListener("click", function () {
+    pause();
+    if (idx >= n - 1) return;
+    draw(idx + 1);
+    if (idx >= n - 1) { pause(); atEnd(); }
+  });
+  sec.querySelectorAll(".fs-speed").forEach(function (b) {
+    b.addEventListener("click", function () {
+      sec.querySelectorAll(".fs-speed").forEach(function (x2) {
+        x2.classList.toggle("act", x2 === b);
+      });
+      speed = parseFloat(b.getAttribute("data-s")) || 1;
+      if (timer) { clearInterval(timer); timer = setInterval(tick, BASE_MS / speed); }
+    });
+  });
+  range.addEventListener("input", function () {
+    pause(); hideSum();
+    draw(Math.max(0, Math.min(n - 1, parseInt(range.value, 10) || 0)));
+  });
+  if (sumBtn) sumBtn.addEventListener("click", function () {
+    if (sumCard) { if (sumCard.hidden) showSum(); else hideSum(); }
+  });
+  if (sumClose) sumClose.addEventListener("click", hideSum);
+  window.__fs = { draw: draw, play: play, pause: pause, n: n,
+                  showSum: showSum, hideSum: hideSum,
+                  get idx() { return idx; }, get playing() { return !!timer; },
+                  get logCount() { return nLog; } };
+  draw(0);
+})();
+"""
+
+
 # 情报流层级筛选（P1-1c）。不经 %-格式化，直接拼接。
 _FEED_JS = """
 (function () {
@@ -4757,14 +5371,18 @@ def render(db_path: Path = DB_PATH) -> str:
         ]
         if not rendered:
             rendered = ['<p class="empty">数据库暂无可展示的表——待哨兵首采后刷新。</p>']
+        replay_days = load_replay_days()
         replay_html = render_replay_view(
-            load_replay_days(), dates, closes, finra, load_trigger_cards(),
+            replay_days, dates, closes, finra, load_trigger_cards(),
             load_daily_opens(), load_app_results(),
         )
+        fullsys_html = render_fullsys_view(load_e8a_replay(), replay_days)
         body.append(
             "<main>" + render_symbol_tabs() + render_view_tabs()
             + f'<div class="vw act" id="view-live">{"".join(rendered)}</div>'
-            + f'<div class="vw" id="view-replay">{replay_html}</div>'
+            + f'<div class="vw" id="view-replay">{render_replay_modebar()}'
+            + f'<div class="rmode act" id="rmode-det">{replay_html}</div>'
+            + f'<div class="rmode" id="rmode-full">{fullsys_html}</div></div>'
             + "</main>"
         )
     finally:
@@ -4793,6 +5411,7 @@ def render(db_path: Path = DB_PATH) -> str:
         + _JS % {"stale_ms": STALE_S * 1000}
         + _TV_JS
         + _RP_JS
+        + _FS_JS
         + _FEED_JS
         + "</script>\n</body>\n</html>\n"
     )

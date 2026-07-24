@@ -925,6 +925,7 @@ h1 { font: 600 21px/1.3 var(--font-serif); margin: 0; letter-spacing: .04em; }
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
   padding: 7px 12px; cursor: pointer; }
 .themebtn:hover { color: var(--ink); border-color: var(--muted); }
+a.backbtn { text-decoration: none; display: inline-flex; align-items: center; margin-right: 8px; }
 
 section { margin-top: 40px; }
 h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px;
@@ -1093,7 +1094,9 @@ def render() -> str:
     head = (f'<div class="topbar"><div class="topbar-in">'
             f'<div class="brand"><h1>棋谱预案 · TSLA</h1>'
             f'<div class="sub">PLAYBOOK — PLAN BEFORE EVENT</div></div>'
-            f'<div class="topmeta"><div class="stamp"><div class="k">生成时刻</div>'
+            f'<div class="topmeta">'
+            f'<a class="themebtn backbtn" href="dashboard.html">← 返回仪表盘</a>'
+            f'<div class="stamp"><div class="k">生成时刻</div>'
             f'<div class="v">{esc(gen_s)}</div></div>'
             f'<button class="themebtn" id="themebtn" type="button">切换主题</button>'
             f'</div></div></div>')
