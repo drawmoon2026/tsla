@@ -19,19 +19,24 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
      （>30 分钟标红）+ 主题切换；<meta refresh> 每 5 分钟自动重载
   01 今日合议（每日决策卡：现价 · S2 开关读数（距 252 日高回撤，E11 冻结口径）·
      探测器状态与标定倒计时 · 策略线 shadow 健康 · 规则合成的综合一句话）
-  02 态势总览（detector_state：标定环表盘（标定倒计时）+ 态势陈述 +
+  02 晨间简报（自上次开盘以来：新 T0/T1 事件 · 探测器状态变化 · S2 读数变化 ·
+     shadow 各策略昨晚会话（shadow_status.json）· 事件日历条（财报/FOMC/
+     FINRA 空头发布/标定期满，未来 7 天高亮、30 天窗口）；无变化如实说无）
+  03 态势总览（detector_state：标定环表盘（标定倒计时）+ 态势陈述 +
      两腿读数卡（含数据龄徽章）+ 证据等级行 + 三灯信号组 + 假想单判分 +
      等待板（已有信息 / 在等信息（下期 FINRA 发布推算、标定期满日）/
      条件行动手册 IF→THEN——由当前状态动态生成，注明 N3-H/N6/E11 依据）；
      表缺失整面板隐藏）
-  03 战场走势（标的视图：TSLA 日线收盘（yfinance 增量补到最新，失败降级
+  04 战场走势（标的视图：TSLA 日线收盘（yfinance 增量补到最新，失败降级
      + STALE 徽章）对数坐标折线 + 1/3/8 年时间刷 + 可开关图层——图例分
      「研究回放（事后）」区（避险影线带 / 真坑 / 假坑 / Musk 数据失明期灰底）
      与「前向/事实（当时可知）」区（Musk 菱旗 / 假想单十字准星）；
      坑判据写进 tooltip 与明细表。页面预留多标的标签栏。）
-  04 渠道健康（按 T0-T3 分组的渠道卡片 + 衍生信号单列；权重标注人工先验）
-  05 最新情报流（最近 50 条事件时间线，行首带层级徽章）
-  06 计数与时延（层级双条计数（ET 日口径）+ 每渠道 p50→p90 稳态口径标尺）
+  05 渠道健康（按 T0-T3 分组的渠道卡片 + 衍生信号单列；权重标注人工先验；
+     质量旗标（options oi_quality）与下游依赖（x_nitter→腿 B）上卡）
+  06 最新情报流（治理版：高信号置顶区（T0/T1/衍生信号）+ T2/T3 限额可展开 +
+     同题跨源去重折叠「另 N 源」+ 层级筛选按钮 + 类型/来源人话化）
+  07 计数与时延（层级双条计数（ET 日口径）+ 每渠道 p50→p90 稳态口径标尺）
 
 容错：任一表/视图/CSV 缺失则跳过或置灰对应板块（图层），不炸。
 
@@ -52,16 +57,17 @@ import math
 import re
 import sqlite3
 from bisect import bisect_left, bisect_right
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from intel.store import DB_PATH
 
 try:  # 价格上下文（yfinance 增量 + S2 读数）；导入失败降级为"取价失败"
-    from intel.prices import get_price_context
+    from intel.prices import get_price_context, s2_reading
 except Exception:  # noqa: BLE001
     get_price_context = None  # type: ignore[assignment]
+    s2_reading = None  # type: ignore[assignment]
 
 ET = ZoneInfo("America/New_York")
 
@@ -118,7 +124,8 @@ DET_STATE = {
     "CALIBRATING": ("warn", "标定中", "累积 nitter 口径基线，不出信号"),
     "RISK_ON": ("good", "未见目标风险",
                 "未见空头知情型风险（仅覆盖此类，盲区见声明）"),
-    "RISK_OFF": ("crit", "假想减仓", "空头 up-jump × Musk 密集命中"),
+    "RISK_OFF": ("crit", "假想减仓",
+                 "空头 up-jump × Musk 密集命中 · 口径：假想全仓→现金（应用 A）"),
 }
 
 # 探测器证据等级（strategy-lab N3-H 结论，常驻面板，P0-6）
@@ -344,13 +351,69 @@ def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
     return rows
 
 
-def load_timeline(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+NITTER_ALERT_STREAK = 3  # x_nitter 连续失败达此数 → 探测器面板依赖告警（P1-4）
+
+
+def load_health_extras(conn: sqlite3.Connection, health: list[dict],
+                       now: datetime) -> tuple[dict[str, dict], str | None]:
+    """渠道卡附加信息（质量旗标/下游依赖）+ 探测器面板的放风腿依赖告警。
+
+    - options_snapshot：最新快照 payload.oi_quality=suspect_zero → 旗标上卡；
+    - x_nitter：常驻「下游依赖 = 探测器腿 B」标注；连续失败 ≥ NITTER_ALERT_STREAK
+      时升级 crit 并返回告警文案（render_detector 顶部显示）。
+    """
+    extras: dict[str, dict] = {}
+    # -- options_snapshot 质量旗标（采集器已产出，透传即可）
+    if has_table(conn, "events"):
+        r = conn.execute(
+            """SELECT payload_json FROM events WHERE type = 'options_snapshot'
+               ORDER BY observed_time_utc DESC LIMIT 1"""
+        ).fetchone()
+        if r is not None:
+            try:
+                pl = json.loads(r["payload_json"] or "{}")
+            except ValueError:
+                pl = {}
+            q = pl.get("oi_quality")
+            if q == "suspect_zero":
+                extras["options_snapshot"] = {"flag": (
+                    "warn",
+                    f"oi_quality=suspect_zero（{pl.get('snapshot_date', '—')} 快照 "
+                    "Yahoo OI 整链近零）——OI 类读数当日不可用，volume 类不受影响",
+                )}
+            elif q == "ok":
+                extras["options_snapshot"] = {"flag": (
+                    "", f"oi_quality=ok（{pl.get('snapshot_date', '—')} 快照）")}
+    # -- x_nitter 下游依赖 + 连败告警
+    nit = next((h for h in health if h["source_id"] == "x_nitter"), None)
+    nitter_alert: str | None = None
+    if nit is not None:
+        streak = nit.get("fail_streak") or 0
+        dep_txt = "探测器腿 B（Musk 放风腿）唯一前向数据源——本渠道死亡即腿 B 失明"
+        if streak >= NITTER_ALERT_STREAK:
+            last_t = parse_ts((nit.get("last") or {}).get("poll_time_utc"))
+            nitter_alert = (
+                f"放风腿数据源危险：x_nitter 已连续失败 {streak} 次"
+                + (f"（最后尝试 {fmt_ago(last_t, now)}）" if last_t else "")
+                + "——腿 B（Musk 发帖密度）正在断供，基线与触发判定不可信；"
+                "nitter 实例死亡时启用付费备选 x_api_paid（sources 已登记）。"
+            )
+            extras["x_nitter"] = {"dep": dep_txt + f"；当前连败 {streak} 次",
+                                  "dep_lvl": "crit"}
+        else:
+            extras["x_nitter"] = {"dep": dep_txt,
+                                  "dep_lvl": "warn" if streak else ""}
+    return extras, nitter_alert
+
+
+def load_timeline(conn: sqlite3.Connection, limit: int = 250) -> list[dict]:
+    """情报流原始行（含 payload_json，供来源名/去重用）；抓宽再治理（P1-1）。"""
     if not has_table(conn, "events"):
         return []
     join_tier = has_table(conn, "sources")
     sql = (
-        """SELECT e.observed_time_utc, e.event_time_utc, e.source_id,
-                  e.type, e.title, e.url{tier_col}
+        """SELECT e.event_id, e.observed_time_utc, e.event_time_utc, e.source_id,
+                  e.type, e.title, e.url, e.payload_json{tier_col}
            FROM events e {join}
            ORDER BY e.observed_time_utc DESC, e.event_id DESC LIMIT ?"""
     ).format(
@@ -358,6 +421,37 @@ def load_timeline(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
         join="LEFT JOIN sources s ON s.source_id = e.source_id" if join_tier else "",
     )
     return [dict(r) for r in conn.execute(sql, (limit,))]
+
+
+def load_hi_timeline(conn: sqlite3.Connection, limit: int = 20,
+                     per_source: int = 5) -> list[dict]:
+    """高信号置顶区专用查询：T0/T1/衍生信号按自身时间线取，不受 T3 流量挤出窗口；
+    单一渠道限 per_source 条（窗口函数），防 polymarket 快照类批量刷屏。"""
+    if not (has_table(conn, "events") and has_table(conn, "sources")):
+        return []
+    try:
+        return [dict(r) for r in conn.execute(
+            """SELECT * FROM (
+                 SELECT e.event_id, e.observed_time_utc, e.event_time_utc,
+                        e.source_id, e.type, e.title, e.url, e.payload_json, s.tier,
+                        ROW_NUMBER() OVER (PARTITION BY e.source_id
+                          ORDER BY e.event_time_utc DESC, e.event_id DESC) AS rn
+                 FROM events e LEFT JOIN sources s ON s.source_id = e.source_id
+                 WHERE s.tier IN ('T0', 'T1') OR e.source_id = 'detector')
+               WHERE rn <= ?
+               ORDER BY observed_time_utc DESC, event_time_utc DESC, event_id DESC
+               LIMIT ?""",
+            (per_source, limit),
+        )]
+    except sqlite3.OperationalError:  # 老 SQLite 无窗口函数 → 简单退化
+        return [dict(r) for r in conn.execute(
+            """SELECT e.event_id, e.observed_time_utc, e.event_time_utc, e.source_id,
+                      e.type, e.title, e.url, e.payload_json, s.tier
+               FROM events e LEFT JOIN sources s ON s.source_id = e.source_id
+               WHERE s.tier IN ('T0', 'T1') OR e.source_id = 'detector'
+               ORDER BY e.observed_time_utc DESC, e.event_id DESC LIMIT ?""",
+            (limit * 10,),
+        )]
 
 
 def load_latency(conn: sqlite3.Connection) -> list[dict]:
@@ -1014,7 +1108,8 @@ def _render_view_svg(
                 f"深度 {_fmt_pct_pt(p['dd'])}",
                 f"后 60 日最高 {_fmt_pct_pt(p['fwd'])}",
                 f"空头 6 周变化 {_fmt_pct_pt(p['si6'])}",
-                f"Musk 趋势比 {p['mtr']:.2f}" if p["mtr"] is not None else "Musk 趋势比 —",
+                (f"Musk 趋势比 {p['mtr']:.2f}（坑期发帖/前 60 日常态，>1 = 更活跃）"
+                 if p["mtr"] is not None else "Musk 趋势比 —"),
             ]
         )
         cvar = "var(--m-pit)" if p["golden"] else "var(--m-fake)"
@@ -1075,9 +1170,11 @@ def _render_view_svg(
             continue
         mx, my = x(td.toordinal()), y(float(px))
         tag = (f"H{n_reduce}" if reduce_ else f"R{n_reduce}") or "H?"
+        act_zh = ("减仓（口径：全仓→现金，应用 A）" if reduce_
+                  else "恢复（全仓买回）")
         tip = _tip_attr(
             [
-                f"假想单 {tag} · {t.get('action')} · {td}",
+                f"假想单 {tag} · {t.get('action')} {act_zh} · {td}",
                 f"TSLA 快照 {float(px):,.2f}",
                 (t.get("note") or "")[:60] or "—",
             ]
@@ -1192,7 +1289,8 @@ def _pits_table(pits: list[dict], buys_aligned: list[tuple[dict, str]]) -> str:
         "「后 60 日最高」为前视指标，仅历史复盘。Musk 买入为 Form 4 申报事实（当时可知）。</p>"
         '<div class="scroll-x"><table>'
         "<thead><tr><th>类型</th><th>日期</th><th>价格</th><th>深度</th>"
-        "<th>后 60 日最高</th><th>空头 6 周</th><th>Musk 趋势比</th></tr></thead>"
+        "<th>后 60 日最高</th><th>空头 6 周</th>"
+        '<th title="坑期发帖密度 / 前 60 日常态，&gt;1 = 更活跃">Musk 趋势比</th></tr></thead>'
         f"<tbody>{''.join(rows)}{''.join(buy_rows)}</tbody></table></div></details>"
     )
 
@@ -1528,7 +1626,7 @@ def render_waitboard(det: dict | None, px: dict | None,
             f"下期空头 change ≥ +{SHORT_JUMP_PCT:.0f}%（信息A）<b>且</b>"
             f"当日 Musk 发帖 &gt; {esc(thr_txt) if thr is None else thr_txt}（信息B）",
             f"RISK_OFF {PERSIST_BDAYS} 交易日（重叠触发顺延）+ 假想减仓单"
-            f"（记 detector_trades，价格快照判分）{calib_note}",
+            f"（口径：全仓→现金，应用 A；记 detector_trades，价格快照判分）{calib_note}",
             "N3-H 冻结规则",
         ),
         _pb_row(
@@ -2058,7 +2156,8 @@ def render_consensus(det: dict | None, px: dict | None, shadow: dict,
             d_txt = (f"标定中 {cur.get('baseline_days') or 0}/{CALIB_BDAYS} · "
                      + (f"预计 {eta.strftime('%m-%d')} 恢复出信号" if eta else "期满出信号"))
         elif state == "RISK_OFF":
-            d_txt = f"假想减仓生效 · F{PERSIST_BDAYS} 至 {cur.get('risk_off_until') or '—'}"
+            d_txt = (f"假想减仓生效（全仓→现金口径）· F{PERSIST_BDAYS} 至 "
+                     f"{cur.get('risk_off_until') or '—'}")
         else:
             d_txt = why
         cell_det = (
@@ -2178,6 +2277,282 @@ def render_consensus(det: dict | None, px: dict | None, shadow: dict,
     收盘距 252 交易日滚动高点回撤超过 −20% → 停用买入策略；历史压测中是唯一显著改善
     崩盘段亏损的开关，滞后指标、只防大势不防急跌。本卡由仪表盘每次生成时用最新价格
     计算——S2 从今天起每天有人算。四格中任何一格标红即为当日需要人眼确认的缺口。</p>
+  </div>
+</section>"""
+
+
+# ------------------------------------------------- 晨间简报 + 事件日历（P1-5）
+
+CAL_HORIZON_D = 30  # 日历条时间窗（天）；≤7 天高亮
+
+
+def last_market_open(now: datetime) -> datetime:
+    """最近一次已发生的美股开盘时刻（工作日 09:30 ET，busday 近似不剔假日）。"""
+    et_now = now.astimezone(ET)
+    d = et_now.date()
+    if d.weekday() >= 5 or et_now.time() < dt_time(9, 30):
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+    return datetime.combine(d, dt_time(9, 30), tzinfo=ET).astimezone(timezone.utc)
+
+
+def load_calendar(conn: sqlite3.Connection, finra: list[dict] | None,
+                  det: dict | None, now: datetime) -> tuple[list[dict], list[dict]]:
+    """未来事件日历：财报（earnings_cal）+ FOMC（fed_fomc 库内未来场次）+
+    FINRA 下期空头发布（等待板同源推算）+ 标定期满日。
+
+    返回 (窗口内条目, 更远条目)；每条 {date, kind, label, detail}。
+    """
+    today = now.astimezone(ET).date()
+    horizon = today + timedelta(days=CAL_HORIZON_D)
+    items: list[dict] = []
+    if has_table(conn, "events"):
+        # FOMC：未来场次（库内 fed_fomc 到 2027）
+        for r in conn.execute(
+            """SELECT event_time_utc, type, title FROM events
+               WHERE source_id = 'fed_fomc' AND event_time_utc >= ?
+               ORDER BY event_time_utc LIMIT 4""",
+            (now.isoformat(timespec="seconds"),),
+        ):
+            dt = parse_ts(r["event_time_utc"])
+            if dt is None:
+                continue
+            items.append({
+                "date": dt.astimezone(ET).date(), "kind": "fomc",
+                "label": "FOMC 决议" + ("（含 SEP）" if r["type"].endswith("_sep") else ""),
+                "detail": "声明惯例 14:00 ET 发布",
+            })
+        # 财报：earnings_cal 采集的未来最近一场
+        r = conn.execute(
+            """SELECT event_time_utc, title, payload_json FROM events
+               WHERE source_id = 'earnings_cal' AND event_time_utc >= ?
+               ORDER BY event_time_utc LIMIT 1""",
+            ((now - timedelta(days=1)).isoformat(timespec="seconds"),),
+        ).fetchone()
+        if r is not None:
+            dt = parse_ts(r["event_time_utc"])
+            if dt is not None:
+                try:
+                    win = json.loads(r["payload_json"] or "{}").get("dates") or []
+                except ValueError:
+                    win = []
+                items.append({
+                    "date": dt.astimezone(ET).date(), "kind": "earnings",
+                    "label": "TSLA 财报（Yahoo 预计）",
+                    "detail": ("窗口 " + " ~ ".join(win) + " · " if len(win) > 1 else "")
+                              + "盘后惯例 · 官宣前可能漂移",
+                })
+    # FINRA 下期空头发布（等待板 next_short_period 同源）
+    latest = finra[-1] if finra else None
+    base_settle_s = (latest["settle"] if latest
+                     else (det or {}).get("cur", {}).get("short_settlement"))
+    try:
+        nxt_settle, nxt_pub = next_short_period(date.fromisoformat(str(base_settle_s)))
+        items.append({
+            "date": nxt_pub, "kind": "finra",
+            "label": "FINRA 空头利益发布",
+            "detail": f"结算 {nxt_settle} · 结算+9 交易日 16:00 ET 口径（±1 日）",
+        })
+    except (TypeError, ValueError):
+        pass
+    # 标定期满日（探测器恢复出信号）
+    if det and det["cur"].get("state") == "CALIBRATING":
+        eta = calib_eta(str(det["cur"].get("state_date")),
+                        int(det["cur"].get("baseline_days") or 0))
+        if eta:
+            items.append({"date": eta, "kind": "calib",
+                          "label": "探测器标定期满",
+                          "detail": f"{CALIB_BDAYS} 交易日基线集齐 · 恢复出信号"})
+    items = [it for it in items if it["date"] >= today]
+    items.sort(key=lambda it: it["date"])
+    near = [it for it in items if it["date"] <= horizon]
+    far = [it for it in items if it["date"] > horizon][:3]
+    return near, far
+
+
+def _cal_strip(near: list[dict], far: list[dict], today: date) -> str:
+    """日历条：未来 7/30 天（≤7 天高亮）；窗口外「更远」压缩为一行。"""
+    kind_zh = {"fomc": "宏观", "earnings": "财报", "finra": "空头", "calib": "值班"}
+    rows = []
+    for it in near:
+        dd = (it["date"] - today).days
+        soon = dd <= 7
+        when = "今天" if dd == 0 else f"{dd} 天后"
+        rows.append(
+            f'<div class="cal-row{" soon" if soon else ""}">'
+            f'<span class="cal-d num">{esc(str(it["date"]))}</span>'
+            f'<span class="cal-in num">{esc(when)}</span>'
+            f'<span class="cal-k">{esc(kind_zh.get(it["kind"], "事件"))}</span>'
+            f'<span class="cal-l">{esc(it["label"])}</span>'
+            f'<span class="cal-ref">{esc(it["detail"])}</span></div>'
+        )
+    if not rows:
+        rows.append('<div class="cal-row"><span class="cal-ref">'
+                    f"未来 {CAL_HORIZON_D} 天窗口内无已知日历事件</span></div>")
+    far_html = ""
+    if far:
+        far_txt = " · ".join(
+            f"{it['label']} {it['date']}（{(it['date'] - today).days} 天后）" for it in far
+        )
+        far_html = f'<div class="cal-far">更远：{esc(far_txt)}</div>'
+    return (
+        '<div class="cal-head">事件日历 · 未来 7 天高亮 / 30 天窗口'
+        "<span class=\"h-sub\">财报（earnings_cal）· FOMC（fed_fomc）· "
+        "FINRA 空头发布（推算）· 标定期满</span></div>"
+        f'<div class="cal">{"".join(rows)}</div>{far_html}'
+    )
+
+
+def render_morning_brief(conn: sqlite3.Connection, det: dict | None,
+                         px: dict | None, now: datetime,
+                         cal: tuple[list[dict], list[dict]]) -> str:
+    """② 晨间简报：自上次开盘以来的变化摘要（P1-5「值班员」动线）。
+
+    内容：新 T0/T1 事件 · 探测器状态变化 · S2 读数变化 · shadow 昨晚会话 ·
+    事件日历。无变化时如实显示「无新事件」，不装繁忙。
+    """
+    open_utc = last_market_open(now)
+    open_et = open_utc.astimezone(ET)
+    since_iso = open_utc.isoformat(timespec="seconds")
+    today_et = now.astimezone(ET).date()
+
+    # -- ① 新 T0/T1 事件（observed 口径：上次开盘后哨兵新看到的高信号情报）
+    hi_rows: list[dict] = []
+    if has_table(conn, "events") and has_table(conn, "sources"):
+        hi_rows = [dict(r) for r in conn.execute(
+            """SELECT e.event_time_utc, e.type, e.title, s.tier
+               FROM events e JOIN sources s ON s.source_id = e.source_id
+               WHERE s.tier IN ('T0','T1') AND e.source_id != 'detector'
+                 AND e.observed_time_utc >= ?
+               ORDER BY e.observed_time_utc DESC LIMIT 8""",
+            (since_iso,),
+        )]
+    if hi_rows:
+        lis = "".join(
+            f'<div class="mb-ev">{tier_badge(r["tier"])}'
+            f'<span class="mb-t">{esc(_type_label(r["type"]))}</span>'
+            f'<span class="mb-title" title="{esc(r["title"] or "")}">'
+            f'{esc((r["title"] or r["type"])[:70])}</span></div>'
+            for r in hi_rows
+        )
+        cell_hi = (f'<div class="cx-cell"><div class="cx-k">新 T0/T1 事件'
+                   f'<span class="pill sm warn"><span class="dot"></span>'
+                   f'{len(hi_rows)} 条</span></div><div class="mb-list">{lis}</div></div>')
+    else:
+        cell_hi = ('<div class="cx-cell"><div class="cx-k">新 T0/T1 事件</div>'
+                   '<div class="cx-v muted">无新事件</div>'
+                   '<div class="cx-ref">上次开盘以来 T0/T1 渠道无新入库</div></div>')
+
+    # -- ② 探测器状态变化
+    det_sw: list[dict] = []
+    if has_table(conn, "events"):
+        det_sw = [dict(r) for r in conn.execute(
+            """SELECT event_time_utc, title, payload_json FROM events
+               WHERE source_id = 'detector' AND type = 'detector_state'
+                 AND observed_time_utc >= ?
+               ORDER BY observed_time_utc DESC LIMIT 3""",
+            (since_iso,),
+        )]
+    cur_state = (det or {}).get("cur", {}).get("state") or "无状态"
+    if det_sw:
+        sw_lines = "".join(
+            f'<div class="mb-ev"><span class="mb-t">'
+            f'{fmt_local(parse_ts(s["event_time_utc"]))}</span>'
+            f'<span class="mb-title" title="{esc(s["title"] or "")}">'
+            f'{esc((s["title"] or "")[:70])}</span></div>'
+            for s in det_sw
+        )
+        cell_det = (f'<div class="cx-cell warn-cell"><div class="cx-k">探测器状态变化'
+                    f'<span class="pill sm warn"><span class="dot"></span>'
+                    f'{len(det_sw)} 次</span></div><div class="mb-list">{sw_lines}</div>'
+                    f'<div class="cx-ref">当前 {esc(cur_state)}</div></div>')
+    else:
+        base = (det or {}).get("cur", {}).get("baseline_days")
+        sub = (f"标定 {base}/{CALIB_BDAYS} 交易日" if cur_state == "CALIBRATING"
+               else "状态机照常")
+        cell_det = ('<div class="cx-cell"><div class="cx-k">探测器状态变化</div>'
+                    '<div class="cx-v muted">无切换</div>'
+                    f'<div class="cx-ref">当前 {esc(cur_state)} · {esc(sub)}</div></div>')
+
+    # -- ③ S2 读数变化（今日 vs 前一收盘：同序列去尾重算）
+    s2 = (px or {}).get("s2")
+    prev_s2 = None
+    if px and s2_reading is not None and len(px.get("closes") or []) > 31:
+        try:
+            prev_s2 = s2_reading(px["dates"][:-1], px["closes"][:-1])
+        except Exception:  # noqa: BLE001
+            prev_s2 = None
+    if s2:
+        delta_txt = ""
+        if prev_s2:
+            dpp = s2["drawdown_pct"] - prev_s2["drawdown_pct"]
+            delta_txt = (f'前一收盘 {prev_s2["drawdown_pct"]:+.1f}% → '
+                         f'今 {s2["drawdown_pct"]:+.1f}%（{dpp:+.1f} pp）')
+        stat = ("已触发（买入侧停用区）" if s2["triggered"]
+                else f'未触发 · 距 −20% 线余量 {s2["margin_pp"]:.1f} pp')
+        cell_s2 = (
+            f'<div class="cx-cell{" crit" if s2["triggered"] else ""}">'
+            '<div class="cx-k">S2 读数变化</div>'
+            f'<div class="cx-v num{" crit-text" if s2["triggered"] else ""}">'
+            f'{s2["drawdown_pct"]:+.1f}%</div>'
+            f'<div class="cx-ref">{esc(delta_txt or "无前值可比")} · {esc(stat)}</div></div>'
+        )
+    else:
+        cell_s2 = ('<div class="cx-cell crit"><div class="cx-k">S2 读数变化</div>'
+                   '<div class="cx-v crit-text">无法计算</div>'
+                   '<div class="cx-ref">取价失败——缺口不是安全</div></div>')
+
+    # -- ④ shadow 两策略昨晚会话（shadow_status.json 全部策略逐条）
+    status = load_shadow_status()
+    strategies = (status or {}).get("strategies") or {}
+    if strategies:
+        s_lines = []
+        n_bad = 0
+        for name, s in sorted(strategies.items()):
+            sess = parse_ts(s.get("session_end") or "")
+            s2s = s.get("s2") or {}
+            bits = [f"会话 {fmt_local(sess)}" if sess else "会话时刻缺失",
+                    f"{s.get('signals', 0)} 信号"]
+            if s2s.get("off"):
+                bits.append("S2 停用中")
+            if s.get("halted"):
+                bits.append("已停机")
+            cls = ""
+            if s.get("error"):
+                bits.append("会话异常")
+                cls, n_bad = " crit-text", n_bad + 1
+            elif sess is None or (now - sess).total_seconds() > 2 * 86400:
+                bits.append("超过 2 天无会话")
+                cls, n_bad = " warn-text", n_bad + 1
+            s_lines.append(f'<div class="mb-ev"><span class="mb-t">{esc(name)}</span>'
+                           f'<span class="mb-title{cls}">{esc(" · ".join(bits))}</span></div>')
+        cell_sh = (f'<div class="cx-cell{" crit" if n_bad else ""}">'
+                   f'<div class="cx-k">shadow 策略会话（{len(strategies)} 策略）</div>'
+                   f'<div class="mb-list">{"".join(s_lines)}</div>'
+                   f'<div class="cx-ref">shadow_status.json · 更新 '
+                   f'{esc((status or {}).get("updated_at") or "—")}</div></div>')
+    else:
+        cell_sh = ('<div class="cx-cell crit"><div class="cx-k">shadow 策略会话</div>'
+                   '<div class="cx-v crit-text">无记录</div>'
+                   '<div class="cx-ref">shadow_status.json 缺失或为空——'
+                   "昨晚会话结果无从谈起</div></div>")
+
+    no_change = (not hi_rows and not det_sw and strategies
+                 and not any(s.get("error") for s in strategies.values()))
+    lede = ("自上次开盘以来<b>无新 T0/T1 事件、无状态切换</b>——安静的一夜。"
+            if no_change else "自上次开盘以来的变化如下——只报有据，不装繁忙。")
+    return f"""
+<section>
+  <h2><span class="sec-no">__NO__</span>晨间简报<span class="h-sub">自上次开盘 {esc(open_et.strftime("%m-%d %H:%M"))} ET 以来 · 生成于 {esc(str(today_et))}（ET）</span></h2>
+  <div class="card cx">
+    <p class="statement">{lede}</p>
+    <div class="cx-grid">{cell_hi}{cell_det}{cell_s2}{cell_sh}</div>
+    {_cal_strip(cal[0], cal[1], today_et)}
+    <p class="footnote">口径：「新事件」按哨兵入库时刻（observed）统计，回填的老事件
+    不会伪装成新闻；「上次开盘」为工作日 09:30 ET 的 busday 近似（不剔美股假日）。
+    S2 前值 = 同一价格序列去掉最新一根重算，非独立存档。日历中财报/FINRA 发布日
+    为推算或第三方预计，以官方公告为准。</p>
   </div>
 </section>"""
 
@@ -2323,6 +2698,10 @@ def _det_trades_html(trades: list[dict], now: datetime) -> str:
     )
     return (
         f'<div class="det-sub"><h3>假想单判分 {score}</h3>'
+        '<p class="footnote" style="margin:2px 16px 6px">仓位口径（P1-6 声明）：'
+        "REDUCE = 假想<b>全仓转现金</b>、RESTORE = 全仓买回——即 N3-H 应用 A 的判分"
+        "口径（B&amp;H 对成本线），<b>不是部分减仓建议</b>；真实仓位梯度未经检验，"
+        "出信号时减多少由人工决定。</p>"
         '<div class="scroll-x"><table class="det-table">'
         "<thead><tr><th>时刻</th><th>动作</th><th>TSLA 快照</th>"
         "<th>状态日</th><th>判分</th></tr></thead>"
@@ -2478,7 +2857,8 @@ def _hypo_summary(trades: list[dict]) -> str:
     return "".join(rows[-4:])
 
 
-def render_detector(data: dict | None, now: datetime, wait_html: str = "") -> str:
+def render_detector(data: dict | None, now: datetime, wait_html: str = "",
+                    nitter_alert: str | None = None) -> str:
     if not data:
         return ""
     cur = data["cur"]
@@ -2497,7 +2877,8 @@ def render_detector(data: dict | None, now: datetime, wait_html: str = "") -> st
         )
     elif state == "RISK_OFF":
         stmt = (
-            "空头 up-jump × Musk 密集同窗命中，<b>假想减仓生效</b>；"
+            "空头 up-jump × Musk 密集同窗命中，<b>假想减仓生效</b>"
+            "（口径：假想全仓→现金，应用 A，非部分减仓建议）；"
             f"F{PERSIST_BDAYS} 窗内维持，重叠触发顺延。"
         )
     else:
@@ -2577,6 +2958,11 @@ def render_detector(data: dict | None, now: datetime, wait_html: str = "") -> st
         '<div class="legnote evid"><svg class="ic" aria-hidden="true">'
         f'<use href="#i-pulse"/></svg><span>{DET_EVIDENCE}</span></div>'
     )
+    if nitter_alert:  # 放风腿依赖告警（P1-4）：x_nitter 连败 → 腿 B 断供
+        legnote += (
+            '<div class="legnote depwarn"><svg class="ic" aria-hidden="true">'
+            f'<use href="#i-mega"/></svg><span><b>{esc(nitter_alert)}</b></span></div>'
+        )
 
     # -- 右栏：三灯组 + 最近切换 + 假想单判分小结
     sw_rows = "".join(
@@ -2643,7 +3029,9 @@ def tier_icon(tier: str | None, cls: str = "t-ic") -> str:
     )
 
 
-def _src_card(h: dict, now: datetime, show_weight: bool = True) -> str:
+def _src_card(h: dict, now: datetime, show_weight: bool = True,
+              extra: dict | None = None) -> str:
+    """渠道卡；extra（P1-4 上卡）：{"flag": (级别, 文本), "dep": 下游依赖文本}。"""
     last = h["last"]
     if last is None:
         status_cls, status_txt, card_cls = "off", "未启用", " offline"
@@ -2686,6 +3074,15 @@ def _src_card(h: dict, now: datetime, show_weight: bool = True) -> str:
         if last_t
         else "—"
     )
+    extra = extra or {}
+    flag_html = ""
+    if extra.get("flag"):
+        lvl, txt = extra["flag"]
+        flag_html = f'<div class="sc-flag {esc(lvl)}">质量旗标 · {esc(txt)}</div>'
+    dep_html = ""
+    if extra.get("dep"):
+        dep_lvl = extra.get("dep_lvl", "")
+        dep_html = f'<div class="sc-flag {esc(dep_lvl)}">下游依赖 · {esc(extra["dep"])}</div>'
     return (
         f'<div class="src-card{card_cls}">'
         f'<div class="sc-top"><strong>{esc(h["source_id"])}</strong>'
@@ -2694,6 +3091,7 @@ def _src_card(h: dict, now: datetime, show_weight: bool = True) -> str:
         f'<div class="sc-met">{weight_html}'
         f'<span>事件 <span class="num">{h["n_events"]:,}</span></span>{streak_html}</div>'
         f'<div class="sc-sub">{poll_html}' + (f" · {detail}" if detail else "") + "</div>"
+        f"{flag_html}{dep_html}"
         "</div>"
     )
 
@@ -2702,10 +3100,15 @@ def _src_card(h: dict, now: datetime, show_weight: bool = True) -> str:
 DERIVED_SOURCE_IDS = {"detector"}
 
 
-def render_health(rows: list[dict], now: datetime) -> str:
-    """④ 渠道矩阵：按 T0-T3 分组的卡片组 + 衍生信号单列小组。"""
+def render_health(rows: list[dict], now: datetime,
+                  extras: dict[str, dict] | None = None) -> str:
+    """④ 渠道矩阵：按 T0-T3 分组的卡片组 + 衍生信号单列小组。
+
+    extras（P1-4）：{source_id: {"flag"/"dep"...}} 质量旗标与下游依赖上卡。
+    """
     if not rows:
         return ""
+    extras = extras or {}
     derived = [h for h in rows if h["source_id"] in DERIVED_SOURCE_IDS]
     channels = [h for h in rows if h["source_id"] not in DERIVED_SOURCE_IDS]
     groups: dict[str, list[dict]] = {}
@@ -2716,7 +3119,9 @@ def render_health(rows: list[dict], now: datetime) -> str:
     for t in [*TIERS, "T?"]:
         if t not in groups:
             continue
-        cards = "".join(_src_card(h, now) for h in groups[t])
+        cards = "".join(
+            _src_card(h, now, extra=extras.get(h["source_id"])) for h in groups[t]
+        )
         label = TIER_LABEL.get(t, "未分层")
         blocks.append(
             f'<div class="tier-group"><div class="tier-head">{tier_icon(t)}'
@@ -2750,38 +3155,229 @@ def render_health(rows: list[dict], now: datetime) -> str:
 </section>"""
 
 
-def render_timeline(rows: list[dict], now: datetime) -> str:
-    if not rows:
-        return ""
-    items = []
+# ---- 情报流治理（P1-1）：类型中文化 / 标题指纹去重 / 分层配额 / 层级筛选 ----
+
+TYPE_LABEL = {  # 内部类型代号 → 人话（P2-3）；前缀规则见 _type_label()
+    "short_interest": "空头利益", "ats_weekly": "暗池周报",
+    "options_snapshot": "期权快照", "polymarket_odds": "预测市场",
+    "form4": "Form 4", "form144": "Form 144",
+    "sc13d": "13D", "sc13g": "13G", "sc13d_amend": "13D/A", "sc13g_amend": "13G/A",
+    "fomc_meeting": "FOMC 日历", "fomc_meeting_sep": "FOMC 日历",
+    "earnings_date": "财报日历", "detector_state": "探测器状态",
+    "detector_split_guard": "拆股防护", "x_musk_post": "Musk 发帖",
+    "x_musk_rt": "Musk 转推", "x_tesla_co_post": "Tesla 官号",
+    "x_tesla_co_rt": "Tesla 官号转推",
+}
+
+
+def _type_label(t: str | None) -> str:
+    t = t or ""
+    if t in TYPE_LABEL:
+        return TYPE_LABEL[t]
+    if t.startswith("news_"):
+        return "新闻"
+    if t.startswith("youtube"):
+        return "视频"
+    if t.startswith("8k"):
+        return "8-K"
+    if t.startswith("uspto") or t.startswith("patent"):
+        return "专利"
+    return t or "—"
+
+
+def _src_display(e: dict) -> str:
+    """来源显示名（P2-3）：新闻取 payload.source_attr（媒体名）；否则渠道类型人话。"""
+    t = e.get("type") or ""
+    if t.startswith("news_"):
+        try:
+            attr = (json.loads(e.get("payload_json") or "{}").get("source_attr")
+                    or "").strip()
+        except ValueError:
+            attr = ""
+        if attr:
+            return attr
+        # Yahoo feed 无 source_attr，标题尾部也无媒体名——按 feed 标注
+        return {"news_yahoo_tsla": "Yahoo Finance", "news_cnbc_top": "CNBC",
+                "news_cnbc_markets": "CNBC", "news_marketwatch_top": "MarketWatch",
+                "news_google_news_tsla": "Google News"}.get(t, "新闻")
+    return _type_label(t)
+
+
+_TITLE_SEP_RE = re.compile(r"\s+[-–—|]\s+")
+_TITLE_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _title_fingerprint(title: str) -> tuple[str, frozenset]:
+    """标题指纹：去尾部「 - 媒体名」段 → 小写词序列 + 词集（去重判据用）。"""
+    t = (title or "").strip()
+    last = None
+    for last in _TITLE_SEP_RE.finditer(t):
+        pass
+    if last is not None and 0 < len(t) - last.end() <= 42:
+        t = t[: last.start()]
+    words = _TITLE_WORD_RE.findall(t.lower())
+    return " ".join(words), frozenset(words)
+
+
+def _is_dup_title(a: tuple[str, frozenset], b: tuple[str, frozenset]) -> bool:
+    """同题判据：词集 Jaccard ≥ 0.6，或规范化标题互为前缀（≥20 字符）。"""
+    sa, wa = a
+    sb, wb = b
+    if not wa or not wb:
+        return False
+    if len(sa) >= 20 and len(sb) >= 20 and (sa.startswith(sb) or sb.startswith(sa)):
+        return True
+    inter = len(wa & wb)
+    union = len(wa | wb)
+    return union > 0 and inter / union >= 0.6
+
+
+def dedupe_timeline(rows: list[dict]) -> list[dict]:
+    """新闻类事件按「同 ET 日 × 标题相似」折叠：保留最早来源，其余记为「另 N 源」。
+
+    仅对 news_* 类型做（短帖/申报等不适用相似合并）。每条产出行附加：
+      dup_n     被折叠的重复条数（0 = 无重复）
+      dup_srcs  被折叠条目的来源名列表（悬停展示）
+    """
+    groups: dict[date, list[dict]] = {}  # ET 日 → 该日已见组
+    out: list[dict] = []
     for e in rows:
-        obs = parse_ts(e["observed_time_utc"])
-        title = e.get("title") or e.get("type") or "(无标题)"
-        url = e.get("url")
-        title_html = (
-            f'<a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{esc(title)}</a>'
-            if url
-            else esc(title)
-        )
-        badge = (
-            '<span class="tier tier-d" title="衍生信号（探测器结论，非情报渠道）">信号</span>'
-            if e["source_id"] in DERIVED_SOURCE_IDS
-            else tier_badge(e.get("tier"))
-        )
-        items.append(
-            '<li class="ev">'
-            f'<span class="ev-time num" title="观察时刻（本机时区）">{fmt_local(obs)}</span>'
-            f"{badge}"
-            f'<span class="ev-src">{esc(e["source_id"])}</span>'
-            f'<span class="ev-title">{title_html}</span>'
-            f'<span class="ev-type micro">{esc(e.get("type") or "")}</span>'
-            "</li>"
-        )
+        e = dict(e)
+        e["dup_n"], e["dup_srcs"] = 0, []
+        t = e.get("type") or ""
+        et_dt = parse_ts(e.get("event_time_utc"))
+        if not t.startswith("news_") or et_dt is None or not e.get("title"):
+            out.append(e)
+            continue
+        day = et_dt.astimezone(ET).date()
+        fp = _title_fingerprint(e["title"])
+        hit = None
+        for g in groups.get(day, []):
+            if _is_dup_title(fp, g["_fp"]):
+                hit = g
+                break
+        if hit is None:
+            e["_fp"] = fp
+            e["_et"] = et_dt
+            groups.setdefault(day, []).append(e)
+            out.append(e)
+            continue
+        # 折叠进已有组；保留 event_time 最早的一条为代表
+        if et_dt < hit["_et"]:  # 当前条更早 → 换代表（rows 按 observed 倒序，可能出现）
+            hit["dup_srcs"].append(_src_display(hit))
+            for k in ("observed_time_utc", "event_time_utc", "source_id", "type",
+                      "title", "url", "payload_json", "tier"):
+                hit[k] = e.get(k)
+            hit["_et"] = et_dt
+            hit["_fp"] = fp
+        else:
+            hit["dup_srcs"].append(_src_display(e))
+        hit["dup_n"] += 1
+    for e in out:
+        e.pop("_fp", None)
+        e.pop("_et", None)
+    return out
+
+
+def _feed_item(e: dict, now: datetime) -> str:
+    """情报流单行：event 时刻相对时间（悬停看绝对/入库时刻）+ 层级徽章 +
+    来源名 + 标题 + 类型人话 + 「另 N 源」折叠角标。"""
+    ev_t = parse_ts(e.get("event_time_utc"))
+    obs = parse_ts(e.get("observed_time_utc"))
+    title = e.get("title") or e.get("type") or "(无标题)"
+    url = e.get("url")
+    title_html = (
+        f'<a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{esc(title)}</a>'
+        if url
+        else esc(title)
+    )
+    derived = e["source_id"] in DERIVED_SOURCE_IDS
+    badge = (
+        '<span class="tier tier-d" title="衍生信号（探测器结论，非情报渠道）">信号</span>'
+        if derived
+        else tier_badge(e.get("tier"))
+    )
+    tier_key = "d" if derived else (e.get("tier") or "T3")[-1]
+    fold = ""
+    if e.get("dup_n"):
+        srcs = "、".join(dict.fromkeys(e["dup_srcs"])) or "同题来源"
+        fold = (f'<span class="fold" title="同题折叠：{esc(srcs)}">'
+                f"另 {e['dup_n']} 源</span>")
+    time_title = (f"事件时刻 {fmt_local(ev_t)} · 入库 {fmt_local(obs)}"
+                  if ev_t else f"入库 {fmt_local(obs)}")
+    t_show = ev_t or obs
+    return (
+        f'<li class="ev" data-tier="{esc(tier_key)}">'
+        f'<span class="ev-time num" data-iso="{esc(t_show.isoformat() if t_show else "")}" '
+        f'title="{esc(time_title)}"><span class="rel">{esc(fmt_ago(t_show, now))}</span></span>'
+        f"{badge}"
+        f'<span class="ev-src" title="{esc(e["source_id"])}">{esc(_src_display(e))}</span>'
+        f'<span class="ev-title">{title_html}{fold}</span>'
+        f'<span class="ev-type micro" title="{esc(e.get("type") or "")}">'
+        f'{esc(_type_label(e.get("type")))}</span>'
+        "</li>"
+    )
+
+
+T3_QUOTA = 25  # T2/T3 流默认展示条数（其余折叠进「展开更早」）
+
+
+def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str:
+    """⑤ 最新情报流（P1-1 治理版）：高信号置顶区（T0/T1/衍生信号，独立查询，
+    永不被淹没）+ T2/T3 限额流（同题跨源去重折叠，可展开）+ 层级筛选按钮。"""
+    if not rows and not hi_rows:
+        return ""
+    # 高信号区：独立时间线（load_hi_timeline），单一渠道限 5 条
+    # （防 polymarket 快照类刷屏挤占 EDGAR/FINRA/探测器），共 20 条
+    hi, per_src = [], {}
+    for e in hi_rows:
+        sid = e["source_id"]
+        if sid not in DERIVED_SOURCE_IDS and per_src.get(sid, 0) >= 5:
+            continue
+        per_src[sid] = per_src.get(sid, 0) + 1
+        hi.append(e)
+        if len(hi) >= 20:
+            break
+    hi_ids = {e.get("event_id") for e in hi}
+    deduped = dedupe_timeline(
+        [e for e in rows if e.get("event_id") not in hi_ids]
+    )
+    n_folded = sum(e["dup_n"] for e in deduped)
+    lo = deduped
+    lo_head, lo_rest = lo[:T3_QUOTA], lo[T3_QUOTA:]
+
+    chips = "".join(
+        f'<button class="lg fd-chip{" act" if v == "all" else ""}" data-tf="{v}" '
+        f'type="button">{lab}</button>'
+        for v, lab in (("all", "全部"), ("0", "T0"), ("1", "T1"), ("2", "T2"),
+                       ("3", "T3"), ("d", "信号"))
+    )
+    hi_html = ("".join(_feed_item(e, now) for e in hi)
+               or '<li class="ev"><span class="ev-title muted">'
+                  "窗口内无 T0/T1/衍生信号事件</span></li>")
+    lo_html = "".join(_feed_item(e, now) for e in lo_head)
+    more_html = (
+        f'<details class="feed-more"><summary>展开更早 {len(lo_rest)} 条</summary>'
+        f'<ol class="feed">{"".join(_feed_item(e, now) for e in lo_rest)}</ol></details>'
+        if lo_rest else ""
+    )
     return f"""
-<section>
-  <h2><span class="sec-no">__NO__</span>最新情报流<span class="h-sub">最近 {len(rows)} 条 · 按观察时刻倒序</span></h2>
+<section id="feed-sec">
+  <h2><span class="sec-no">__NO__</span>最新情报流<span class="h-sub">近 {len(rows)} 条 → 去重折叠 {n_folded} 条 · 高信号置顶 · T2/T3 限额 {T3_QUOTA} 条可展开 · 时间列 = 事件时刻（悬停看入库时刻）</span></h2>
   <div class="card">
-    <ol class="feed">{"".join(items)}</ol>
+    <div class="feed-bar" id="feed-bar" role="group" aria-label="层级筛选">
+      <span class="micro muted">层级筛选</span>{chips}
+    </div>
+    <div class="feed-lab">高信号置顶 · T0 布局痕迹 / T1 法定披露 / 衍生信号</div>
+    <ol class="feed feed-hi">{hi_html}</ol>
+    <div class="feed-lab">T2 / T3 流 · 同题跨源已折叠（「另 N 源」悬停看来源）</div>
+    <ol class="feed">{lo_html}</ol>
+    {more_html}
+    <p class="footnote">去重口径：news_* 事件按「同 ET 日 + 标题指纹相似（词集
+    Jaccard ≥ 0.6 或互为前缀）」折叠为一组，保留 event_time 最早的来源，其余计入
+    「另 N 源」；申报/短帖类不做相似合并。置顶区固定收录 T0/T1/衍生信号
+    （最多 20 条，单一渠道限 5 条防快照类刷屏），不受 T3 噪声挤占，
+    溢出条目仍在下方流与层级筛选中。</p>
   </div>
 </section>"""
 
@@ -3345,7 +3941,66 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .wt-bar span { display: block; height: 100%; background: var(--ink-2); }
 .wtf-0, .wtf-1, .wtf-2, .wtf-3 { background: var(--ink-2); }
 
+/* ===== 晨间简报（cx 复用）+ 事件日历条 ===== */
+.mb-list { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; }
+.mb-ev { display: flex; align-items: baseline; gap: 8px; font-size: 12px; min-width: 0; }
+.mb-ev .tier { flex: none; }
+.mb-t { flex: none; font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--muted); letter-spacing: .04em; }
+.mb-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--ink-2); }
+.cal-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font: 600 11px var(--font-mono); letter-spacing: .14em; color: var(--muted);
+  margin: 16px 0 8px; }
+.cal { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.cal-row { display: grid; grid-template-columns: 100px 72px 44px minmax(120px, .8fr)
+  minmax(0, 1.4fr); gap: 10px; align-items: baseline; padding: 7px 12px;
+  border-bottom: 1px solid var(--grid); font-size: 12.5px; }
+.cal-row:last-child { border-bottom: none; }
+.cal-row.soon { background: var(--warn-wash); }
+.cal-d { font-size: 12px; color: var(--ink-2); }
+.cal-in { font-size: 11px; color: var(--muted); }
+.cal-row.soon .cal-in { color: var(--warn-text); font-weight: 700; }
+.cal-k { font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 3px;
+  padding: 1px 6px; justify-self: start; }
+.cal-l { color: var(--ink); }
+.cal-ref { font-size: 11px; color: var(--muted); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px){ .cal-row { grid-template-columns: 92px 64px 1fr; }
+  .cal-l { grid-column: 3; } .cal-ref { grid-column: 3; white-space: normal; } }
+.cal-far { font-size: 11.5px; color: var(--muted); margin-top: 6px;
+  font-family: var(--font-mono); }
+.warn-cell { background: var(--warn-wash); }
+
+/* ===== 渠道卡质量旗标 / 下游依赖（P1-4） ===== */
+.sc-flag { font-size: 11px; line-height: 1.5; color: var(--muted);
+  border-top: 1px dashed var(--border); padding-top: 4px; margin-top: 2px; }
+.sc-flag.warn { color: var(--warn-text); }
+.sc-flag.crit { color: var(--crit-text); font-weight: 600; }
+.legnote.depwarn { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--crit);
+  border-radius: 5px; background: var(--crit-wash); color: var(--crit-text); }
+.legnote.depwarn svg.ic { color: var(--crit); }
+
 /* ===== 04 最新情报流 ===== */
+.feed-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 16px 2px; }
+.fd-chip { padding: 3px 12px; }
+.fd-chip.act { border-color: var(--muted); color: var(--ink);
+  background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--muted); }
+.feed-lab { font: 600 10.5px var(--font-mono); letter-spacing: .16em;
+  color: var(--muted); padding: 10px 16px 0; display: flex; align-items: center;
+  gap: 10px; }
+.feed-lab::after { content: ""; flex: 1; border-top: 1px dashed var(--border); }
+.feed-hi { background: var(--surface-2); border-block: 1px solid var(--grid);
+  margin-top: 8px; }
+.fold { font-family: var(--font-mono); font-size: 10px; color: var(--warn-text);
+  border: 1px solid var(--warn); border-radius: 3px; background: var(--warn-wash);
+  padding: 0 6px; margin-left: 8px; white-space: nowrap; cursor: help; }
+.feed-more { margin: 0; }
+.feed-more summary { cursor: pointer; color: var(--muted); font-size: 12px;
+  padding: 8px 16px; }
+.feed-more summary:hover { color: var(--ink-2); }
 .feed { list-style: none; margin: 0; padding: 6px 0; }
 .ev { display: flex; align-items: baseline; gap: 12px; padding: 8px 16px;
   border-bottom: 1px solid var(--grid); }
@@ -4000,6 +4655,32 @@ _RP_JS = """
 """
 
 
+# 情报流层级筛选（P1-1c）。不经 %-格式化，直接拼接。
+_FEED_JS = """
+(function () {
+  var bar = document.getElementById("feed-bar");
+  var sec = document.getElementById("feed-sec");
+  if (!bar || !sec) return;
+  bar.querySelectorAll(".fd-chip").forEach(function (b) {
+    b.addEventListener("click", function () {
+      bar.querySelectorAll(".fd-chip").forEach(function (x) {
+        x.classList.toggle("act", x === b);
+      });
+      var v = b.getAttribute("data-tf");
+      if (v !== "all") {
+        sec.querySelectorAll("details.feed-more").forEach(function (d) {
+          d.open = true;
+        });
+      }
+      sec.querySelectorAll("li.ev").forEach(function (li) {
+        li.hidden = v !== "all" && li.getAttribute("data-tier") !== v;
+      });
+    });
+  });
+})();
+"""
+
+
 def render(db_path: Path = DB_PATH) -> str:
     now = datetime.now(timezone.utc)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -4054,12 +4735,17 @@ def render(db_path: Path = DB_PATH) -> str:
             load_musk_buys(),
             det["trades"] if det else [], has_trades_table, fresh_badge,
         )
+        health_rows = load_health(conn, sources)
+        extras, nitter_alert = load_health_extras(conn, health_rows, now)
         sections = [
             render_consensus(det, px, shadow, now),
-            render_detector(det, now, render_waitboard(det, px, finra, now)),
+            render_morning_brief(conn, det, px, now,
+                                 load_calendar(conn, finra, det, now)),
+            render_detector(det, now, render_waitboard(det, px, finra, now),
+                            nitter_alert),
             symbol_block,
-            render_health(load_health(conn, sources), now),
-            render_timeline(load_timeline(conn), now),
+            render_health(health_rows, now, extras),
+            render_timeline(load_timeline(conn), load_hi_timeline(conn), now),
             render_counts_latency(
                 load_tier_counts(conn, now), load_latency(conn), sources
             ),
@@ -4107,6 +4793,7 @@ def render(db_path: Path = DB_PATH) -> str:
         + _JS % {"stale_ms": STALE_S * 1000}
         + _TV_JS
         + _RP_JS
+        + _FEED_JS
         + "</script>\n</body>\n</html>\n"
     )
 

@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from intel import store
+from intel.collectors.earnings_cal import EarningsCalCollector
 from intel.collectors.edgar import EdgarCollector
 from intel.collectors.edgar_t0 import EdgarT0Collector
 from intel.collectors.fed import FedCollector
@@ -40,6 +41,7 @@ COLLECTORS = [
     FinraAtsCollector,
     OptionsSnapshotCollector,
     FedCollector,
+    EarningsCalCollector,
     UsptoCollector,
     YoutubeCollector,
     NewsRssCollector,

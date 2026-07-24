@@ -358,7 +358,10 @@ def evaluate(conn, now: datetime | None = None) -> dict:
                   else "RESTORE" if prev_state == "RISK_OFF" else None)
         if action:
             price, ptime, err = tsla_snapshot()
-            note = ("假想减仓：" if action == "REDUCE" else "假想恢复：") + title
+            # 仓位口径注明（P1-6）：REDUCE = 假想全仓→现金（N3-H 应用 A 判分口径），
+            # 不是部分减仓；RESTORE = 全仓买回。判分（B&H vs 成本线）即按此口径。
+            note = ("假想减仓（口径：全仓→现金，应用 A）：" if action == "REDUCE"
+                    else "假想恢复（全仓买回）：") + title
             if err:
                 note += f"（价格快照失败：{err}）"
             conn.execute(
