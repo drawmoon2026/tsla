@@ -871,15 +871,15 @@ def _situation_html(live: float, px: dict, s2: dict, pos: dict,
 
 _LIGHT_TOKENS = """
   color-scheme: light;
-  --bg:#f6f8fa; --surface:#fcfdfe; --surface-2:#eef2f5;
-  --ink:#0c1216; --ink-2:#46545f; --muted:#78868f;
-  --border:rgba(12,25,35,.12); --grid:#dee5ea; --baseline:#becad2;
-  --good:#059669; --good-text:#047857; --good-wash:rgba(5,150,105,.09);
-  --warn:#f59e0b; --warn-text:#b45309; --warn-wash:rgba(245,158,11,.14);
-  --crit:#dc2626; --crit-text:#b91c1c; --crit-wash:rgba(220,38,38,.08);
-  --sys:#0e7490; --sys-wash:rgba(8,145,178,.08);
-  --sys-rule:rgba(14,116,144,.30);
-  --link:#0e7490;
+  --bg:#f2efe6; --surface:#faf8f1; --surface-2:#e9e3d3;
+  --ink:#182028; --ink-2:#454f57; --muted:#77796c;
+  --border:rgba(103,84,42,.28); --grid:#ddd5bf; --baseline:#b9ad8e;
+  --good:#0c7a52; --good-text:#0a6746; --good-wash:rgba(12,122,82,.10);
+  --warn:#b3880f; --warn-text:#84630a; --warn-wash:rgba(179,136,15,.13);
+  --crit:#b13e06; --crit-text:#9a3708; --crit-wash:rgba(177,62,6,.08);
+  --sys:#8a6520; --sys-wash:rgba(154,116,32,.10);
+  --sys-rule:rgba(138,101,32,.38);
+  --link:#8a6520;
 """
 
 # 视觉 token 沿用 intel/dashboard.py 的设计稿色板（暗默认/亮覆盖、宋体衬线
@@ -887,15 +887,15 @@ _LIGHT_TOKENS = """
 _CSS = """
 :root {
   color-scheme: dark;
-  --bg:#0b0e11; --surface:#14181d; --surface-2:#1c232a;
-  --ink:#f2f7fa; --ink-2:#b6c2cb; --muted:#7d8b95;
-  --border:rgba(255,255,255,.11); --grid:#232b32; --baseline:#39434c;
-  --good:#10b981; --good-text:#34d399; --good-wash:rgba(16,185,129,.15);
-  --warn:#fbbf24; --warn-text:#fbbf24; --warn-wash:rgba(251,191,36,.13);
-  --crit:#ef4444; --crit-text:#f87171; --crit-wash:rgba(239,68,68,.15);
-  --sys:#22d3ee; --sys-wash:rgba(34,211,238,.10);
-  --sys-rule:rgba(34,211,238,.28);
-  --link:#22d3ee;
+  --bg:#0a0f14; --surface:#121b22; --surface-2:#18242e;
+  --ink:#f2efe6; --ink-2:#c9c2ae; --muted:#8a8c82;
+  --border:rgba(214,175,110,.22); --grid:#22303a; --baseline:#46525b;
+  --good:#7fd4a0; --good-text:#7fd4a0; --good-wash:rgba(127,212,160,.13);
+  --warn:#dc9838; --warn-text:#dc9838; --warn-wash:rgba(220,152,56,.13);
+  --crit:#da544a; --crit-text:#e0685e; --crit-wash:rgba(224,104,94,.14);
+  --sys:#d6af6e; --sys-wash:rgba(214,175,110,.10);
+  --sys-rule:rgba(214,175,110,.32);
+  --link:#d6af6e;
   --font-serif:"Songti SC","STSong","Noto Serif CJK SC","Source Han Serif SC",serif;
   --font-sans:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;

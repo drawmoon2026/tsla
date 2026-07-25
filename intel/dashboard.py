@@ -3929,42 +3929,42 @@ _ICON_SPRITE = """
 # 与 prefers-color-scheme 媒体回退（无 JS / 未显式选择时跟随系统）。
 _LIGHT_TOKENS = """
   color-scheme: light;
-  --bg:#f6f8fa; --surface:#fcfdfe; --surface-2:#eef2f5;
-  --ink:#0c1216; --ink-2:#46545f; --muted:#78868f;
-  --border:rgba(12,25,35,.12); --grid:#dee5ea; --baseline:#becad2;
-  --good:#059669; --good-text:#047857; --good-wash:rgba(5,150,105,.09);
-  --warn:#f59e0b; --warn-text:#b45309; --warn-wash:rgba(245,158,11,.14);
-  --crit:#dc2626; --crit-text:#b91c1c; --crit-wash:rgba(220,38,38,.08);
-  --off:#78868f;
-  --accent:#0e7490; --accent-mark:#079fc2; --accent-wash:rgba(8,145,178,.08);
-  --accent-rule:rgba(14,116,144,.30);
-  --tier0:#082f49; --tier0-ink:#ffffff;
-  --tier1:#075985; --tier1-ink:#ffffff;
-  --tier2:#0284c7; --tier2-ink:#ffffff;
-  --tier3:#38bdf8; --tier3-ink:#082334;
-  --m-insider:#8b5cf6; --m-pit:#1a9e4b; --m-fake:#ea580c; --m-hypo:#ec4899;
-  --link:#0e7490;
+  --bg:#f2efe6; --surface:#faf8f1; --surface-2:#e9e3d3;
+  --ink:#182028; --ink-2:#454f57; --muted:#77796c;
+  --border:rgba(103,84,42,.28); --grid:#ddd5bf; --baseline:#b9ad8e;
+  --good:#0c7a52; --good-text:#0a6746; --good-wash:rgba(12,122,82,.10);
+  --warn:#b3880f; --warn-text:#84630a; --warn-wash:rgba(179,136,15,.13);
+  --crit:#b13e06; --crit-text:#9a3708; --crit-wash:rgba(177,62,6,.08);
+  --off:#77796c;
+  --accent:#8a6520; --accent-mark:#a0761d; --accent-wash:rgba(154,116,32,.10);
+  --accent-rule:rgba(138,101,32,.38);
+  --tier0:#3a2e14; --tier0-ink:#f5efdd;
+  --tier1:#6c573a; --tier1-ink:#f5efdd;
+  --tier2:#a1762a; --tier2-ink:#ffffff;
+  --tier3:#c9ac64; --tier3-ink:#3a2e14;
+  --m-insider:#7961be; --m-pit:#418d59; --m-fake:#c45a10; --m-hypo:#ab3378;
+  --link:#8a6520;
 """
 
 _CSS = """
 /* ===== tokens（设计稿色板：暗色默认，亮色经 data-theme 或系统偏好） ===== */
 :root {
   color-scheme: dark;
-  --bg:#0b0e11; --surface:#14181d; --surface-2:#1c232a;
-  --ink:#f2f7fa; --ink-2:#b6c2cb; --muted:#7d8b95;
-  --border:rgba(255,255,255,.11); --grid:#232b32; --baseline:#39434c;
-  --good:#10b981; --good-text:#34d399; --good-wash:rgba(16,185,129,.15);
-  --warn:#fbbf24; --warn-text:#fbbf24; --warn-wash:rgba(251,191,36,.13);
-  --crit:#ef4444; --crit-text:#f87171; --crit-wash:rgba(239,68,68,.15);
-  --off:#7d8b95;
-  --accent:#22d3ee; --accent-mark:#079fc2; --accent-wash:rgba(34,211,238,.10);
-  --accent-rule:rgba(34,211,238,.28);
-  --tier0:#7dd3fc; --tier0-ink:#082334;
-  --tier1:#38bdf8; --tier1-ink:#082334;
-  --tier2:#0284c7; --tier2-ink:#ffffff;
-  --tier3:#075985; --tier3-ink:#e0f2fe;
-  --m-insider:#8b5cf6; --m-pit:#1a9e4b; --m-fake:#ea580c; --m-hypo:#ec4899;
-  --link:#22d3ee;
+  --bg:#0a0f14; --surface:#121b22; --surface-2:#18242e;
+  --ink:#f2efe6; --ink-2:#c9c2ae; --muted:#8a8c82;
+  --border:rgba(214,175,110,.22); --grid:#22303a; --baseline:#46525b;
+  --good:#7fd4a0; --good-text:#7fd4a0; --good-wash:rgba(127,212,160,.13);
+  --warn:#dc9838; --warn-text:#dc9838; --warn-wash:rgba(220,152,56,.13);
+  --crit:#da544a; --crit-text:#e0685e; --crit-wash:rgba(224,104,94,.14);
+  --off:#8a8c82;
+  --accent:#d6af6e; --accent-mark:#d6af6e; --accent-wash:rgba(214,175,110,.10);
+  --accent-rule:rgba(214,175,110,.32);
+  --tier0:#f0e9dc; --tier0-ink:#3a2e14;
+  --tier1:#d9c289; --tier1-ink:#3a2e14;
+  --tier2:#d8a354; --tier2-ink:#2a1e08;
+  --tier3:#6c573a; --tier3-ink:#f5efdd;
+  --m-insider:#a590d8; --m-pit:#5fb287; --m-fake:#df8448; --m-hypo:#d4529a;
+  --link:#d6af6e;
   --font-serif:"Songti SC","STSong","Noto Serif CJK SC","Source Han Serif SC",serif;
   --font-sans:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
