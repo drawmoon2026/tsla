@@ -14,10 +14,11 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
      （trigger_diary.md：看到什么→决定→之后 20 日实际→判对/错）+
      「使用指标」固定卡（两腿定义/冻结参数/证据等级/walk-forward 口径）+
      失明期灰显；播放数据预计算内嵌 JSON（精简字段控体积）。
-   · 全系统推演（进攻层）= E8-A+S2 留出段（2025-10→2026-07）逐笔回放——
-     outputs/e8a_replay（research/e8a_trades_export.py 由 models/e8a/holdout_ref.csv
-     重放、与 frontier_shift/e11 存档核对一致）54 笔成交 + 8 笔 S2 拦截对照；
-     同款播放器骨架（交易密，速度预设 20x），总结卡年化收益率置顶。
+   · 全系统推演（进攻层）= E8-A+S2 留出段 + 每日续演前向段逐笔回放——
+     首选 outputs/replay_current（intel/replay_refresh.py 每日续演：冻结管线
+     零改动续算到最新完整交易日，留出段与存档核对一致、前向段 segment=forward
+     标记），缺失时降级回旧静态存档 outputs/e8a_replay；页头算法版本卡 +
+     留出/前向分段统计；同款播放器骨架（交易密，速度预设 20x）。
 
 板块（等宽序号按实际渲染顺序编排）：
   顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
@@ -107,7 +108,8 @@ FORM4_CSV = PROJECT_ROOT / "data" / "intel" / "edgar_form4.csv"
 DIARY_MD = PROJECT_ROOT / "outputs" / "n3h_deduction" / "trigger_diary.md"
 APP_CSV = PROJECT_ROOT / "outputs" / "n3h_deduction" / "application_results.csv"
 FINRA_CSV = PROJECT_ROOT / "data" / "intel" / "finra_short.csv"
-E8A_REPLAY_DIR = PROJECT_ROOT / "outputs" / "e8a_replay"  # 全系统推演数据
+E8A_REPLAY_DIR = PROJECT_ROOT / "outputs" / "e8a_replay"  # 全系统推演（旧静态存档）
+REPLAY_CURRENT_DIR = PROJECT_ROOT / "outputs" / "replay_current"  # 每日续演数据集
 
 # 视图盒尺寸（viewBox 单位；渲染时宽度 100% 自适应）
 _VB_W, _VB_H = 1040, 400
@@ -772,6 +774,61 @@ def load_e8a_replay() -> dict | None:
         return {"trades": trades, "daily": daily, "summary": summary}
     except Exception:  # noqa: BLE001
         return None
+
+
+def load_replay_current() -> dict | None:
+    """outputs/replay_current/{trades,daily}.csv + meta.json → 每日续演数据集。
+
+    intel/replay_refresh.py 产物：留出段（冻结存档核对一致）+ 前向段
+    （segment=forward，冻结管线续算到最新完整交易日）+ 探测器逐日状态合并。
+    任一文件缺失/坏行 → None（调用方降级回旧静态存档）。
+    """
+    try:
+        meta = json.loads(
+            (REPLAY_CURRENT_DIR / "meta.json").read_text(encoding="utf-8"))
+        trades = []
+        with (REPLAY_CURRENT_DIR / "trades.csv").open(newline="",
+                                                      encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                trades.append({
+                    "seq": int(row["seq"]),
+                    "et_day": date.fromisoformat(row["et_day"].strip()),
+                    "entry_hm": row["entry_et"].strip()[-5:],
+                    "exit_hm": row["exit_et"].strip()[-5:],
+                    "prob": float(row["prob"]),
+                    "entry_fill": float(row["entry_fill"]),
+                    "exit_px": float(row["exit_px"]),
+                    "exit_type": row["exit_type"].strip(),
+                    "ret": float(row["ret"]),
+                    "blocked": row["blocked"].strip() == "True",
+                    "cum_eq": _ffloat(row.get("cum_eq_s2")),
+                    "seg": (row.get("segment") or "holdout").strip(),
+                })
+        daily = []
+        with (REPLAY_CURRENT_DIR / "daily.csv").open(newline="",
+                                                     encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                seg = (row.get("seg") or "").strip()
+                if seg not in ("holdout", "forward"):
+                    continue  # pre 段留给探测器口径，全系统窗口从留出段起
+                daily.append({"date": date.fromisoformat(row["et_day"].strip()),
+                              "close": float(row["close"]),
+                              "off": row["s2_off"].strip() == "True",
+                              "seg": seg,
+                              "det_state": (row.get("det_state") or "").strip(),
+                              "det_src": (row.get("det_src") or "").strip()})
+        summary = meta.get("holdout_summary") or {}
+        if not trades or not daily or "s2" not in summary:
+            return None
+        return {"trades": trades, "daily": daily, "summary": summary,
+                "meta": meta}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_fullsys_data() -> dict | None:
+    """全系统推演数据源：首选每日续演数据集，缺失降级回旧静态存档（meta=None）。"""
+    return load_replay_current() or load_e8a_replay()
 
 
 def load_app_results() -> dict | None:
@@ -2154,18 +2211,22 @@ def render_fullsys_view(data: dict | None,
     if not data:
         return """
 <section>
-  <h2><span class="sec-no">R2</span>全系统推演<span class="h-sub">E8-A+S2 留出段逐笔回放（2025-10 → 2026-07）</span></h2>
-  <div class="card"><p class="empty">outputs/e8a_replay/ 不可读——先跑
-  <code>.venv/bin/python research/e8a_trades_export.py</code> 重建逐笔交易，本页降级为空。</p></div>
+  <h2><span class="sec-no">R2</span>全系统推演<span class="h-sub">E8-A+S2 留出段 + 前向续演逐笔回放</span></h2>
+  <div class="card"><p class="empty">outputs/replay_current/ 与 outputs/e8a_replay/ 均不可读——先跑
+  <code>.venv/bin/python -m intel.replay_refresh</code>（每日续演）或
+  <code>.venv/bin/python research/e8a_trades_export.py</code>（静态存档）重建逐笔交易，本页降级为空。</p></div>
 </section>"""
 
     trades, daily, s = data["trades"], data["daily"], data["summary"]
+    cur = data.get("meta")                       # 每日续演 meta；旧静态存档为 None
+    segs = (cur or {}).get("segments") or {}
+    hseg, fseg = segs.get("holdout"), segs.get("forward")
     s2, alls, blk = s["s2"], s["all"], s["blocked"]
     dist = s.get("exit_dist_s2", {})
     d0, d1 = daily[0]["date"], daily[-1]["date"]
     n_days = len(daily)
-    n_kept = int(s2["n"])
-    n_blk = int(blk["n"])
+    n_kept = sum(1 for t in trades if not t["blocked"])   # 含前向段成交
+    n_blk = sum(1 for t in trades if t["blocked"])        # 含前向段拦截
     wins = sum(1 for t in trades if not t["blocked"] and t["ret"] > 0)
     ann10 = s["ann_10mo"] * 100
     ann_act = s["ann_actual"] * 100
@@ -2194,10 +2255,13 @@ def render_fullsys_view(data: dict | None,
     det_rows: list[list] = []
     dw = [r for r in (det_days or []) if d0 <= r["date"] <= d1]
     if dw and dw[0]["blind"]:
-        det_rows.append([d0.toordinal(), "防守层 · 失明",
-                         "探测器（N3-H）窗口内全程失明：Musk 归档止于 2025-05-08，"
-                         "放风腿无数据、不可能触发——缺席是覆盖缺口，不是安全判定",
-                         ""])
+        blind_txt = ("探测器（N3-H）历史归档失明：Musk 归档止于 2025-05-08，"
+                     "放风腿无数据、不可能触发——缺席是覆盖缺口，不是安全判定"
+                     + ("；2026-07-24 起转前向值班（见后续日志）" if cur else "")
+                     ) if cur else (
+                     "探测器（N3-H）窗口内全程失明：Musk 归档止于 2025-05-08，"
+                     "放风腿无数据、不可能触发——缺席是覆盖缺口，不是安全判定")
+        det_rows.append([d0.toordinal(), "防守层 · 失明", blind_txt, ""])
     for j, r in enumerate(dw):
         prev = dw[j - 1] if j else None
         if r["blind"] and prev is not None and not prev["blind"]:
@@ -2212,6 +2276,27 @@ def render_fullsys_view(data: dict | None,
         if not r["off"] and prev is not None and prev["off"]:
             det_rows.append([r["date"].toordinal(), "防守层 · 避险解除",
                              f"F{PERSIST_BDAYS} 期满 · 回到 risk_on", ""])
+
+    # 前向值班行（detector_state 表，经 replay_current daily 合并；如实标定期）
+    if cur:
+        det_lab = {"calibrating": "标定中（累积 nitter 基线，不出信号）",
+                   "risk_on": "未见目标风险（窄谱覆盖，盲区声明见值班页）",
+                   "risk_off": "假想减仓（全仓→现金，应用 A 口径）"}
+        prev_st = None
+        for r in daily:
+            if r.get("det_src") != "live":
+                continue
+            st = r.get("det_state") or ""
+            if prev_st is None:
+                det_rows.append([r["date"].toordinal(), "防守层 · 前向值班上线",
+                                 "因果探测器（N3-H 冻结）转前向值班："
+                                 + det_lab.get(st, st), ""])
+            elif st != prev_st:
+                det_rows.append([r["date"].toordinal(), "防守层 · 状态切换",
+                                 f"{det_lab.get(prev_st, prev_st)} → "
+                                 f"{det_lab.get(st, st)}", ""])
+            prev_st = st
+        det_rows.sort(key=lambda x0: x0[0])
 
     # ---- SVG（几何同探测器推演：对数 y，日期 x）------------------------------
     d0o, d1o = d0.toordinal(), d1.toordinal()
@@ -2230,6 +2315,23 @@ def render_fullsys_view(data: dict | None,
         return _MT + (1 - (math.log10(c) - llo) / lspan) * ph
 
     parts: list[str] = []
+    # 前向段底纹（微亮）：冻结存档之后的续演区间，视觉上与留出段区分
+    fwd_days = [r["date"] for r in daily if r.get("seg") == "forward"]
+    if fwd_days:
+        fa = fwd_days[0]
+        fx = x(fa.toordinal())
+        fw = x(d1o + 1) - fx
+        parts.append(
+            f'<rect class="fwd-wash" x="{fx:.1f}" y="{_MT}" width="{fw:.1f}" '
+            f'height="{ph}"><title>前向段 {fa} → {d1}：冻结（2026-07-24）后按冻结'
+            "管线每日续演——真样本外区间</title></rect>"
+            f'<line class="fwd-edge" x1="{fx:.1f}" x2="{fx:.1f}" '
+            f'y1="{_MT}" y2="{_MT + ph}"/>'
+            + (f'<text class="fwd-tag" x="{fx + 5:.1f}" y="{_MT + ph - 8}">前向'
+               "（样本外）</text>" if fw > 60 else
+               f'<text class="fwd-tag" x="{min(fx + 3, _VB_W - _MR - 30):.1f}" '
+               f'y="{_MT + ph - 8}">前向</text>')
+        )
     for a, b in _replay_segs(daily, "off"):  # S2 关闸底纹（窄段不标字免重叠）
         bx, bw = x(a.toordinal()), x(b.toordinal() + 1) - x(a.toordinal())
         tag = (f'<text class="band-tag" x="{bx + bw / 2:.1f}" y="{_MT + 13}" '
@@ -2298,6 +2400,67 @@ def render_fullsys_view(data: dict | None,
         separators=(",", ":"), ensure_ascii=False,
     )
 
+    # ---- 页头「算法版本」卡（数据源/冻结口径/分段说明；旧存档降级如实标注）----
+    if cur:
+        det_m = cur.get("detector") or {}
+        det_st = (det_m.get("current_state") or "").upper()
+        if det_st == "CALIBRATING":
+            det_txt = (f"标定中 {det_m.get('baseline_days') or '?'}/{CALIB_BDAYS}"
+                       "（不出信号）")
+        elif det_st == "RISK_OFF":
+            det_txt = "RISK_OFF 假想减仓中"
+        elif det_st == "RISK_ON":
+            det_txt = "RISK_ON 未见目标风险"
+        else:
+            det_txt = "尚无前向值班行"
+        fetch = (cur.get("data") or {}).get("fetch") or {}
+        stale_chip = ("" if not fetch.get("error") else
+                      '<span class="chip warn">增量取数失败 · 数据为上次续到</span>')
+        h_n = int(hseg["n_trades"]) if hseg else int(s2["n"])
+        h_b = int(hseg["n_blocked"]) if hseg else int(blk["n"])
+        if fseg:
+            f_n, f_b = int(fseg["n_trades"]), int(fseg["n_blocked"])
+            if f_n == 0 and fseg.get("s2_off_all") and (f_b or fseg["trading_days"]):
+                fwd_txt = (f"0 笔成交（S2 停用中）+ {f_b} 笔拦截 · "
+                           f"{fseg['trading_days']} 交易日")
+            elif f_n == 0:
+                fwd_txt = f"0 笔 · {fseg['trading_days']} 交易日（尚无过门事件）"
+            else:
+                fwd_txt = (f"{f_n} 笔，样本积累中（WR {fseg['wr'] * 100:.0f}% · "
+                           f"{fseg['avg_bp']:+.1f}bp/笔）+ {f_b} 笔拦截")
+            fwd_line = (f'<span class="segkey fwd"></span><b>前向段</b> '
+                        f'{esc(fseg["start"])} → {esc(fseg["end"])} · {fwd_txt}'
+                        "——冻结日 2026-07-24 之后为真枪实弹的裸样本外"
+                        "（图中底色微亮区）。")
+        else:
+            fwd_line = ('<span class="segkey fwd"></span><b>前向段</b> 暂无'
+                        "（数据尚未越过冻结存档边界）。")
+        ver_card = f"""
+  <div class="card algover">
+    <div class="av-row"><span class="av-k">算法版本</span>
+      <span class="chip">E8-A+S2 · 冻结 {esc(cur["algo"]["frozen_at"])}（models/e8a）</span>
+      <span class="chip">因果探测器 N3-H · {esc(det_txt)}</span>
+      <span class="chip">数据截至 {esc(cur["data"]["data_through"])}</span>
+      {stale_chip}
+    </div>
+    <p class="av-seg"><span class="segkey hold"></span><b>留出段</b>
+      {esc(hseg["start"]) if hseg else esc(str(d0))} → {esc(hseg["end"]) if hseg else "—"} ·
+      {h_n} 笔成交 + {h_b} 笔 S2 拦截（冻结存档，重放与 frontier_shift / e11 核对一致）；
+      {fwd_line}
+      每日续演由 intel/replay_refresh.py 以<b>冻结参数零改动</b>续算（outputs/replay_current）。</p>
+  </div>"""
+    else:
+        ver_card = """
+  <div class="card algover">
+    <div class="av-row"><span class="av-k">算法版本</span>
+      <span class="chip">E8-A+S2 · 冻结 2026-07-24（models/e8a）</span>
+      <span class="chip warn">数据源：旧静态存档 outputs/e8a_replay（截至留出段末）</span>
+    </div>
+    <p class="av-seg">每日续演数据集缺失——跑
+      <code>.venv/bin/python -m intel.replay_refresh</code> 后本页自动续到最新完整交易日
+      （留出段 / 前向段分段显示）。</p>
+  </div>"""
+
     # ---- 页头「使用策略」固定卡 ----
     spec_card = f"""
   <div class="card rp-spec">
@@ -2331,48 +2494,84 @@ def render_fullsys_view(data: dict | None,
 
     # ---- S2 拦截对照小表（8 笔灰条）----
     blk_rows = "".join(
-        f'<tr class="fs-blkrow"><td class="num">{esc(str(t["et_day"]))} {esc(t["entry_hm"])}</td>'
+        f'<tr class="fs-blkrow"><td class="num">{esc(str(t["et_day"]))} {esc(t["entry_hm"])}'
+        + ('<span class="fwd-mark">前向</span>' if t.get("seg") == "forward" else "")
+        + "</td>"
         f'<td class="num">{t["entry_fill"]:,.2f}</td>'
         f'<td class="num">{t["prob"]:.3f}</td>'
         f'<td class="num">{t["ret"] * 100:+.2f}%</td></tr>'
         for t in trades if t["blocked"]
     )
+    blk_total = 1.0
+    for t in trades:
+        if t["blocked"]:
+            blk_total *= 1 + t["ret"]
+    blk_total -= 1.0
     blk_tbl = (
         '<table class="rp-trades fs-blktbl"><thead><tr><th>入场时刻（ET）</th><th>假想入场价</th>'
         "<th>GBDT 概率</th><th>若成交结果</th></tr></thead>"
         f"<tbody>{blk_rows}</tbody></table>"
-        f'<p class="fs-blknote">被拦 {n_blk} 笔若成交合计 {blk["total"] * 100:+.2f}%'
-        f"（净亏）——方向与开关假设一致，但属同一留出段事后观察，不作加分证据。</p>"
+        f'<p class="fs-blknote">被拦 {n_blk} 笔若成交合计 {blk_total * 100:+.2f}%'
+        "——方向与开关假设是否一致仅作对照；留出段部分属同段事后观察，不作加分证据。</p>"
     ) if blk_rows else '<p class="lg-empty">窗口内无 S2 拦截记录。</p>'
 
-    # ---- 总结卡（年化收益率置顶）----
+    # ---- 总结卡（年化收益率置顶；分段统计：留出段 vs 前向段）----
+    n_kept_h = int(s2["n"])                    # 留出段成交（冻结存档口径）
+    wins_h = sum(1 for t in trades
+                 if not t["blocked"] and t["ret"] > 0
+                 and t.get("seg", "holdout") == "holdout")
+    n_days_h = int(s["window"]["trading_days"])
     dist_txt = (f"止盈 {dist.get('tp', 0)} · 止损 {dist.get('sl', 0)} · "
                 f"超时 {dist.get('timeout', 0)} · 日终 {dist.get('dayend', 0)}")
+    if fseg:
+        f_n, f_b = int(fseg["n_trades"]), int(fseg["n_blocked"])
+        if f_n == 0:
+            f_why = ("S2 停用中——关闸期 0 新交易属正确结果，不是数据缺失"
+                     if fseg.get("s2_off_all") else "尚无过门事件")
+            fwd_stat = (f"<b>0 笔成交</b>（{f_why}）+ {f_b} 笔 S2 拦截 · "
+                        f"{fseg['trading_days']} 交易日，样本积累中")
+        else:
+            fwd_stat = (f"<b>{f_n} 笔</b> · WR {fseg['wr'] * 100:.0f}% · "
+                        f"{fseg['avg_bp']:+.1f}bp/笔 · 累计 "
+                        f"{fseg['total'] * 100:+.2f}% + {f_b} 笔拦截——前向 {f_n} 笔，"
+                        "样本积累中，无统计效力")
+        seg_para = (f'<p class="rs-ep"><b>分段统计</b>：'
+                    f'留出段 {esc(hseg["start"])} → {esc(hseg["end"])}：'
+                    f'{n_kept_h} 笔 · WR {s2["wr"] * 100:.1f}% · '
+                    f'+{s2["avg_bp"]:.1f}bp/笔 · 累计 {s2["total"] * 100:+.2f}%；'
+                    f'前向段 {esc(fseg["start"])} → {esc(fseg["end"])}：{fwd_stat}。'
+                    "前向段是冻结（2026-07-24）后的裸样本外，候选效力最终由它裁决。</p>")
+        sum_title = (f"全系统推演总结 · 留出段 {esc(str(d0))} → "
+                     f"{esc(hseg['end'])} + 前向段 → {esc(str(d1))}")
+    else:
+        seg_para = ""
+        sum_title = f"全系统推演总结 · E8-A+S2 留出段 {esc(str(d0))} → {esc(str(d1))}"
     sum_card = f"""
   <div class="rp-sum" id="fs-sum" hidden role="dialog" aria-label="全系统推演总结">
-    <div class="rs-h"><span>全系统推演总结 · E8-A+S2 留出段 {esc(str(d0))} → {esc(str(d1))}</span>
+    <div class="rs-h"><span>{sum_title}</span>
       <button class="rp-btn" id="fs-sum-close" type="button">关闭</button></div>
-    <div class="fs-ann"><span class="fs-ann-k">年化收益率</span>
+    <div class="fs-ann"><span class="fs-ann-k">年化收益率（留出段口径）</span>
       <span class="fs-ann-v num">≈ {ann10:+.1f}%</span>
       <span class="fs-ann-sub">口径：留出 10 个月总收益 {s2["total"] * 100:+.2f}% 复利年化
       (1{s2["total"] * 100:+.2f}%)^(12/10) − 1；按实际 {s["window"]["cal_days"]} 天算
       ≈ {ann_act:+.1f}%。假想推演口径，含悲观成本，不含税与资金占用。</span></div>
     <div class="rs-grid">
-      <div class="rs-cell"><div class="rs-k">交易笔数</div>
-        <div class="rs-v num">{n_kept} 笔 <span class="sub">≈{n_kept / 10:.1f} 笔/月（10 个月口径）</span></div></div>
-      <div class="rs-cell"><div class="rs-k">胜率</div>
-        <div class="rs-v num">{s2["wr"] * 100:.1f}% <span class="sub">{wins}/{n_kept}；S2 前 62 笔 {alls["wr"] * 100:.1f}%</span></div></div>
+      <div class="rs-cell"><div class="rs-k">交易笔数（留出段）</div>
+        <div class="rs-v num">{n_kept_h} 笔 <span class="sub">≈{n_kept_h / 10:.1f} 笔/月（10 个月口径）</span></div></div>
+      <div class="rs-cell"><div class="rs-k">胜率（留出段）</div>
+        <div class="rs-v num">{s2["wr"] * 100:.1f}% <span class="sub">{wins_h}/{n_kept_h}；S2 前 62 笔 {alls["wr"] * 100:.1f}%</span></div></div>
       <div class="rs-cell"><div class="rs-k">出场分布</div>
         <div class="rs-v num" style="font-size:13px">{dist_txt}</div></div>
       <div class="rs-cell"><div class="rs-k">最大回撤</div>
         <div class="rs-v num">{s2["mtm_mdd"] * 100:.2f}% <span class="sub">bar 级盯市；逐笔口径 {s2["mdd_closed"] * 100:.2f}%</span></div></div>
     </div>
-    <p class="rs-ep"><b>S2 开关贡献</b>：拦截 {n_blk} 笔（若成交合计 {blk["total"] * 100:+.2f}%），
+    {seg_para}
+    <p class="rs-ep"><b>S2 开关贡献（留出段）</b>：拦截 {blk["n"]} 笔（若成交合计 {blk["total"] * 100:+.2f}%），
       总收益 {alls["total"] * 100:+.2f}% → <b>{s2["total"] * 100:+.2f}%</b>，盯市 MDD
       {alls["mtm_mdd"] * 100:.2f}% → {s2["mtm_mdd"] * 100:.2f}%——被删笔净为亏损、方向与
-      假设一致，但这是同一留出段的又一次事后观察（n 62 → {n_kept}），不作为加分证据。</p>
-    <p class="rs-ep"><b>单笔期望</b>：+{s2["avg_bp"]:.1f}bp/笔（tp +0.5% 高频小额），
-      平均 {n_days / max(1, n_kept):.1f} 个交易日一笔——进攻层的「高频小额」与防守层的
+      假设一致，但这是同一留出段的又一次事后观察（n 62 → {n_kept_h}），不作为加分证据。</p>
+    <p class="rs-ep"><b>单笔期望（留出段）</b>：+{s2["avg_bp"]:.1f}bp/笔（tp +0.5% 高频小额），
+      平均 {n_days_h / max(1, n_kept_h):.1f} 个交易日一笔——进攻层的「高频小额」与防守层的
       「稀疏避险」互补，合成整套系统的出手节奏。</p>
     <div class="rs-note">诚实注脚：① 留出期为 2025-10 → 2026-07 <b>单一时段</b>（TSLA
       本段整体下跌，抄底事件密集——换一段行情未必复现）；② 配方出身 n=62 的<b>事后网格</b>，
@@ -2381,9 +2580,15 @@ def render_fullsys_view(data: dict | None,
       假想推演，<b>不构成任何上钱依据</b>。</div>
   </div>"""
 
+    h_sub = (f"E8-A+S2 留出段 {esc(str(d0))} → {esc(hseg['end'])} + 前向续演 → "
+             f"{esc(str(d1))} · {n_days} 交易日 · 成交 {n_kept} 笔 · S2 拦截 "
+             f"{n_blk} 笔 · 逐笔写入交易日志 · 播完出总结") if fseg else (
+             f"E8-A+S2 留出段 {esc(str(d0))} → {esc(str(d1))} · {n_days} 交易日 · "
+             f"成交 {n_kept} 笔 · S2 拦截 {n_blk} 笔 · 逐笔写入交易日志 · 播完出总结")
     return f"""
 <section id="fs">
-  <h2><span class="sec-no">R2</span>全系统推演<span class="h-sub">E8-A+S2 留出段 {esc(str(d0))} → {esc(str(d1))} · {n_days} 交易日 · 成交 {n_kept} 笔 · S2 拦截 {n_blk} 笔 · 逐笔写入交易日志 · 播完出总结</span></h2>
+  <h2><span class="sec-no">R2</span>全系统推演<span class="h-sub">{h_sub}</span></h2>
+  {ver_card}
   {spec_card}
   <div class="card chartcard">
     <div class="rp-controls">
@@ -2430,12 +2635,16 @@ def render_fullsys_view(data: dict | None,
         {blk_tbl}
       </div>
     </div>
-    <p class="footnote">逐笔交易由 research/e8a_trades_export.py 从 models/e8a/holdout_ref.csv
-    的 62 笔留出入场重放（E9 悲观结算），与 outputs/e8_pooled/frontier_shift.csv、
-    outputs/e11_bear_switch/switch_table.csv 存档核对一致后落盘 outputs/e8a_replay/。
-    S2 关闸底纹 = 距 252 日高点回撤 &gt;20%（昨收判定）。防守层（N3-H 探测器）在本窗口
-    全程失明（Musk 归档止于 2025-05-08）且无触发，日志首行如实标注。播放到达终点自动弹出
-    总结卡（年化收益率置顶），也可随时点「总结」。假想推演，不碰真钱。</p>
+    <p class="footnote">留出段逐笔交易由 research/e8a_trades_export.py 从
+    models/e8a/holdout_ref.csv 的 62 笔留出入场重放（E9 悲观结算），与
+    outputs/e8_pooled/frontier_shift.csv、outputs/e11_bear_switch/switch_table.csv
+    存档核对一致；前向段由 intel/replay_refresh.py 以<b>冻结参数零改动</b>（检测网格/
+    特征/模型/门控/几何/S2 全读 models/e8a 冻结件）对增量数据续算，落盘
+    outputs/replay_current/（缺失时本页降级回旧静态存档 outputs/e8a_replay/）。
+    S2 关闸底纹 = 距 252 日高点回撤 &gt;20%（昨收判定）；前向段底纹微亮 = 冻结后
+    真样本外。防守层（N3-H 探测器）历史归档失明段与前向值班状态均如实写入日志。
+    播放到达终点自动弹出总结卡（年化收益率置顶），也可随时点「总结」。
+    假想推演，不碰真钱。</p>
   </div>
   {sum_card}
   <script type="application/json" id="fs-data">{data_json}</script>
@@ -3944,6 +4153,7 @@ _LIGHT_TOKENS = """
   --tier3:#c9ac64; --tier3-ink:#3a2e14;
   --m-insider:#7961be; --m-pit:#418d59; --m-fake:#c45a10; --m-hypo:#ab3378;
   --link:#8a6520;
+  --fwd-wash:rgba(255,255,255,.6);
 """
 
 _CSS = """
@@ -3965,6 +4175,7 @@ _CSS = """
   --tier3:#6c573a; --tier3-ink:#f5efdd;
   --m-insider:#a590d8; --m-pit:#5fb287; --m-fake:#df8448; --m-hypo:#d4529a;
   --link:#d6af6e;
+  --fwd-wash:rgba(242,239,230,.055);
   --font-serif:"Songti SC","STSong","Noto Serif CJK SC","Source Han Serif SC",serif;
   --font-sans:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
@@ -4257,6 +4468,24 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .band-edge { stroke: var(--crit); stroke-width: 1; stroke-dasharray: 3 3; opacity: .6; }
 .band-tag { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px;
   fill: var(--crit-text); }
+/* 前向段（冻结后真样本外）：底色微亮 + 虚线边界 */
+.fwd-wash { fill: var(--fwd-wash); }
+.fwd-edge { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 3; opacity: .55; }
+.fwd-tag { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px;
+  fill: var(--accent); opacity: .9; }
+.fwd-mark { font-family: var(--font-mono); font-size: 10px; color: var(--accent);
+  border: 1px solid var(--accent-rule); border-radius: 3px; padding: 0 4px;
+  margin-left: 6px; letter-spacing: 1px; }
+/* 算法版本卡 */
+.algover { padding: 12px 18px; margin-bottom: 12px; }
+.av-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.av-k { font-family: var(--font-serif); font-weight: 700; letter-spacing: .12em;
+  margin-right: 4px; }
+.av-seg { margin: 8px 0 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.7; }
+.segkey { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  margin: 0 6px 0 2px; vertical-align: -1px; border: 1px solid var(--border);
+  background: var(--surface-2); }
+.segkey.fwd { background: var(--fwd-wash); border-color: var(--accent); }
 .mk-halo { stroke: var(--surface); stroke-width: 4.5; fill: none; }
 .mk-tag { font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; }
 .tv-hit { fill: transparent; cursor: pointer; }
@@ -5381,7 +5610,7 @@ def render(db_path: Path = DB_PATH) -> str:
             replay_days, dates, closes, finra, load_trigger_cards(),
             load_daily_opens(), load_app_results(),
         )
-        fullsys_html = render_fullsys_view(load_e8a_replay(), replay_days)
+        fullsys_html = render_fullsys_view(load_fullsys_data(), replay_days)
         body.append(
             "<main>" + render_symbol_tabs() + render_view_tabs()
             + f'<div class="vw act" id="view-live">{"".join(rendered)}</div>'

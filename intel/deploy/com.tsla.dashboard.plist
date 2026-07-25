@@ -3,8 +3,12 @@
 <plist version="1.0">
 <dict>
   <!-- 哨兵仪表盘：每 5 分钟重新生成 data/intel/dashboard.html（只读渲染，不采集）。
-       模板默认不 load；启用：
+       链尾挂 intel.replay_refresh（推演每日续演：增量拉 5m 数据 + 冻结管线交易续算，
+       输入无变化时秒退，不拖慢周期；用 `;` 分隔——续演失败不影响下轮页面生成，
+       新数据在下一个 5 分钟周期被页面读到）。
+       模板默认不 load；启用/更新后重载：
          cp intel/deploy/com.tsla.dashboard.plist ~/Library/LaunchAgents/ && \
+           launchctl unload ~/Library/LaunchAgents/com.tsla.dashboard.plist 2>/dev/null; \
            launchctl load ~/Library/LaunchAgents/com.tsla.dashboard.plist
        与 com.tsla.sentinel / com.tsla.shadow 的 label 独立，互不冲突。 -->
   <key>Label</key><string>com.tsla.dashboard</string>
@@ -12,7 +16,7 @@
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>/Users/tom/project/tsla/.venv/bin/python -m intel.dashboard &amp;&amp; /Users/tom/project/tsla/.venv/bin/python -m intel.playbook</string>
+    <string>/Users/tom/project/tsla/.venv/bin/python -m intel.dashboard &amp;&amp; /Users/tom/project/tsla/.venv/bin/python -m intel.playbook; /Users/tom/project/tsla/.venv/bin/python -m intel.replay_refresh</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/tom/project/tsla</string>
   <key>StartInterval</key><integer>300</integer>
