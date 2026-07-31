@@ -413,6 +413,8 @@ def build(force: bool, offline: bool) -> None:
     if not force and old_meta and old_meta.get("inputs_sig") == sig:
         print(f"[replay_refresh] 输入无变化（数据截至 "
               f"{old_meta['data']['data_through']}）——已是最新，跳过重算")
+        if not (OUT / "sandbox.json").exists():   # 沙盘缺失单独补（不整链重算）
+            _refresh_sandbox()
         return
 
     from research.e9_frontier_search import BarSet
@@ -546,6 +548,19 @@ def build(force: bool, offline: bool) -> None:
           f"前向段 {n_fwd_kept} 笔成交 + {n_fwd_blk} 笔 S2 拦截"
           f"（{fwd_stats['trading_days']} 交易日）")
     print(f"written: {OUT}/trades.csv, daily.csv, meta.json")
+    _refresh_sandbox(bars=bars, bs=bs)
+
+
+def _refresh_sandbox(bars=None, bs=None) -> None:
+    """what-if 沙盘预结算（intel/sandbox_export）——失败不拖垮续演链，如实打印."""
+    try:
+        from intel.sandbox_export import export_sandbox
+        export_sandbox(bars=bars, bs=bs)
+    except SystemExit as e:            # 导出侧核对失败（漂移中止）——如实转告
+        print(f"[replay_refresh] 沙盘导出中止：{e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[replay_refresh] 沙盘导出失败（页面将降级为生成指引）："
+              f"{type(e).__name__}: {e}")
 
 
 def main() -> None:

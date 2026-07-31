@@ -18,7 +18,10 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
      首选 outputs/replay_current（intel/replay_refresh.py 每日续演：冻结管线
      零改动续算到最新完整交易日，留出段与存档核对一致、前向段 segment=forward
      标记），缺失时降级回旧静态存档 outputs/e8a_replay；页头算法版本卡 +
-     留出/前向分段统计；同款播放器骨架（交易密，速度预设 20x）。
+     留出/前向分段统计；同款播放器骨架（交易密，速度预设 20x）；
+     页内折叠区「what-if 沙盘」= gate 滑杆 / tp×sl 九宫格 / S2 开关 client 端
+     即时重算（数据 outputs/replay_current/sandbox.json，intel/sandbox_export
+     预结算网格；常驻护栏横幅 + 尝试计数 + 事后选择提示，沙盘 ≠ 结论）。
 
 板块（等宽序号按实际渲染顺序编排）：
   顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
@@ -862,6 +865,25 @@ def load_replay_current() -> dict | None:
 def load_fullsys_data() -> dict | None:
     """全系统推演数据源：首选每日续演数据集，缺失降级回旧静态存档（meta=None）。"""
     return load_replay_current() or load_e8a_replay()
+
+
+def load_sandbox() -> dict | None:
+    """outputs/replay_current/sandbox.json → what-if 沙盘预结算网格.
+
+    intel/sandbox_export.py 产物（replay_refresh 链自动更新）：65 事件 × 9 几何
+    组合的悲观预结算 + 冻结基线（已与 EXP_S2 存档核对）。缺失/坏行 → None
+    （沙盘折叠区降级为生成指引，不炸页面）。
+    """
+    try:
+        sbx = json.loads(
+            (REPLAY_CURRENT_DIR / "sandbox.json").read_text(encoding="utf-8"))
+        if (not sbx.get("events") or "baseline" not in sbx
+                or "tp_grid" not in sbx or "sl_grid" not in sbx
+                or "frozen_ci" not in sbx or "window" not in sbx):
+            return None
+        return sbx
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def load_app_results() -> dict | None:
@@ -2234,8 +2256,123 @@ def render_replay_modebar() -> str:
     )
 
 
+def render_sandbox(sbx: dict | None) -> str:
+    """what-if 沙盘（折叠区）：gate/几何/S2 改动 → client 端即时重算历史模拟.
+
+    数据 = outputs/replay_current/sandbox.json（每事件 × 9 几何组合悲观预结算，
+    冻结组合与 trades.csv / EXP_S2 存档核对一致）。纯探索工具：常驻护栏横幅 +
+    事后选择提示，明确「沙盘 ≠ 结论」。缺失 → 生成指引（降级不炸）。
+    """
+    if not sbx:
+        return """
+  <details class="card sbx" id="sbx">
+    <summary>WHAT-IF 沙盘<span class="sbx-sub">改参数即时重算历史模拟——数据缺失，展开看生成方式</span></summary>
+    <div class="sbx-body"><p class="empty">outputs/replay_current/sandbox.json 不可读——跑
+      <code>.venv/bin/python -m intel.sandbox_export</code>（或等 replay_refresh 链下次续演）后本区可用。</p></div>
+  </details>"""
+
+    b = sbx["baseline"]
+    w = sbx["window"]
+    gu = sbx["gate_ui"]
+    n_ev = int(sbx["n_events"])
+    n_fwd = sum(1 for e in sbx["events"] if e.get("seg") == "forward")
+
+    def pct(v: float | None, dp: int = 2) -> str:
+        return "—" if v is None else f"{v * 100:+.{dp}f}%"
+
+    # 九宫格（行 = tp，列 = sl；冻结格标记）
+    cells = []
+    for ti, tp in enumerate(sbx["tp_grid"]):
+        for si, sl in enumerate(sbx["sl_grid"]):
+            ci = ti * len(sbx["sl_grid"]) + si
+            frozen = ci == int(sbx["frozen_ci"])
+            cells.append(
+                f'<button type="button" class="sbx-cell{" act" if frozen else ""}" '
+                f'data-ci="{ci}" aria-pressed="{"true" if frozen else "false"}">'
+                f"tp+{tp * 100:g}%<br>sl−{sl * 100:g}%"
+                + ('<span class="sbx-frozen">★ 冻结</span>' if frozen else "")
+                + "</button>")
+
+    fci = int(sbx["frozen_ci"])
+    f_tp = sbx["tp_grid"][fci // len(sbx["sl_grid"])]
+    f_sl = sbx["sl_grid"][fci % len(sbx["sl_grid"])]
+    base_lab = f'gate {gu["default"]:g} · tp+{f_tp * 100:g}%/sl−{f_sl * 100:g}% · S2 开'
+    base_n = f'{int(b["n"])} 笔（拦 {int(b["n_blocked"])}）'
+    wr_txt = "—" if b["wr"] is None else f'{b["wr"] * 100:.1f}%'
+    sbx_json = json.dumps(sbx, separators=(",", ":"), ensure_ascii=False)
+    return f"""
+  <details class="card sbx" id="sbx">
+    <summary>WHAT-IF 沙盘<span class="sbx-sub">改 gate / 几何 / S2，即时重算同一段历史
+      （{esc(w["start"])} → {esc(w["end"])} · {n_ev} 个过门事件）——纯模拟探索，不产生结论</span></summary>
+    <div class="sbx-body">
+      <div class="sbx-banner" id="sbx-banner"><b>沙盘探索 ≠ 结论。</b>
+        <span id="sbx-try">尚未改动参数（当前显示 = 冻结基线）。</span>
+        你在<b>同一段历史</b>上翻组合——尝试越多，好看结果越可能只是运气（多重比较）。
+        <b>冻结基线（{esc(base_lab)}）是唯一经过完整协议验证的配置</b>，其余任何组合均无验证效力。</div>
+      <div class="sbx-controls">
+        <div class="sbx-ctl">
+          <div class="sbx-k">GATE 阈值（事件按 GBDT prob 过滤）</div>
+          <div class="sbx-gate-row">
+            <input type="range" id="sbx-gate" min="{gu["min"]:g}" max="{gu["max"]:g}"
+              step="{gu["step"]:g}" value="{gu["default"]:g}" aria-label="gate 阈值">
+            <span class="num" id="sbx-gate-val">{gu["default"]:.4f}</span>
+          </div>
+          <div class="sbx-hint">冻结门槛 {gu["default"]:g}：往低拉不会新增事件——低于门槛的
+            入场从未预登记，沙盘只能收紧、不能放宽。</div>
+        </div>
+        <div class="sbx-ctl">
+          <div class="sbx-k">几何（tp × sl 九宫格 · timeout 48×5m / 日内强平不变）</div>
+          <div class="sbx-grid" role="group" aria-label="tp/sl 几何选择">{"".join(cells)}</div>
+        </div>
+        <div class="sbx-ctl">
+          <div class="sbx-k">S2 开关（熊市关闸）</div>
+          <label class="sbx-s2lab"><input type="checkbox" id="sbx-s2" checked>
+            开 = 按历史 S2 拦截（被拦笔占流位、不入权益）；关 = 忽略开关全部成交</label>
+          <button id="sbx-reset" class="rp-btn" type="button">回到冻结基线</button>
+        </div>
+      </div>
+      <div class="sbx-tblwrap"><table class="sbx-tbl">
+        <thead><tr><th>配置</th><th>成交</th><th>胜率</th><th>总收益</th>
+          <th>年化*</th><th>最大回撤†</th></tr></thead>
+        <tbody>
+          <tr class="sbx-cur"><td id="sbx-c-cfg">{esc(base_lab)}</td>
+            <td class="num" id="sbx-c-n">{esc(base_n)}</td>
+            <td class="num" id="sbx-c-wr">{esc(wr_txt)}</td>
+            <td class="num" id="sbx-c-total">{esc(pct(b["total"]))}</td>
+            <td class="num" id="sbx-c-ann">{esc(pct(b["ann"], 1))}</td>
+            <td class="num" id="sbx-c-mdd">{b["mdd"] * 100:.2f}%</td></tr>
+          <tr class="sbx-base"><td>冻结基线 {esc(base_lab)} ★</td>
+            <td class="num" id="sbx-b-n">{esc(base_n)}</td>
+            <td class="num" id="sbx-b-wr">{esc(wr_txt)}</td>
+            <td class="num" id="sbx-b-total">{esc(pct(b["total"]))}</td>
+            <td class="num" id="sbx-b-ann">{esc(pct(b["ann"], 1))}</td>
+            <td class="num" id="sbx-b-mdd">{b["mdd"] * 100:.2f}%</td></tr>
+          <tr class="sbx-delta"><td>Δ（当前 − 基线）</td>
+            <td class="num" id="sbx-d-n">—</td><td class="num" id="sbx-d-wr">—</td>
+            <td class="num" id="sbx-d-total">—</td><td class="num" id="sbx-d-ann">—</td>
+            <td class="num" id="sbx-d-mdd">—</td></tr>
+        </tbody>
+      </table></div>
+      <div class="sbx-cherry" id="sbx-cherry" hidden><b>这是事后选择，无验证效力。</b>
+        当前组合在同一段历史上好于冻结基线——但它出身「翻到好看为止」的翻找，
+        未经过任何留出/前向协议；组合翻得越多，翻出运气的概率越大。</div>
+      <div class="sbx-cherry" id="sbx-selfcheck" hidden>沙盘自校验失败：页面重算的冻结
+        基线与导出侧不一致——本区数字不可信，先重跑 intel/sandbox_export。</div>
+      <p class="sbx-note">口径：每事件按所选几何独立悲观结算（detail_trade 同机制：费
+        1bp/边 + 滑点 2bp、TP 限价需严格穿越、SL 停损市价含跳空、同 bar 双触发算 SL、
+        timeout 48×5m、日内强平），流内非重叠按各几何自己的出场 bar 贪心重排；事件全集 =
+        gate 通过的 {n_ev} 个入场（62 留出 + {n_fwd} 前向）。*年化按沙盘窗口实际
+        {int(w["cal_days"])} 天复利折算——与总结卡「留出段 10 个月口径」年化不同源，
+        对比请看总收益。†最大回撤为逐笔平仓口径（bar 级盯市回撤会更深，见总结卡；
+        沙盘不逐组合算盯市路径）。尝试计数存于本浏览器 localStorage，跨会话累计。</p>
+    </div>
+    <script type="application/json" id="sbx-data">{sbx_json}</script>
+  </details>"""
+
+
 def render_fullsys_view(data: dict | None,
-                        det_days: list[dict] | None = None) -> str:
+                        det_days: list[dict] | None = None,
+                        sbx: dict | None = None) -> str:
     """全系统推演页：E8-A+S2 留出段逐笔回放播放器 + 交易日志 + 总结卡。
 
     数据全部来自 outputs/e8a_replay（重放导出 + 存档核对）；缺失 → 降级空态卡。
@@ -2679,6 +2816,7 @@ def render_fullsys_view(data: dict | None,
     播放到达终点自动弹出总结卡（年化收益率置顶），也可随时点「总结」。
     假想推演，不碰真钱。</p>
   </div>
+  {render_sandbox(sbx)}
   {sum_card}
   <script type="application/json" id="fs-data">{data_json}</script>
 </section>"""
@@ -4922,6 +5060,61 @@ main > .sym-tabs { margin-top: 26px; }
   font-variant-numeric: tabular-nums; }
 .fs-ann-sub { flex: 1 1 260px; font-size: 11px; color: var(--muted);
   line-height: 1.55; }
+/* -- what-if 沙盘（折叠区） -- */
+details.sbx { margin-top: 12px; }
+details.sbx > summary { cursor: pointer; padding: 12px 16px; display: flex;
+  gap: 10px; align-items: baseline; flex-wrap: wrap; list-style-position: outside;
+  font: 600 12px var(--font-mono); letter-spacing: .1em; color: var(--ink-2); }
+details.sbx > summary:hover { color: var(--accent); }
+details.sbx .sbx-sub { font: 400 11px var(--font-sans); color: var(--muted);
+  letter-spacing: 0; line-height: 1.6; }
+.sbx-body { padding: 2px 16px 14px; }
+.sbx-banner { border: 1px solid var(--warn); background: var(--warn-wash);
+  border-radius: 6px; padding: 10px 12px; font-size: 12.5px;
+  color: var(--warn-text); line-height: 1.75; margin-bottom: 14px; }
+.sbx-cherry { border: 1px solid var(--crit); background: var(--crit-wash);
+  border-radius: 6px; padding: 9px 12px; font-size: 12.5px; font-weight: 600;
+  color: var(--crit-text); line-height: 1.7; margin-top: 10px; }
+.sbx-controls { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr; gap: 18px;
+  margin-bottom: 14px; }
+@media (max-width: 920px){ .sbx-controls { grid-template-columns: 1fr; } }
+.sbx-k { font: 600 10px var(--font-mono); letter-spacing: .08em;
+  color: var(--muted); margin-bottom: 8px; }
+.sbx-gate-row { display: flex; gap: 10px; align-items: center; }
+#sbx-gate { flex: 1; min-width: 120px; accent-color: var(--accent); }
+#sbx-gate-val { font-size: 13px; font-weight: 700; color: var(--ink); }
+.sbx-hint { font-size: 11px; color: var(--muted); margin-top: 6px;
+  line-height: 1.6; }
+.sbx-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+  max-width: 360px; }
+.sbx-cell { appearance: none; cursor: pointer; font: 600 11px var(--font-mono);
+  color: var(--ink-2); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 4px; padding: 7px 4px;
+  line-height: 1.5; text-align: center; }
+.sbx-cell:hover { border-color: var(--accent); color: var(--accent); }
+.sbx-cell.act { background: var(--accent-wash); border-color: var(--accent);
+  color: var(--accent); }
+.sbx-frozen { display: block; font: 600 9px var(--font-mono);
+  letter-spacing: .14em; color: var(--muted); margin-top: 2px; }
+.sbx-cell.act .sbx-frozen { color: var(--accent); }
+.sbx-s2lab { display: flex; gap: 8px; align-items: flex-start; cursor: pointer;
+  font-size: 12px; color: var(--ink-2); line-height: 1.65; margin-bottom: 10px; }
+#sbx-s2 { accent-color: var(--accent); margin-top: 2px; flex: none; }
+.sbx-tblwrap { overflow-x: auto; }
+.sbx-tbl { width: 100%; min-width: 560px; border-collapse: collapse;
+  font-size: 12.5px; }
+.sbx-tbl th { font: 600 10px var(--font-mono); letter-spacing: .06em;
+  color: var(--muted); text-align: right; padding: 7px 10px;
+  border-bottom: 1px solid var(--border); }
+.sbx-tbl th:first-child, .sbx-tbl td:first-child { text-align: left; }
+.sbx-tbl td { padding: 8px 10px; border-bottom: 1px solid var(--border);
+  color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+.sbx-tbl tr:last-child td { border-bottom: 0; }
+.sbx-cur td { font-weight: 700; color: var(--ink); }
+.sbx-base td { color: var(--muted); }
+.sbx-delta td { font-size: 11.5px; color: var(--muted); }
+.sbx-note { font-size: 11px; color: var(--muted); margin: 12px 0 0;
+  line-height: 1.7; }
 
 /* ===== footer ===== */
 .footnote { font-size: 12px; color: var(--muted); margin: 8px 16px 12px; }
@@ -5571,6 +5764,156 @@ _FS_JS = """
 """
 
 
+# what-if 沙盘：client 端即时重算（数据 = sandbox.json 预结算网格）。
+# 不经 %-格式化，直接拼接。
+_SBX_JS = """
+/* what-if 沙盘：gate 过滤 → 贪心非重叠流（各几何用自己的出场 bar）→ S2 →
+   笔数/胜率/总收益/年化/MDD；与 Python 导出侧同一算法，基线自校验。 */
+(function () {
+  var box = document.getElementById("sbx");
+  var dataEl = document.getElementById("sbx-data");
+  if (!box || !dataEl) return;
+  var D = null;
+  try { D = JSON.parse(dataEl.textContent); } catch (e) {}
+  if (!D || !D.events || !D.events.length) return;
+  function $(id) { return document.getElementById(id); }
+  var gateEl = $("sbx-gate"), gateVal = $("sbx-gate-val"), s2El = $("sbx-s2");
+  var tryEl = $("sbx-try"), cherry = $("sbx-cherry"), selfchk = $("sbx-selfcheck");
+  var resetBtn = $("sbx-reset");
+  var cells = box.querySelectorAll(".sbx-cell");
+  if (!gateEl || !s2El) return;
+  var BASE = { g: D.gate_ui["default"], ci: D.frozen_ci, s2: true };
+  var cfg = { g: BASE.g, ci: BASE.ci, s2: BASE.s2 };
+  var calDays = Math.max(1, D.window.cal_days);
+  var LS_KEY = "tsla_sbx_tries";
+  var tries = 0;
+  try { tries = parseInt(localStorage.getItem(LS_KEY), 10) || 0; } catch (e) {}
+  var touched = false;
+
+  function compute(g, ci, s2on) {
+    var busy = -1, rets = [], nblk = 0, i, ev, c;
+    for (i = 0; i < D.events.length; i++) {
+      ev = D.events[i];
+      if (ev.p < g - 1e-9 || ev.epos <= busy) continue;
+      c = ev.c[ci];
+      busy = c[0];
+      if (s2on && ev.s2) { nblk++; continue; }  /* 被拦笔占流位、不入权益 */
+      rets.push(c[1]);
+    }
+    var n = rets.length, wins = 0, eq = 1, peak = 1, mdd = 0, k, dd;
+    for (k = 0; k < n; k++) {
+      if (rets[k] > 0) wins++;
+      eq *= 1 + rets[k];
+      if (eq > peak) peak = eq;
+      dd = eq / peak - 1;
+      if (dd < mdd) mdd = dd;
+    }
+    var total = eq - 1;
+    return { n: n, nblk: nblk, wr: n ? wins / n : null, total: total,
+             ann: Math.pow(1 + total, 365 / calDays) - 1, mdd: mdd };
+  }
+  var baseStats = compute(BASE.g, BASE.ci, BASE.s2);
+  /* 自校验：JS 重算的冻结基线必须与导出侧（已对存档）一致，漂移即亮警示 */
+  var B = D.baseline || {};
+  if (B.n !== baseStats.n || Math.abs((B.total || 0) - baseStats.total) > 1e-6) {
+    if (selfchk) selfchk.hidden = false;
+  }
+
+  function pctf(v, dp) {
+    return v == null ? "—" : (v >= 0 ? "+" : "") + (v * 100).toFixed(dp) + "%";
+  }
+  function geoLab(ci) {
+    var tp = Math.round(D.tp_grid[Math.floor(ci / D.sl_grid.length)] * 1e4) / 100;
+    var sl = Math.round(D.sl_grid[ci % D.sl_grid.length] * 1e4) / 100;
+    return "tp+" + tp + "%/sl\\u2212" + sl + "%";
+  }
+  function cfgLab() {
+    return "gate " + (+cfg.g).toFixed(4).replace(/0+$/, "").replace(/\\.$/, "") +
+      " \\u00b7 " + geoLab(cfg.ci) + " \\u00b7 S2 " + (cfg.s2 ? "\\u5f00" : "\\u5173");
+  }
+  function ppd(a, b2, dp) {  /* Δ 以百分点计 */
+    if (a == null || b2 == null) return "—";
+    var d2 = (a - b2) * 100;
+    return (d2 >= 0 ? "+" : "") + d2.toFixed(dp) + "pp";
+  }
+  function isBase() {
+    return cfg.ci === BASE.ci && cfg.s2 === BASE.s2 &&
+      Math.abs(cfg.g - BASE.g) < 1e-9;
+  }
+  function recalc() {
+    var s = compute(cfg.g, cfg.ci, cfg.s2);
+    $("sbx-c-cfg").textContent = cfgLab() + (isBase() ? "（= 基线）" : "");
+    $("sbx-c-n").textContent = s.n + " \\u7b14\\uff08\\u62e6 " + s.nblk + "\\uff09";
+    $("sbx-c-wr").textContent = s.wr == null ? "—" : (s.wr * 100).toFixed(1) + "%";
+    $("sbx-c-total").textContent = pctf(s.total, 2);
+    $("sbx-c-ann").textContent = s.n ? pctf(s.ann, 1) : "—";
+    $("sbx-c-mdd").textContent = (s.mdd * 100).toFixed(2) + "%";
+    $("sbx-d-n").textContent = (s.n - baseStats.n >= 0 ? "+" : "") +
+      (s.n - baseStats.n) + " \\u7b14";
+    $("sbx-d-wr").textContent = ppd(s.wr, baseStats.wr, 1);
+    $("sbx-d-total").textContent = ppd(s.total, baseStats.total, 2);
+    $("sbx-d-ann").textContent = s.n ? ppd(s.ann, baseStats.ann, 1) : "—";
+    $("sbx-d-mdd").textContent = ppd(s.mdd, baseStats.mdd, 2);
+    if (cherry)
+      cherry.hidden = !(!isBase() && s.total > baseStats.total + 1e-12);
+    return s;
+  }
+  function bump() {  /* 每次参数改动累计一次尝试（localStorage 跨会话） */
+    touched = true;
+    tries += 1;
+    try { localStorage.setItem(LS_KEY, String(tries)); } catch (e) {}
+    if (tryEl)
+      tryEl.textContent = "\\u4f60\\u6b63\\u5728\\u540c\\u4e00\\u6bb5\\u5386\\u53f2" +
+        "\\u4e0a\\u5c1d\\u8bd5\\u7b2c " + tries + " \\u79cd\\u7ec4\\u5408" +
+        "\\uff08\\u8de8\\u4f1a\\u8bdd\\u7d2f\\u8ba1\\uff09\\u3002";
+  }
+  if (tries > 0 && tryEl)
+    tryEl.textContent = "\\u5c1a\\u672a\\u6539\\u52a8\\u53c2\\u6570\\uff08\\u5f53" +
+      "\\u524d = \\u51bb\\u7ed3\\u57fa\\u7ebf\\uff1b\\u5386\\u53f2\\u7d2f\\u8ba1" +
+      "\\u5df2\\u8bd5 " + tries + " \\u79cd\\u7ec4\\u5408\\uff09\\u3002";
+
+  gateEl.addEventListener("input", function () {
+    cfg.g = parseFloat(gateEl.value) || BASE.g;
+    gateVal.textContent = cfg.g.toFixed(4);
+    recalc();
+  });
+  gateEl.addEventListener("change", bump);  /* 拖动松手才计一次尝试 */
+  cells.forEach(function (b2) {
+    b2.addEventListener("click", function () {
+      var ci = parseInt(b2.getAttribute("data-ci"), 10) || 0;
+      if (ci === cfg.ci) return;
+      cfg.ci = ci;
+      cells.forEach(function (x2) {
+        var on = x2 === b2;
+        x2.classList.toggle("act", on);
+        x2.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      bump(); recalc();
+    });
+  });
+  s2El.addEventListener("change", function () {
+    cfg.s2 = !!s2El.checked;
+    bump(); recalc();
+  });
+  if (resetBtn) resetBtn.addEventListener("click", function () {
+    cfg = { g: BASE.g, ci: BASE.ci, s2: BASE.s2 };  /* 回基线不计尝试 */
+    gateEl.value = BASE.g; gateVal.textContent = (+BASE.g).toFixed(4);
+    s2El.checked = true;
+    cells.forEach(function (x2) {
+      var on = parseInt(x2.getAttribute("data-ci"), 10) === BASE.ci;
+      x2.classList.toggle("act", on);
+      x2.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    recalc();
+  });
+  recalc();
+  window.__sbx = { compute: compute, recalc: recalc, base: baseStats,
+                   get cfg() { return cfg; }, get tries() { return tries; },
+                   get touched() { return touched; } };
+})();
+"""
+
+
 # 情报流层级筛选（P1-1c）。不经 %-格式化，直接拼接。
 _FEED_JS = """
 (function () {
@@ -5681,7 +6024,8 @@ def render(db_path: Path = DB_PATH) -> str:
             replay_days, dates, closes, finra, load_trigger_cards(),
             load_daily_opens(), load_app_results(),
         )
-        fullsys_html = render_fullsys_view(load_fullsys_data(), replay_days)
+        fullsys_html = render_fullsys_view(load_fullsys_data(), replay_days,
+                                           load_sandbox())
         body.append(
             "<main>" + render_symbol_tabs() + render_view_tabs()
             + f'<div class="vw act" id="view-live">{"".join(rendered)}</div>'
@@ -5717,6 +6061,7 @@ def render(db_path: Path = DB_PATH) -> str:
         + _TV_JS
         + _RP_JS
         + _FS_JS
+        + _SBX_JS
         + _FEED_JS
         + "</script>\n</body>\n</html>\n"
     )
