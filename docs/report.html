@@ -188,6 +188,7 @@ footer code { font-size: 12px; }
   <div class="toc-title">目录</div>
   <a href="#verdict">总判断</a>
   <a href="#progress">执行进度</a>
+  <a href="#intel">情报线与探测器</a>
   <a href="#roadmap">路线图</a>
   <a href="#src">src/ 审查</a>
   <a href="#live">live_trading/ 审查</a>
@@ -272,6 +273,42 @@ footer code { font-size: 12px; }
     <li><strong>GBDT 过滤器管线</strong>：<code>research/ml_filter.py</code>（防泄漏特征 + purged walk-forward）。60 天数据结论：OOF AUC 0.485 = 无信号；且发现 v_stats 事件表存在幸存者偏差（只录成功反弹），深数据重跑前需修。</li>
     <li><strong>Alpaca 数据接入</strong>：<code>src/alpaca_data.py</code> 就绪，等 key 写入 <code>.env</code> 后一条命令拉 2 年分钟数据。</li>
   </ul>
+</section>
+
+<section id="intel">
+  <h2>情报线与因果探测器<span class="sec-note">2026-07-24 立项，N 系列实验 · 详见 docs/strategy-lab.md 与 docs/intel-framework.md</span></h2>
+  <p>核心命题（用户）：情报是高位者放出的信号或事实——把「高位者的法定披露轨迹」变成可回测、可前向验证的特征。红线：只用公开合法渠道。原则：机读事实类情报（带公开时间戳）可历史回演，LLM 叙事判断类只能前向积累。</p>
+
+  <h3>N1–N6：从「从古看今」到三线会师再到拆股审判</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th>实验</th><th>假设 / 设计</th><th>裁决</th></tr>
+    <tr><td>N1 历史事件研究</td><td>Form 4 / 8-K / FOMC / Musk 推文的公开时刻之后有可预测价格影响</td><td>❌ <strong>机读高位者信号无独立可交易 alpha</strong>——内部人买入全历史仅 11 笔且训练/验证方向相反；8-K 1.01 的 +124bp 过不了 Bonferroni×108；Musk 推文字符串匹配全不显著（叙事类必须走前向 LLM）。残值转特征与前向通道</td></tr>
+    <tr><td>N2 布局痕迹 lead-lag</td><td>「建仓→放风→散户接盘」在 T0 渠道（13D/G、Form 144、空头利益、暗池）留痕</td><td>吸筹链条不可观测；<strong>唯一不被动量解释的幸存者：空头利益跳升</strong>——前兆组与对照组过去收益几乎相同，之后 20 日差 −840bp（p&lt;0.0005 过 Bonferroni）。定位=做多的风险过滤特征，非收益信号</td></tr>
+    <tr><td>N3-H 探测器历史推演</td><td>幸存信号做成状态机，在未参与规则发现的考场段（2023-07→2026-07）逐日走步</td><td>🟢 方向性通过：16 次触发聚成 2 段 risk-off，<strong>2/2 判对</strong>；覆盖 B&amp;H +32.6%→+56.5%（+24pp），但块 bootstrap p=0.14 只算方向性证据、MDD 无改善。最重要发现=<strong>窄谱盲区</strong>：2024-12→2025-04 大回撤期间空头在回补，探测器只防「空头知情型」下跌——与 S2 回撤开关盲区不重叠、天然互补</td></tr>
+    <tr><td>N4 黄金坑逆向审计</td><td>从答案倒推：27 个真/假坑逐坑审计当时可知情报，找「真坑有、假坑没有」的签名</td><td><strong>Musk 坑底买入传说被否定</strong>（6 笔买入从未落在事后确认的真坑底）；两个名义候选签名（空头 6 周变化、Musk 发帖趋势）与 N2/N3-H 独立结论同向——一度构成「三线会师」</td></tr>
+    <tr><td>N5 跨标的验证</td><td>坑底空头签名是市场共性还是 TSLA 特质？26 标的 282 坑</td><td>❌ 判死：p=0.70 且方向反转，<strong>签名是 TSLA 幻觉</strong>。比结论更值钱的副产物：揪出 <strong>FINRA 空头未复权的拆股伪影</strong>（2022-10 假坑的 +211% 实为 3:1 拆股跳变）——波及 N2/N3-H 历史证据，触发 N6 紧急复核</td></tr>
+    <tr><td>N6 拆股修正复核</td><td>原协议原参数、干净数据重跑全部证据链</td><td>🟢 <strong>三条证据链全部幸存</strong>（N2 焦点 −840→−808bp，p 仍过 Bonferroni，伪影只占效应 ~4%；N3-H 考场 2/2 判对原样）；N4 空头腿跌出名义候选（与 N5 判死自洽）——「三线会师」修正为两线。拆股折算沉淀为全系统正式口径 <code>intel/splits.py</code>，探测器加 SPLIT_GUARD 防护后<strong>继续值班</strong></td></tr>
+  </table></div>
+  <div class="verdict good">
+    <p><strong>完整弧线：</strong>三个互相独立的研究设计（lead-lag、走步推演、真假坑对照）指向同一个两腿信号——<strong>空头仓位动向 × Musk 发声强度</strong>；随后跨标的检验杀掉其中一腿的普适性并揪出数据伪影，紧急复核后两线证据幸存。该信号已冻结为因果探测器规则（空头 up-jump ≥+10% × Musk 密集期 → risk-off F20），定位是<strong>窄谱风险过滤器</strong>，2 段样本不构成上钱依据，裁决权在前向。</p>
+  </div>
+
+  <h3>哨兵：13 渠道采集与双时间戳防前视</h3>
+  <p>情报采集守护「哨兵」（<code>intel/</code>）以 13 个采集器覆盖 T0–T3 源分级：EDGAR（Form 4/8-K 与 13D/G、Form 144）、FINRA 空头利益与暗池周报（含 25 只池标的）、期权链日快照、Polymarket、FOMC 日历、财报日历、USPTO（待 key）、YouTube/新闻 RSS、X（nitter 通道）。全部事件入 SQLite（<code>data/intel/sentinel.sqlite</code>），核心设计是<strong>双时间戳</strong>：<code>event_time_utc</code>（信息公开时刻）与 <code>observed_time_utc</code>（哨兵首见时刻）分列，特征只能在首见时刻之后可用——防前视写死在 schema 层而非靠纪律。launchd 盘中每 5 分钟、盘外每 30 分钟采一轮，采集链末尾自动运行探测器状态机；<code>poll_log</code> 表监控渠道健康，时延视图区分回填口径与稳态真值。</p>
+
+  <h3>三页面体系与每日续演</h3>
+  <p>产品层收敛为三个本地 HTML 页面（launchd 每 5 分钟重生成，自带数据龄徽章）：<strong>值班仪表盘</strong>（<code>data/intel/dashboard.html</code>：今日合议决策卡、晨间简报、探测器态势与标定倒计时、走势图四层标记、渠道健康、分层去重情报流、事件日历）；<strong>模拟探测</strong>（同页 <code>#replay</code> 视图：探测器 N3-H 考场逐日回放播放器 + E8-A+S2 全系统逐笔回放，触发日自动暂停弹日记卡）；<strong>棋谱预案</strong>（<code>data/intel/playbook.html</code>：涨/跌各推 3–4 层的二叉决策树，每个分支点标注系统规则（附实验编号）、个人参数（position.json 换算成具体金额股数）与 8 年 first-passage 历史频率——树不预测走哪条分支，只保证每条分支都有应手）。推演数据由 <code>intel/replay_refresh.py</code> <strong>每日续演</strong>：冻结管线零改动续算到最新完整交易日，留出段逐事件与冻结存档核对一致（容差 1e-6）才并入前向段，任何漂移即中止——绝不带错续演。</p>
+
+  <h3>E12 / E13 判决</h3>
+  <ul class="tight">
+    <li><strong>E12 情报特征并入 GBDT</strong>：❌ 判无效——ΔAUC +0.0041 &lt; 预登记门槛 0.005 且 CI 跨零；特征保留代码中标 INACTIVE（<code>si_days_since</code> 重要性排第 4，方向有苗头量不够，真检验等 x_nitter 前向流）。</li>
+    <li><strong>E13 工资流阶梯定投 + 逐笔止盈</strong>：❌ 关闭——180 组合 0 跑赢同现金流 DCA-hold（八年 XIRR +41.3% vs 最好 +16.2%）；残值=借款额度规则（按权益比例 ≤50%，固定金额授信=小账户隐形 3–5 倍杠杆）与 8 年仅 4 次的干预点形态，已回填棋谱页。</li>
+  </ul>
+  <p>三页面配色已定版为「AI 墨金」方案（HKU AI-Trader 风格，暗色默认 + 亮色自适应），站级统一。</p>
+
+  <div class="verdict good">
+    <p><strong>当前状态（2026-07-31）：</strong>无任何策略上过真钱。六个自动组件在 launchd 值班——哨兵采集、因果探测器、仪表盘生成、棋谱生成、推演每日续演、shadow 白跑（E2 与冻结候选 E8-A+S2 双线）。三个日期：<strong>08-20</strong> 探测器标定期满出闸（此前只观察不出信号）；<strong>每周</strong>看 shadow_report + detector_report 战报（E8-A+S2 白跑 ≥8 周，约至 9 月下旬才有裁决资格）；<strong>10-22</strong> TSLA 财报。</p>
+  </div>
 </section>
 
 <section id="roadmap">
@@ -554,7 +591,7 @@ footer code { font-size: 12px; }
 </section>
 
 <footer>
-  报告源文件（供 git 与后续会话引用）：<code>docs/review-2026-07-23/</code> 下三份审查/调研 md · <code>docs/architecture.md</code>（含完整 Python 接口定义）· <code>docs/roadmap.md</code>。
+  报告源文件（供 git 与后续会话引用）：<code>docs/review-2026-07-23/</code> 下三份审查/调研 md · <code>docs/architecture.md</code>（含完整 Python 接口定义）· <code>docs/roadmap.md</code> · <code>docs/strategy-lab.md</code>（E/N 全系列实验日志，事实基准）· <code>docs/intel-framework.md</code> 与 <code>intel/README.md</code>（情报体系）。
   由 Claude Fable 5 三代理并行分析生成，2026-07-23。
 </footer>
 </main>

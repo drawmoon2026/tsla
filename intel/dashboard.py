@@ -38,10 +38,12 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
      「研究回放（事后）」区（避险影线带 / 真坑 / 假坑 / Musk 数据失明期灰底）
      与「前向/事实（当时可知）」区（Musk 菱旗 / 假想单十字准星）；
      坑判据写进 tooltip 与明细表。页面预留多标的标签栏。）
-  05 渠道健康（按 T0-T3 分组的渠道卡片 + 衍生信号单列；权重标注人工先验；
+  05 渠道健康（按 T0-T3 分组的渠道卡片 + 衍生信号单列；权重双显 =
+     人工先验 + 当前平均四维分（intel/scoring.py v0，意外分未实现）；
      质量旗标（options oi_quality）与下游依赖（x_nitter→腿 B）上卡）
-  06 最新情报流（治理版：高信号置顶区（T0/T1/衍生信号）+ T2/T3 限额可展开 +
-     同题跨源去重折叠「另 N 源」+ 层级筛选按钮 + 类型/来源人话化）
+  06 最新情报流（治理版：高信号置顶区（T0/T1/衍生信号，按四维权重降序）+
+     T2/T3 限额可展开 + 同题跨源去重折叠「另 N 源」+ 层级筛选按钮 +
+     类型/来源人话化 + 每行四维权重列（悬停看 身位×事实×时效 分解））
   07 计数与时延（层级双条计数（ET 日口径）+ 每渠道 p50→p90 稳态口径标尺）
 
 容错：任一表/视图/CSV 缺失则跳过或置灰对应板块（图层），不炸。
@@ -68,6 +70,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from intel.store import DB_PATH
+from intel import scoring  # 四维评分 v0（查询层实时算，不回写库）
 
 try:  # 价格上下文（yfinance 增量 + S2 读数）；导入失败降级为"取价失败"
     from intel.prices import get_price_context, s2_reading
@@ -357,6 +360,36 @@ def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
     # tier 升序 → 权重降序 → source_id（无 tier/权重的排最后）
     rows.sort(key=lambda h: (h["tier"] or "T9", -(h["weight"] or 0.0), h["source_id"]))
     return rows
+
+
+SCORE4_SAMPLE_N = 100  # 渠道卡「当前平均四维分」的取样条数（每渠道最近 N 条事件）
+
+
+def load_score4_avgs(conn: sqlite3.Connection, sources: dict,
+                     now: datetime) -> dict[str, dict]:
+    """每渠道近 SCORE4_SAMPLE_N 条事件的四维 v0 总权重均值（intel/scoring.py）。
+
+    查询层实时计算，不回写 events 表；返回 {source_id: {"avg": float, "n": int}}。
+    """
+    if not has_table(conn, "events"):
+        return {}
+    out: dict[str, dict] = {}
+    for sid in sources:
+        tier = sources.get(sid, {}).get("tier")
+        totals = [
+            scoring.score_event(
+                {"source_id": sid, "tier": tier,
+                 "type": r["type"], "event_time_utc": r["event_time_utc"]}, now,
+            )["total"]
+            for r in conn.execute(
+                """SELECT type, event_time_utc FROM events WHERE source_id = ?
+                   ORDER BY event_time_utc DESC LIMIT ?""",
+                (sid, SCORE4_SAMPLE_N),
+            )
+        ]
+        if totals:
+            out[sid] = {"avg": sum(totals) / len(totals), "n": len(totals)}
+    return out
 
 
 NITTER_ALERT_STREAK = 3  # x_nitter 连续失败达此数 → 探测器面板依赖告警（P1-4）
@@ -3628,11 +3661,20 @@ def _src_card(h: dict, now: datetime, show_weight: bool = True,
         weight_html = ""
     else:
         t = h["tier"] if h["tier"] in TIERS else "T3"
+        sc4 = h.get("score4")
+        if sc4 is not None:
+            sc4_html = f'<span class="wt4 num">四维 {sc4["avg"]:.2f}</span>'
+            sc4_tip = (f"；当前平均四维分 {sc4['avg']:.2f} = 近 {sc4['n']} 条事件的 "
+                       "身位×事实×时效 均值（四维评分 v0，意外分未实现）")
+        else:
+            sc4_html = '<span class="wt4 num muted">四维 —</span>'
+            sc4_tip = "；四维分暂无（该渠道尚无入库事件）"
         weight_html = (
-            '<span class="wt-cell" title="人工先验权重（身位分初值，未经四维评分）">'
+            f'<span class="wt-cell" title="人工先验 {w:.1f}（建渠道时拍定的身位分初值）'
+            f'{esc(sc4_tip)}">'
             f'<span class="wt-bar"><span class="wtf-{t[1]}" '
             f'style="width:{min(1.0, max(0.0, w)) * 100:.0f}%"></span></span>'
-            f'<span class="num">{w:.1f}</span></span>'
+            f'<span class="num">{w:.1f}</span>{sc4_html}</span>'
         )
     streak = h["fail_streak"]
     streak_html = (
@@ -3713,16 +3755,20 @@ def render_health(rows: list[dict], now: datetime,
             f'<div class="src-cards">{cards}</div></div>'
         )
     foot = (
-        '<p class="footnote">权重口径（P0-5 如实标注）：列示权重为建渠道时'
-        "人工拍定的<b>身位分初值</b>（人工先验），<b>不是</b>算出来的四维评分——"
-        "四维评分（身位/事实/时效/意外）尚未实现，见 docs/intel-framework.md 第二节。"
+        '<p class="footnote">权重口径（四维评分 v0）：左值为建渠道时人工拍定的'
+        "<b>身位分初值</b>（人工先验），右值「四维」为该渠道近 "
+        f"{SCORE4_SAMPLE_N} 条事件的<b>身位×事实×时效</b>平均"
+        "（intel/scoring.py 规则映射，查询层实时算，不回写库）。"
+        "四维评分 v0：身位/事实/时效已计算，<b>意外分未实现</b>"
+        "（需共识数据源：期权隐含波动或分析师预期），总权重暂不含意外分。"
+        "见 docs/intel-framework.md 第二节。"
         "分层依据 intel-framework 第一节 + strategy-lab N2：T0 布局痕迹（13D/G、Form 144、"
         "空头利益、暗池、期权快照；Polymarket 预测市场赔率亦归此层，属资金布局痕迹而非"
         "法定披露，口径最弱）。</p>"
     )
     return f"""
 <section>
-  <h2><span class="sec-no">__NO__</span>渠道健康<span class="h-sub">{len(channels)} 渠道 + {len(derived)} 衍生信号 · 按层级分组 · 组内按权重排序 · 权重 = 人工先验（未经四维评分）</span></h2>
+  <h2><span class="sec-no">__NO__</span>渠道健康<span class="h-sub">{len(channels)} 渠道 + {len(derived)} 衍生信号 · 按层级分组 · 组内按先验权重排序 · 权重 = 先验 + 四维 v0 均分（意外分未实现）</span></h2>
   <div class="card">{"".join(blocks)}</div>
   {foot}
 </section>"""
@@ -3879,6 +3925,12 @@ def _feed_item(e: dict, now: datetime) -> str:
     time_title = (f"事件时刻 {fmt_local(ev_t)} · 入库 {fmt_local(obs)}"
                   if ev_t else f"入库 {fmt_local(obs)}")
     t_show = ev_t or obs
+    s = e.get("_score4") or scoring.score_event(e, now)
+    wt_tip = (f"四维权重 v0（分解）：身位 {s['position']:.2f} × "
+              f"事实 {s['fact']:.2f} × 时效 {s['recency']:.2f}"
+              f" = {s['total']:.3f}；意外分未实现（需共识数据源），不乘入")
+    wt_html = (f'<span class="ev-wt num" title="{esc(wt_tip)}">'
+               f"{s['total']:.2f}</span>")
     return (
         f'<li class="ev" data-tier="{esc(tier_key)}">'
         f'<span class="ev-time num" data-iso="{esc(t_show.isoformat() if t_show else "")}" '
@@ -3886,6 +3938,7 @@ def _feed_item(e: dict, now: datetime) -> str:
         f"{badge}"
         f'<span class="ev-src" title="{esc(e["source_id"])}">{esc(_src_display(e))}</span>'
         f'<span class="ev-title">{title_html}{fold}</span>'
+        f"{wt_html}"
         f'<span class="ev-type micro" title="{esc(e.get("type") or "")}">'
         f'{esc(_type_label(e.get("type")))}</span>'
         "</li>"
@@ -3900,6 +3953,11 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str
     永不被淹没）+ T2/T3 限额流（同题跨源去重折叠，可展开）+ 层级筛选按钮。"""
     if not rows and not hi_rows:
         return ""
+    # 四维评分 v0：查询层实时算（不回写库），供权重列显示与置顶区排序。
+    # 置顶区行预标注；T2/T3 流的行在 _feed_item 内按需计算
+    # （去重折叠可能换代表行，代表字段确定后再评分才准确）。
+    for e in hi_rows:
+        e["_score4"] = scoring.score_event(e, now)
     # 高信号区：独立时间线（load_hi_timeline），单一渠道限 5 条
     # （防 polymarket 快照类刷屏挤占 EDGAR/FINRA/探测器），共 20 条
     hi, per_src = [], {}
@@ -3911,6 +3969,8 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str
         hi.append(e)
         if len(hi) >= 20:
             break
+    # 置顶区内部按四维总权重降序；stable sort 保留原时间序为次级
+    hi.sort(key=lambda e: -e["_score4"]["total"])
     hi_ids = {e.get("event_id") for e in hi}
     deduped = dedupe_timeline(
         [e for e in rows if e.get("event_id") not in hi_ids]
@@ -3936,12 +3996,12 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str
     )
     return f"""
 <section id="feed-sec">
-  <h2><span class="sec-no">__NO__</span>最新情报流<span class="h-sub">近 {len(rows)} 条 → 去重折叠 {n_folded} 条 · 高信号置顶 · T2/T3 限额 {T3_QUOTA} 条可展开 · 时间列 = 事件时刻（悬停看入库时刻）</span></h2>
+  <h2><span class="sec-no">__NO__</span>最新情报流<span class="h-sub">近 {len(rows)} 条 → 去重折叠 {n_folded} 条 · 高信号置顶 · T2/T3 限额 {T3_QUOTA} 条可展开 · 时间列 = 事件时刻（悬停看入库时刻）· 权重列 = 四维 v0（悬停看分解）</span></h2>
   <div class="card">
     <div class="feed-bar" id="feed-bar" role="group" aria-label="层级筛选">
       <span class="micro muted">层级筛选</span>{chips}
     </div>
-    <div class="feed-lab">高信号置顶 · T0 布局痕迹 / T1 法定披露 / 衍生信号</div>
+    <div class="feed-lab">高信号置顶 · T0 布局痕迹 / T1 法定披露 / 衍生信号 · 按四维权重降序（时间序次级）</div>
     <ol class="feed feed-hi">{hi_html}</ol>
     <div class="feed-lab">T2 / T3 流 · 同题跨源已折叠（「另 N 源」悬停看来源）</div>
     <ol class="feed">{lo_html}</ol>
@@ -3950,7 +4010,10 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str
     Jaccard ≥ 0.6 或互为前缀）」折叠为一组，保留 event_time 最早的来源，其余计入
     「另 N 源」；申报/短帖类不做相似合并。置顶区固定收录 T0/T1/衍生信号
     （最多 20 条，单一渠道限 5 条防快照类刷屏），不受 T3 噪声挤占，
-    溢出条目仍在下方流与层级筛选中。</p>
+    溢出条目仍在下方流与层级筛选中；区内按四维总权重降序，同分保持时间序。
+    权重列口径（四维评分 v0，intel/scoring.py）：总权重 = 身位 × 事实 × 时效
+    （悬停看各项分值）；意外分未实现（需共识数据源：期权隐含波动或分析师预期），
+    暂不乘入——评分在查询层实时算，随时间自然衰减，不回写事件表。</p>
   </div>
 </section>"""
 
@@ -4538,6 +4601,9 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
   overflow: hidden; flex: none; }
 .wt-bar span { display: block; height: 100%; background: var(--accent-mark); }
 .wtf-0, .wtf-1, .wtf-2, .wtf-3 { background: var(--accent-mark); }
+.wt-cell { cursor: help; }
+.wt4 { font-size: 11px; color: var(--ink-2); white-space: nowrap; }
+.wt4.muted { color: var(--muted); }
 
 /* ===== 晨间简报（cx 复用）+ 事件日历条 ===== */
 .mb-list { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; }
@@ -4612,6 +4678,8 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .ev-title a { color: inherit; }
 .ev-title a:hover { color: var(--link); }
 .ev-type { flex: none; color: var(--muted); }
+.ev-wt { flex: none; width: 34px; text-align: right; font-size: 11px;
+  color: var(--ink-2); cursor: help; font-variant-numeric: tabular-nums; }
 
 /* ===== 05 计数与时延 ===== */
 .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
@@ -5584,6 +5652,9 @@ def render(db_path: Path = DB_PATH) -> str:
             det["trades"] if det else [], has_trades_table, fresh_badge,
         )
         health_rows = load_health(conn, sources)
+        score4_avgs = load_score4_avgs(conn, sources, now)
+        for h in health_rows:
+            h["score4"] = score4_avgs.get(h["source_id"])
         extras, nitter_alert = load_health_extras(conn, health_rows, now)
         sections = [
             render_consensus(det, px, shadow, now),
