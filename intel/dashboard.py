@@ -498,6 +498,22 @@ def load_hi_timeline(conn: sqlite3.Connection, limit: int = 20,
         )]
 
 
+def load_interp_map(conn: sqlite3.Connection) -> dict[str, dict]:
+    """LLM 解读映射：event_id → {direction, strength, note, surprise}（M2）.
+
+    只前向：llm_interpretations 表由 intel/interpret.py 追加，永不回填历史。
+    """
+    if not has_table(conn, "llm_interpretations"):
+        return {}
+    return {
+        r["event_id"]: dict(r)
+        for r in conn.execute(
+            "SELECT event_id, direction, strength, note, surprise "
+            "FROM llm_interpretations"
+        )
+    }
+
+
 def load_latency(conn: sqlite3.Connection) -> list[dict]:
     """基于 v_latency 的渠道集合，p50/p90 在 Python 里补算。
 
@@ -3148,6 +3164,98 @@ def _cal_strip(near: list[dict], far: list[dict], today: date) -> str:
     )
 
 
+_DIR_META = {  # LLM 解读方向 → (箭头, 人话, CSS 类)
+    "bullish": ("↑", "看涨", "dir-bull"),
+    "bearish": ("↓", "看跌", "dir-bear"),
+    "neutral": ("→", "中性", "dir-neu"),
+}
+
+
+def dir_badge(direction: str | None, strength: int | None = None,
+              note: str | None = None, surprise: int | None = None,
+              compact: bool = False) -> str:
+    """LLM 解读方向徽章；compact=True 用于情报流行内小标。"""
+    arrow, label, cls = _DIR_META.get(direction or "", ("→", "中性", "dir-neu"))
+    tip_bits = [f"AI 解读：{label}"]
+    if strength:
+        tip_bits.append(f"强度 {strength}/3")
+    if surprise:
+        tip_bits.append("意外（偏离共识）")
+    if note:
+        tip_bits.append(note)
+    tip = " · ".join(tip_bits)
+    if compact:
+        return (f'<span class="ai-tag {cls}{" sp" if surprise else ""}" '
+                f'title="{esc(tip)}">AI{arrow}</span>')
+    txt = arrow + " " + label + (f" {strength}" if strength else "")
+    return f'<span class="dir {cls}" title="{esc(tip)}">{esc(txt)}</span>'
+
+
+def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
+    """晨间简报「AI 解读」小节：整体态势句 + 逐事件方向徽章（M2）.
+
+    数据来自 intel/interpret.py（claude 无头 CLI）；只前向不回填。
+    缺表 = 模块未上线，不渲染；今日缺席 = 如实展示原因。
+    """
+    if not has_table(conn, "llm_interpret_runs"):
+        return ""
+    run = conn.execute(
+        "SELECT * FROM llm_interpret_runs ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+    head = ('<div class="cal-head">AI 解读'
+            '<span class="h-sub">claude 无头 CLI · 只提炼不决策 · '
+            "只前向不回填（历史段不可信）</span></div>")
+    if run is None:
+        return (head + '<div class="ai-brief"><span class="muted">'
+                "尚未运行过解读——待哨兵链首次触发 intel.interpret。</span></div>")
+    run = dict(run)
+    stale = run["run_date"] != str(today_et)
+    if run["status"] != "ok":
+        return (head + '<div class="ai-brief"><span class="crit-text">'
+                f'{"" if not stale else esc(run["run_date"]) + " "}解读缺席</span>'
+                f'<span class="muted"> —— {esc(run["reason"] or "原因未记录")}</span></div>')
+    rows = [dict(r) for r in conn.execute(
+        """SELECT i.direction, i.strength, i.note, i.surprise,
+                  e.title, e.type, e.url, s.tier, e.source_id
+           FROM llm_interpretations i
+           JOIN events e ON e.event_id = i.event_id
+           LEFT JOIN sources s ON s.source_id = e.source_id
+           WHERE i.interp_date = ?
+           ORDER BY i.surprise DESC, i.strength DESC, i.rowid DESC""",
+        (run["run_date"],),
+    )]
+
+    def _row(r: dict) -> str:
+        sp = ('<span class="pill sm warn"><span class="dot"></span>意外</span>'
+              if r["surprise"] else "")
+        title = (r["title"] or r["type"] or "")[:80]
+        return (f'<div class="mb-ev{" ai-sp" if r["surprise"] else ""}">'
+                + dir_badge(r["direction"], r["strength"])
+                + f'<span class="mb-t">{esc(_type_label(r["type"]))}</span>'
+                + f'<span class="mb-title" title="{esc(r["title"] or "")}">'
+                + f"{esc(title)}</span>{sp}"
+                + f'<span class="ai-note">{esc(r["note"])}</span></div>')
+
+    shown, rest = rows[:10], rows[10:]
+    lis = "".join(_row(r) for r in shown)
+    more = (f'<details class="feed-more"><summary>展开其余 {len(rest)} 条</summary>'
+            f'<div class="mb-list">{"".join(_row(r) for r in rest)}</div></details>'
+            if rest else "")
+    stale_note = ("" if not stale else
+                  f'<span class="pill sm warn"><span class="dot"></span>'
+                  f'最近解读 {esc(run["run_date"])} · 今日尚未运行</span> ')
+    n_sp = sum(r["surprise"] for r in rows)
+    return (
+        head
+        + f'<div class="ai-brief">{stale_note}'
+        + f'<p class="statement">「{esc(run["overall"] or "")}」</p>'
+        + f'<div class="mb-list">{lis}</div>{more}'
+        + '<p class="footnote">口径：方向/强度/意外为 LLM（本机 Claude CLI）对新事件的'
+          "语义提炼，不构成决策依据；同事件只解读一次（幂等），解读只覆盖模块上线后"
+          f"新入库事件。本批 {len(rows)} 条，其中意外 {n_sp} 条。</p></div>"
+    )
+
+
 def render_morning_brief(conn: sqlite3.Connection, det: dict | None,
                          px: dict | None, now: datetime,
                          cal: tuple[list[dict], list[dict]]) -> str:
@@ -3292,6 +3400,7 @@ def render_morning_brief(conn: sqlite3.Connection, det: dict | None,
   <div class="card cx">
     <p class="statement">{lede}</p>
     <div class="cx-grid">{cell_hi}{cell_det}{cell_s2}{cell_sh}</div>
+    {_ai_brief(conn, today_et)}
     {_cal_strip(cal[0], cal[1], today_et)}
     <p class="footnote">口径：「新事件」按哨兵入库时刻（observed）统计，回填的老事件
     不会伪装成新闻；「上次开盘」为工作日 09:30 ET 的 busday 近似（不剔美股假日）。
@@ -4036,9 +4145,9 @@ def dedupe_timeline(rows: list[dict]) -> list[dict]:
     return out
 
 
-def _feed_item(e: dict, now: datetime) -> str:
+def _feed_item(e: dict, now: datetime, interp: dict[str, dict] | None = None) -> str:
     """情报流单行：event 时刻相对时间（悬停看绝对/入库时刻）+ 层级徽章 +
-    来源名 + 标题 + 类型人话 + 「另 N 源」折叠角标。"""
+    来源名 + 标题 + AI 解读方向小标（已解读事件）+ 类型人话 + 「另 N 源」角标。"""
     ev_t = parse_ts(e.get("event_time_utc"))
     obs = parse_ts(e.get("observed_time_utc"))
     title = e.get("title") or e.get("type") or "(无标题)"
@@ -4069,13 +4178,16 @@ def _feed_item(e: dict, now: datetime) -> str:
               f" = {s['total']:.3f}；意外分未实现（需共识数据源），不乘入")
     wt_html = (f'<span class="ev-wt num" title="{esc(wt_tip)}">'
                f"{s['total']:.2f}</span>")
+    it = (interp or {}).get(e.get("event_id") or "")
+    ai_html = (dir_badge(it["direction"], it["strength"], it["note"],
+                         it["surprise"], compact=True) if it else "")
     return (
         f'<li class="ev" data-tier="{esc(tier_key)}">'
         f'<span class="ev-time num" data-iso="{esc(t_show.isoformat() if t_show else "")}" '
         f'title="{esc(time_title)}"><span class="rel">{esc(fmt_ago(t_show, now))}</span></span>'
         f"{badge}"
         f'<span class="ev-src" title="{esc(e["source_id"])}">{esc(_src_display(e))}</span>'
-        f'<span class="ev-title">{title_html}{fold}</span>'
+        f'<span class="ev-title">{title_html}{fold}{ai_html}</span>'
         f"{wt_html}"
         f'<span class="ev-type micro" title="{esc(e.get("type") or "")}">'
         f'{esc(_type_label(e.get("type")))}</span>'
@@ -4086,7 +4198,8 @@ def _feed_item(e: dict, now: datetime) -> str:
 T3_QUOTA = 25  # T2/T3 流默认展示条数（其余折叠进「展开更早」）
 
 
-def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str:
+def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime,
+                    interp: dict[str, dict] | None = None) -> str:
     """⑤ 最新情报流（P1-1 治理版）：高信号置顶区（T0/T1/衍生信号，独立查询，
     永不被淹没）+ T2/T3 限额流（同题跨源去重折叠，可展开）+ 层级筛选按钮。"""
     if not rows and not hi_rows:
@@ -4123,13 +4236,14 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str
         for v, lab in (("all", "全部"), ("0", "T0"), ("1", "T1"), ("2", "T2"),
                        ("3", "T3"), ("d", "信号"))
     )
-    hi_html = ("".join(_feed_item(e, now) for e in hi)
+    hi_html = ("".join(_feed_item(e, now, interp) for e in hi)
                or '<li class="ev"><span class="ev-title muted">'
                   "窗口内无 T0/T1/衍生信号事件</span></li>")
-    lo_html = "".join(_feed_item(e, now) for e in lo_head)
+    lo_html = "".join(_feed_item(e, now, interp) for e in lo_head)
     more_html = (
         f'<details class="feed-more"><summary>展开更早 {len(lo_rest)} 条</summary>'
-        f'<ol class="feed">{"".join(_feed_item(e, now) for e in lo_rest)}</ol></details>'
+        f'<ol class="feed">{"".join(_feed_item(e, now, interp) for e in lo_rest)}</ol>'
+        "</details>"
         if lo_rest else ""
     )
     return f"""
@@ -4151,7 +4265,9 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime) -> str
     溢出条目仍在下方流与层级筛选中；区内按四维总权重降序，同分保持时间序。
     权重列口径（四维评分 v0，intel/scoring.py）：总权重 = 身位 × 事实 × 时效
     （悬停看各项分值）；意外分未实现（需共识数据源：期权隐含波动或分析师预期），
-    暂不乘入——评分在查询层实时算，随时间自然衰减，不回写事件表。</p>
+    暂不乘入——评分在查询层实时算，随时间自然衰减，不回写事件表。
+    标题旁「AI↑/↓/→」小标 = LLM 晨间解读的方向判断（悬停看一句话解读与强度；
+    带黄边 = 意外事件）；只覆盖解读模块上线后的新事件，历史行无标属正常。</p>
   </div>
 </section>"""
 
@@ -4774,6 +4890,32 @@ td.detail { font-size: 12px; color: var(--ink-2); max-width: 340px;
 .cal-far { font-size: 11.5px; color: var(--muted); margin-top: 6px;
   font-family: var(--font-mono); }
 .warn-cell { background: var(--warn-wash); }
+
+/* ===== AI 解读（M2：LLM 晨间情报解读） ===== */
+.ai-brief { margin-top: 4px; }
+.ai-brief .statement { margin: 6px 0 4px; }
+.dir { flex: none; display: inline-block; font-family: var(--font-mono);
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em; line-height: 1.6;
+  padding: 0 7px; border-radius: 4px; border: 1px solid var(--border);
+  white-space: nowrap; }
+.dir-bull { color: var(--good-text); background: var(--good-wash);
+  border-color: var(--good); }
+.dir-bear { color: var(--crit-text); background: var(--crit-wash);
+  border-color: var(--crit); }
+.dir-neu { color: var(--muted); }
+.mb-ev.ai-sp { background: var(--warn-wash); border-radius: 4px;
+  padding: 2px 6px; margin: 0 -6px; }
+.ai-note { flex: none; max-width: 42%; font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-tag { display: inline-block; margin-left: 6px; font-family: var(--font-mono);
+  font-size: 9.5px; font-weight: 700; letter-spacing: .05em; line-height: 1.5;
+  padding: 0 4px; border-radius: 3px; border: 1px solid var(--border);
+  vertical-align: 1px; cursor: help; }
+.ai-tag.dir-bull { color: var(--good-text); background: var(--good-wash);
+  border-color: var(--good); }
+.ai-tag.dir-bear { color: var(--crit-text); background: var(--crit-wash);
+  border-color: var(--crit); }
+.ai-tag.sp { box-shadow: 0 0 0 1px var(--warn); }
 
 /* ===== 渠道卡质量旗标 / 下游依赖（P1-4） ===== */
 .sc-flag { font-size: 11px; line-height: 1.5; color: var(--muted);
@@ -6007,7 +6149,8 @@ def render(db_path: Path = DB_PATH) -> str:
                             nitter_alert),
             symbol_block,
             render_health(health_rows, now, extras),
-            render_timeline(load_timeline(conn), load_hi_timeline(conn), now),
+            render_timeline(load_timeline(conn), load_hi_timeline(conn), now,
+                            load_interp_map(conn)),
             render_counts_latency(
                 load_tier_counts(conn, now), load_latency(conn), sources
             ),

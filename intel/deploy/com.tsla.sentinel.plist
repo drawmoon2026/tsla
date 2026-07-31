@@ -3,15 +3,23 @@
 <plist version="1.0">
 <dict>
   <!-- 哨兵情报采集：每 5 分钟触发；--auto 内部把盘外降到每 30 分钟一轮。
+       链尾挂 LLM 晨间解读（intel.interpret --auto）：每轮采集后跑，内部按
+       「今天已解读过且无新 T0/T1」跳过——正常每天实际调用 claude 1-2 次；
+       claude CLI 缺失/超时时 interpret 自行降级，不影响采集（用 ; 而非 && 串联）。
        独立 label，与 com.tsla.shadow（21:00 UTC 收盘任务）互不冲突。 -->
   <key>Label</key><string>com.tsla.sentinel</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/tom/project/tsla/.venv/bin/python</string>
-    <string>-m</string><string>intel.run_sentinel</string>
-    <string>--once</string>
-    <string>--auto</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/Users/tom/project/tsla/.venv/bin/python -m intel.run_sentinel --once --auto; /Users/tom/project/tsla/.venv/bin/python -m intel.interpret --auto</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd 默认 PATH 不含 ~/.local/bin（claude CLI 所在）——补上 -->
+    <key>PATH</key>
+    <string>/Users/tom/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>WorkingDirectory</key><string>/Users/tom/project/tsla</string>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>
