@@ -544,7 +544,8 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
                 act_sys("E11 · E8-A",
                     "E8-A 恢复入场资格（当前 shadow 白跑、未上钱，裁决期 ≥8 周）；"
                     f"信号逐笔出：{gate_s}。S2 以昨日日收盘评估（shift(1)）——"
-                    "盘中破线不算，收盘确认次日生效"),
+                    "盘中破线不算，收盘确认次日生效"
+                    "（E18 全历史校验为负，该策略线证据等级已降级——见 strategy-lab）"),
                 add_act,
                 freq_act_at(S2_LINE_PCT, release, H, "收复 252 日高",
                             release * 0.9, "再回落 10%"),
@@ -642,7 +643,8 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
             acts=[
                 act_sys("E11 · E8-A",
                     f"E8-A 维持入场资格（shadow 白跑），信号逐笔出：{gate_s}；"
-                    "S2 停用线随新高跟踪上移：每创新高 H，停用线 = H×0.8"),
+                    "S2 停用线随新高跟踪上移：每创新高 H，停用线 = H×0.8"
+                    "（E18 全历史校验为负，该策略线证据等级已降级——见 strategy-lab）"),
                 trim_act,
                 freq_act_at(0.0, H, H * 1.1, "续涨 10% 持续新高",
                             H * 0.8, "回撤 20% 触发 S2"),
@@ -1155,7 +1157,9 @@ def render() -> str:
                 "<div>口径：S2 = 距 252 交易日滚动高回撤 &lt; -20% 停用 E8-A 入场"
                 "（E11 冻结，实盘引擎以昨日收盘 shift(1) 评估）；探测器 = N3-H "
                 "冻结规则前向值班（虚拟推演，不碰真钱）；E8-A 处于 shadow 白跑期"
-                "（≥8 周），全系统未上真钱。个人参数出自 data/intel/position.json，"
+                "（≥8 周），全系统未上真钱——且 E18 全历史滚动校验（2020-2026 "
+                "十二折）判定同配方年化 −5.45% 为负，该策略线证据等级已降级"
+                "（docs/strategy-lab.md E18）。个人参数出自 data/intel/position.json，"
                 f"黄色 = {UNVERIFIED}。</div>"
                 "<div>历史频率 ≠ 概率预测：样本为 TSLA 2018-2026 单标的日线，"
                 "first-passage 滚动起点采样（样本高度重叠、非独立），过去八年"

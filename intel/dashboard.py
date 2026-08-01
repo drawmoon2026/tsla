@@ -1934,7 +1934,8 @@ def render_waitboard(det: dict | None, px: dict | None,
         if s2["triggered"]:
             rows.append(_pb_row(
                 f"S2 当前 {dd:+.1f}%（已触发），若回撤修复至 −20% 以内",
-                "E8-A 买入侧恢复发信号资格（shadow 白跑恢复出单）",
+                "E8-A 买入侧恢复发信号资格（shadow 白跑恢复出单）"
+                "（E18 全历史校验为负，该策略线证据等级已降级——见 strategy-lab）",
                 "E11 S2",
             ))
             rows.append(_pb_row(
@@ -2470,10 +2471,14 @@ def render_sandbox(sbx: dict | None) -> str:
           </div>
           <div class="sbx-cherry sbx-levwarn" id="sbx-levwarn" hidden>
             <b>杠杆放大的是未证实的期望</b>（54 笔，9 月 shadow 裁决前不构成依据）
-            ——L 只等比放大每笔盈亏与回撤，不产生任何新证据。</div>
+            ——L 只等比放大每笔盈亏与回撤，不产生任何新证据；E18 全历史口径下
+            同配方本就为负（L=1 −5.45% / L=2 −10.96%），常态口径下杠杆放大的是亏损。</div>
           <div class="sbx-hint">融资成本按 E17-A 轨结论忽略（6.5%/年按实际持仓
             秒数计，54 笔合计 &lt;4bp——日内持仓短）；保证金/爆仓口径见
-            outputs/e17_ab。{esc(load_mc_leverage_note())}</div>
+            outputs/e17_ab。{esc(load_mc_leverage_note())}
+            <b>全历史滚动口径（E18，2020-2026 十二折）：L=1 年化 −5.45% /
+            L=2 −10.96%</b>（outputs/e18_rolling）——沙盘与蒙特卡洛均基于
+            留出顺风窗口，读数系统性偏乐观。</div>
         </div>
       </div>
       <div class="sbx-tblwrap"><table class="sbx-tbl">
@@ -2798,7 +2803,9 @@ def render_fullsys_view(data: dict | None,
         <p>留出 62 笔 WR 80.6% / +16.0bp，但 tp/sl/timeout×门控组合出身<b>同一留出段的
         事后网格</b>（n=62），Bonferroni 校正后不显著（bootstrap p 0.04–0.28）；
         崩盘段（2021-10→2023-01）门反选 −31.4%，S2 只截后续损失（削减 78%）、救不了
-        顶部 27 个交易日——仅方向性证据。</p></div>
+        顶部 27 个交易日——仅方向性证据。<b>E18 全历史滚动校验（2020-2026 十二折重训）
+        判定同配方年化 −5.45%（L=2 −10.96%）为负</b>——留出段 +15.2% 属顺风窗口，
+        证据等级整体降级（docs/strategy-lab.md E18）。</p></div>
       <div><div class="bt">口径</div>
         <p>交易流 = models/e8a/holdout_ref.csv 62 笔入场 × E9 <b>悲观结算</b>重放
         （费 1bp/边 + 滑点 2bp；TP 限价需严格穿越、SL 停损市价含跳空、同 bar 双触发算
@@ -2871,6 +2878,9 @@ def render_fullsys_view(data: dict | None,
       <span class="fs-ann-sub">口径：留出 10 个月总收益 {s2["total"] * 100:+.2f}% 复利年化
       (1{s2["total"] * 100:+.2f}%)^(12/10) − 1；按实际 {s["window"]["cal_days"]} 天算
       ≈ {ann_act:+.1f}%。假想推演口径，含悲观成本，不含税与资金占用。</span></div>
+    <div class="fs-e18warn">⚠ <b>全历史滚动校验（E18，2020-2026 十二折）同配方年化
+      <span class="num">−5.45%</span></b>：留出段为顺风窗口，此数字不代表多周期常态
+      （outputs/e18_rolling · docs/strategy-lab.md E18）。</div>
     <div class="rs-grid">
       <div class="rs-cell"><div class="rs-k">交易笔数（留出段）</div>
         <div class="rs-v num">{n_kept_h} 笔 <span class="sub">≈{n_kept_h / 10:.1f} 笔/月（10 个月口径）</span></div></div>
@@ -2892,7 +2902,9 @@ def render_fullsys_view(data: dict | None,
     <div class="rs-note">诚实注脚：① 留出期为 2025-10 → 2026-07 <b>单一时段</b>（TSLA
       本段整体下跌，抄底事件密集——换一段行情未必复现）；② 配方出身 n=62 的<b>事后网格</b>，
       Bonferroni 校正后不显著（bootstrap p 0.04–0.28），S2 过滤后的 +12.04% 亦含选择偏差；
-      ③ 策略 2026-07-24 冻结、shadow 前向验证（≥8 周）进行中，效力由前向裁决——本页全部为
+      ③ 策略 2026-07-24 冻结、shadow 前向验证（≥8 周）进行中，效力由前向裁决；
+      ④ <b>E18 全历史滚动校验</b>（2020-07 → 2026-07 十二折滚动重训）同配方年化
+      <b>−5.45%</b>（L=2 −10.96%）——多周期常态为负，头条年化只描述留出顺风窗口——本页全部为
       假想推演，<b>不构成任何上钱依据</b>。</div>
   </div>"""
 
@@ -5463,6 +5475,13 @@ main > .sym-tabs { margin-top: 26px; }
   font-variant-numeric: tabular-nums; }
 .fs-ann-sub { flex: 1 1 260px; font-size: 11px; color: var(--muted);
   line-height: 1.55; }
+.fs-e18warn { border: 1px solid var(--crit); border-left-width: 4px;
+  background: var(--crit-wash); border-radius: 6px; padding: 9px 14px;
+  margin: 8px 0 2px; font-size: 12.5px; font-weight: 600;
+  color: var(--crit-text); line-height: 1.7; }
+.fs-e18warn b { color: var(--crit-text); }
+.fs-e18warn .num { font-size: 15px; font-weight: 800;
+  font-variant-numeric: tabular-nums; }
 /* -- what-if 沙盘（折叠区） -- */
 details.sbx { margin-top: 12px; }
 details.sbx > summary { cursor: pointer; padding: 12px 16px; display: flex;
