@@ -6,13 +6,15 @@
        链尾挂 LLM 晨间解读（intel.interpret --auto）：每轮采集后跑，内部按
        「今天已解读过且无新 T0/T1」跳过——正常每天实际调用 claude 1-2 次；
        claude CLI 缺失/超时时 interpret 自行降级，不影响采集（用 ; 而非 && 串联）。
+       链尾再挂 N8 前向判分（intel.interp_scorer --auto）：无新解读且无可了结
+       pending 时静默速退（零成本）；有活时每天收盘后拉一次日线判分。
        独立 label，与 com.tsla.shadow（21:00 UTC 收盘任务）互不冲突。 -->
   <key>Label</key><string>com.tsla.sentinel</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>/Users/tom/project/tsla/.venv/bin/python -m intel.run_sentinel --once --auto; /Users/tom/project/tsla/.venv/bin/python -m intel.interpret --auto</string>
+    <string>/Users/tom/project/tsla/.venv/bin/python -m intel.run_sentinel --once --auto; /Users/tom/project/tsla/.venv/bin/python -m intel.interpret --auto; /Users/tom/project/tsla/.venv/bin/python -m intel.interp_scorer --auto</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

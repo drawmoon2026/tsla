@@ -42,11 +42,14 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
      与「前向/事实（当时可知）」区（Musk 菱旗 / 假想单十字准星）；
      坑判据写进 tooltip 与明细表。页面预留多标的标签栏。）
   05 渠道健康（按 T0-T3 分组的渠道卡片 + 衍生信号单列；权重双显 =
-     人工先验 + 当前平均四维分（intel/scoring.py v0，意外分未实现）；
+     人工先验 + 当前平均四维分（intel/scoring.py v1，意外分 = 期权 IV 基线，
+     缺覆盖时按三分乘积 partial）；
      质量旗标（options oi_quality）与下游依赖（x_nitter→腿 B）上卡）
   06 最新情报流（治理版：高信号置顶区（T0/T1/衍生信号，按四维权重降序）+
      T2/T3 限额可展开 + 同题跨源去重折叠「另 N 源」+ 层级筛选按钮 +
-     类型/来源人话化 + 每行四维权重列（悬停看 身位×事实×时效 分解））
+     类型/来源人话化 + 每行四维权重列（悬停看 身位×事实×时效×意外 分解））
+  02b 晨间简报内 AI 解读小节挂 N8 记分牌（interp_scores 前向判分：
+     累计命中/未中 + 最近 5 条已判分对错；样本不足时如实显示积累进度）
   07 计数与时延（层级双条计数（ET 日口径）+ 每渠道 p50→p90 稳态口径标尺）
 
 容错：任一表/视图/CSV 缺失则跳过或置灰对应板块（图层），不炸。
@@ -368,9 +371,9 @@ def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
 SCORE4_SAMPLE_N = 100  # 渠道卡「当前平均四维分」的取样条数（每渠道最近 N 条事件）
 
 
-def load_score4_avgs(conn: sqlite3.Connection, sources: dict,
-                     now: datetime) -> dict[str, dict]:
-    """每渠道近 SCORE4_SAMPLE_N 条事件的四维 v0 总权重均值（intel/scoring.py）。
+def load_score4_avgs(conn: sqlite3.Connection, sources: dict, now: datetime,
+                     iv_series: dict[str, float] | None = None) -> dict[str, dict]:
+    """每渠道近 SCORE4_SAMPLE_N 条事件的四维 v1 总权重均值（intel/scoring.py）。
 
     查询层实时计算，不回写 events 表；返回 {source_id: {"avg": float, "n": int}}。
     """
@@ -383,6 +386,7 @@ def load_score4_avgs(conn: sqlite3.Connection, sources: dict,
             scoring.score_event(
                 {"source_id": sid, "tier": tier,
                  "type": r["type"], "event_time_utc": r["event_time_utc"]}, now,
+                iv_series=iv_series,
             )["total"]
             for r in conn.execute(
                 """SELECT type, event_time_utc FROM events WHERE source_id = ?
@@ -393,6 +397,28 @@ def load_score4_avgs(conn: sqlite3.Connection, sources: dict,
         if totals:
             out[sid] = {"avg": sum(totals) / len(totals), "n": len(totals)}
     return out
+
+
+def _surprise_coverage_note(conn: sqlite3.Connection,
+                            iv_series: dict[str, float]) -> str:
+    """意外分覆盖率脚注：全库事件中「事件 ET 日可算出意外分」的占比（如实统计）."""
+    if not has_table(conn, "events"):
+        return ""
+    per_date: dict[str, bool] = {}
+    n_all = n_cov = 0
+    for r in conn.execute("SELECT event_time_utc FROM events"):
+        d_et = scoring._event_date_et({"event_time_utc": r[0]})  # noqa: SLF001
+        if d_et is None:
+            continue
+        n_all += 1
+        if d_et not in per_date:
+            per_date[d_et] = (scoring.surprise_score(d_et, iv_series) is not None
+                              if iv_series else False)
+        n_cov += per_date[d_et]
+    if not n_all:
+        return ""
+    return (f"当前覆盖率 {n_cov / n_all * 100:.0f}%"
+            f"（{n_cov}/{n_all} 条事件，快照积累前的历史事件不可回补）")
 
 
 NITTER_ALERT_STREAK = 3  # x_nitter 连续失败达此数 → 探测器面板依赖告警（P1-4）
@@ -3191,6 +3217,72 @@ def dir_badge(direction: str | None, strength: int | None = None,
     return f'<span class="dir {cls}" title="{esc(tip)}">{esc(txt)}</span>'
 
 
+N8_VERDICT_PATH = PROJECT_ROOT / "outputs" / "n8_scoring" / "verdict.json"
+N8_MIN_N = 60  # 与 intel/interp_scorer.py VERDICT_MIN_N_1D 同步（展示用）
+
+
+def _n8_scoreboard(conn: sqlite3.Connection) -> str:
+    """N8 记分牌行：累计判分 + 最近 5 条已判分解读的对错标记（前向积累）.
+
+    数据来自 interp_scores 表（intel/interp_scorer.py，口径冻结见 N8 条目）；
+    样本不足时如实显示积累进度，不提前判读。
+    """
+    if not has_table(conn, "interp_scores"):
+        return ""
+    c = {r["s"]: r["n"] for r in conn.execute(
+        """SELECT score_1d s, COUNT(*) n FROM interp_scores
+           WHERE direction IN ('bullish','bearish') GROUP BY score_1d""")}
+    hit, miss, pend = c.get("hit", 0), c.get("miss", 0), c.get("pending", 0)
+    if hit + miss + pend == 0:
+        return ""
+    n1 = hit + miss
+    verdict_note = f"样本积累中 {n1}/{N8_MIN_N}（1 日口径），裁决预计 2026-10 中"
+    try:
+        v = json.loads(N8_VERDICT_PATH.read_text(encoding="utf-8"))
+        if v.get("status") == "verdict" and v.get("verdict"):
+            h1 = v["verdict"]["h1_1d"]
+            verdict_note = (f"预登记检验已触发：一致率 {h1['hit_rate']*100:.1f}% · "
+                            f"p={h1['p_binom_one_sided']:.4f} · "
+                            + ("通过" if h1["pass"] else "未通过")
+                            + "（详见 outputs/n8_scoring/verdict.json）")
+    except Exception:  # noqa: BLE001
+        pass
+    head = (f'<span class="num">{hit}</span> 命中 / '
+            f'<span class="num">{miss}</span> 未中'
+            + (f' · <span class="num">{pend}</span> 条待判' if pend else ""))
+    recent = [dict(r) for r in conn.execute(
+        """SELECT s.score_1d, s.score_5d, s.d1_date, s.ret_1d, s.direction,
+                  s.surprise, e.title, e.type, i.note
+           FROM interp_scores s
+           JOIN events e ON e.event_id = s.event_id
+           JOIN llm_interpretations i ON i.event_id = s.event_id
+           WHERE s.score_1d IN ('hit','miss')
+           ORDER BY s.d1_date DESC, s.scored_utc DESC LIMIT 5""")]
+    if recent:
+        lis = "".join(
+            f'<div class="mb-ev"><span class="{"good-text" if r["score_1d"] == "hit" else "crit-text"}"'
+            f' title="1 日 {r["score_1d"]}（D1={esc(r["d1_date"] or "—")} 实际 '
+            f'{(r["ret_1d"] or 0) * 100:+.2f}%）· 5 日 {esc(r["score_5d"] or "—")}">'
+            f'{"✓" if r["score_1d"] == "hit" else "✗"}</span>'
+            + dir_badge(r["direction"], None, r["note"], r["surprise"])
+            + f'<span class="mb-title" title="{esc(r["title"] or "")}">'
+            f'{esc((r["title"] or r["type"] or "")[:60])}</span>'
+            f'<span class="num">{(r["ret_1d"] or 0) * 100:+.2f}%</span></div>'
+            for r in recent)
+        recent_html = f'<div class="mb-list">{lis}</div>'
+    else:
+        recent_html = ('<div class="cx-ref muted">尚无已判分解读——'
+                       f'{pend} 条方向解读待其 D1 交易日收盘后首判</div>')
+    return (
+        '<div class="cal-head">N8 记分牌'
+        '<span class="h-sub">解读方向 vs 之后首个交易日 1 日/5 日 TSLA 绝对收益方向 · '
+        "中性不计分 · 口径冻结于 N8 条目</span></div>"
+        f'<div class="ai-brief"><p class="statement">累计判分（1 日口径）：{head}'
+        f'<span class="muted"> —— {esc(verdict_note)}</span></p>'
+        + recent_html + "</div>"
+    )
+
+
 def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
     """晨间简报「AI 解读」小节：整体态势句 + 逐事件方向徽章（M2）.
 
@@ -3213,7 +3305,8 @@ def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
     if run["status"] != "ok":
         return (head + '<div class="ai-brief"><span class="crit-text">'
                 f'{"" if not stale else esc(run["run_date"]) + " "}解读缺席</span>'
-                f'<span class="muted"> —— {esc(run["reason"] or "原因未记录")}</span></div>')
+                f'<span class="muted"> —— {esc(run["reason"] or "原因未记录")}</span></div>'
+                + _n8_scoreboard(conn))
     rows = [dict(r) for r in conn.execute(
         """SELECT i.direction, i.strength, i.note, i.surprise,
                   e.title, e.type, e.url, s.tier, e.source_id
@@ -3252,7 +3345,11 @@ def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
         + f'<div class="mb-list">{lis}</div>{more}'
         + '<p class="footnote">口径：方向/强度/意外为 LLM（本机 Claude CLI）对新事件的'
           "语义提炼，不构成决策依据；同事件只解读一次（幂等），解读只覆盖模块上线后"
-          f"新入库事件。本批 {len(rows)} 条，其中意外 {n_sp} 条。</p></div>"
+          f"新入库事件。本批 {len(rows)} 条，其中意外 {n_sp} 条。"
+          "记分牌判分口径见 docs/strategy-lab.md N8（解读时刻后首个交易日开盘起算，"
+          "1 日 = D1 开盘→收盘，5 日 = D1 开盘→D5 收盘；主口径 TSLA 绝对方向；"
+          "中性不计分，平局判 miss）。</p></div>"
+        + _n8_scoreboard(conn)
     )
 
 
@@ -3912,7 +4009,8 @@ def _src_card(h: dict, now: datetime, show_weight: bool = True,
         if sc4 is not None:
             sc4_html = f'<span class="wt4 num">四维 {sc4["avg"]:.2f}</span>'
             sc4_tip = (f"；当前平均四维分 {sc4['avg']:.2f} = 近 {sc4['n']} 条事件的 "
-                       "身位×事实×时效 均值（四维评分 v0，意外分未实现）")
+                       "总权重均值（四维评分 v1：四项齐乘意外分，"
+                       "IV 无覆盖的事件按三分乘积）")
         else:
             sc4_html = '<span class="wt4 num muted">四维 —</span>'
             sc4_tip = "；四维分暂无（该渠道尚无入库事件）"
@@ -3963,7 +4061,8 @@ DERIVED_SOURCE_IDS = {"detector"}
 
 
 def render_health(rows: list[dict], now: datetime,
-                  extras: dict[str, dict] | None = None) -> str:
+                  extras: dict[str, dict] | None = None,
+                  sur_cov_note: str = "") -> str:
     """④ 渠道矩阵：按 T0-T3 分组的卡片组 + 衍生信号单列小组。
 
     extras（P1-4）：{source_id: {"flag"/"dep"...}} 质量旗标与下游依赖上卡。
@@ -4002,12 +4101,14 @@ def render_health(rows: list[dict], now: datetime,
             f'<div class="src-cards">{cards}</div></div>'
         )
     foot = (
-        '<p class="footnote">权重口径（四维评分 v0）：左值为建渠道时人工拍定的'
+        '<p class="footnote">权重口径（四维评分 v1）：左值为建渠道时人工拍定的'
         "<b>身位分初值</b>（人工先验），右值「四维」为该渠道近 "
-        f"{SCORE4_SAMPLE_N} 条事件的<b>身位×事实×时效</b>平均"
+        f"{SCORE4_SAMPLE_N} 条事件的<b>总权重</b>平均"
         "（intel/scoring.py 规则映射，查询层实时算，不回写库）。"
-        "四维评分 v0：身位/事实/时效已计算，<b>意外分未实现</b>"
-        "（需共识数据源：期权隐含波动或分析师预期），总权重暂不含意外分。"
+        "<b>意外分 v1：期权 IV 基线</b>——事件日 TSLA ATM IV 相对前 5 个有效快照日"
+        "均值的相对变化归一化 0-1（options_chain 表 2026-07-24 起前向积累，"
+        f"Yahoo IV 抽风日按质量门槛剔除），{esc(sur_cov_note or '覆盖率统计缺失')}；"
+        "无覆盖的事件意外分缺席、总权重按身位×事实×时效三项乘积（partial）。"
         "见 docs/intel-framework.md 第二节。"
         "分层依据 intel-framework 第一节 + strategy-lab N2：T0 布局痕迹（13D/G、Form 144、"
         "空头利益、暗池、期权快照；Polymarket 预测市场赔率亦归此层，属资金布局痕迹而非"
@@ -4015,7 +4116,7 @@ def render_health(rows: list[dict], now: datetime,
     )
     return f"""
 <section>
-  <h2><span class="sec-no">__NO__</span>渠道健康<span class="h-sub">{len(channels)} 渠道 + {len(derived)} 衍生信号 · 按层级分组 · 组内按先验权重排序 · 权重 = 先验 + 四维 v0 均分（意外分未实现）</span></h2>
+  <h2><span class="sec-no">__NO__</span>渠道健康<span class="h-sub">{len(channels)} 渠道 + {len(derived)} 衍生信号 · 按层级分组 · 组内按先验权重排序 · 权重 = 先验 + 四维 v1 均分（意外分 = 期权 IV 基线，缺数据时按三分）</span></h2>
   <div class="card">{"".join(blocks)}</div>
   {foot}
 </section>"""
@@ -4145,7 +4246,8 @@ def dedupe_timeline(rows: list[dict]) -> list[dict]:
     return out
 
 
-def _feed_item(e: dict, now: datetime, interp: dict[str, dict] | None = None) -> str:
+def _feed_item(e: dict, now: datetime, interp: dict[str, dict] | None = None,
+               iv_series: dict[str, float] | None = None) -> str:
     """情报流单行：event 时刻相对时间（悬停看绝对/入库时刻）+ 层级徽章 +
     来源名 + 标题 + AI 解读方向小标（已解读事件）+ 类型人话 + 「另 N 源」角标。"""
     ev_t = parse_ts(e.get("event_time_utc"))
@@ -4172,10 +4274,17 @@ def _feed_item(e: dict, now: datetime, interp: dict[str, dict] | None = None) ->
     time_title = (f"事件时刻 {fmt_local(ev_t)} · 入库 {fmt_local(obs)}"
                   if ev_t else f"入库 {fmt_local(obs)}")
     t_show = ev_t or obs
-    s = e.get("_score4") or scoring.score_event(e, now)
-    wt_tip = (f"四维权重 v0（分解）：身位 {s['position']:.2f} × "
-              f"事实 {s['fact']:.2f} × 时效 {s['recency']:.2f}"
-              f" = {s['total']:.3f}；意外分未实现（需共识数据源），不乘入")
+    s = e.get("_score4") or scoring.score_event(e, now, iv_series=iv_series)
+    if s["surprise"] is not None:
+        wt_tip = (f"四维权重 v1（分解）：身位 {s['position']:.2f} × "
+                  f"事实 {s['fact']:.2f} × 时效 {s['recency']:.2f} × "
+                  f"意外 {s['surprise']:.2f} = {s['total']:.3f}（四项齐；"
+                  "意外分 = 事件日 ATM IV 相对前 5 有效快照均值的变化）")
+    else:
+        wt_tip = (f"四维权重 v1（分解）：身位 {s['position']:.2f} × "
+                  f"事实 {s['fact']:.2f} × 时效 {s['recency']:.2f}"
+                  f" = {s['total']:.3f}；意外分缺数据"
+                  "（事件日无有效期权 IV 快照覆盖），不乘入（partial）")
     wt_html = (f'<span class="ev-wt num" title="{esc(wt_tip)}">'
                f"{s['total']:.2f}</span>")
     it = (interp or {}).get(e.get("event_id") or "")
@@ -4199,16 +4308,18 @@ T3_QUOTA = 25  # T2/T3 流默认展示条数（其余折叠进「展开更早」
 
 
 def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime,
-                    interp: dict[str, dict] | None = None) -> str:
+                    interp: dict[str, dict] | None = None,
+                    iv_series: dict[str, float] | None = None,
+                    sur_cov_note: str = "") -> str:
     """⑤ 最新情报流（P1-1 治理版）：高信号置顶区（T0/T1/衍生信号，独立查询，
     永不被淹没）+ T2/T3 限额流（同题跨源去重折叠，可展开）+ 层级筛选按钮。"""
     if not rows and not hi_rows:
         return ""
-    # 四维评分 v0：查询层实时算（不回写库），供权重列显示与置顶区排序。
+    # 四维评分 v1：查询层实时算（不回写库），供权重列显示与置顶区排序。
     # 置顶区行预标注；T2/T3 流的行在 _feed_item 内按需计算
     # （去重折叠可能换代表行，代表字段确定后再评分才准确）。
     for e in hi_rows:
-        e["_score4"] = scoring.score_event(e, now)
+        e["_score4"] = scoring.score_event(e, now, iv_series=iv_series)
     # 高信号区：独立时间线（load_hi_timeline），单一渠道限 5 条
     # （防 polymarket 快照类刷屏挤占 EDGAR/FINRA/探测器），共 20 条
     hi, per_src = [], {}
@@ -4236,13 +4347,14 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime,
         for v, lab in (("all", "全部"), ("0", "T0"), ("1", "T1"), ("2", "T2"),
                        ("3", "T3"), ("d", "信号"))
     )
-    hi_html = ("".join(_feed_item(e, now, interp) for e in hi)
+    hi_html = ("".join(_feed_item(e, now, interp, iv_series) for e in hi)
                or '<li class="ev"><span class="ev-title muted">'
                   "窗口内无 T0/T1/衍生信号事件</span></li>")
-    lo_html = "".join(_feed_item(e, now, interp) for e in lo_head)
+    lo_html = "".join(_feed_item(e, now, interp, iv_series) for e in lo_head)
     more_html = (
         f'<details class="feed-more"><summary>展开更早 {len(lo_rest)} 条</summary>'
-        f'<ol class="feed">{"".join(_feed_item(e, now, interp) for e in lo_rest)}</ol>'
+        f'<ol class="feed">'
+        f'{"".join(_feed_item(e, now, interp, iv_series) for e in lo_rest)}</ol>'
         "</details>"
         if lo_rest else ""
     )
@@ -4263,9 +4375,12 @@ def render_timeline(rows: list[dict], hi_rows: list[dict], now: datetime,
     「另 N 源」；申报/短帖类不做相似合并。置顶区固定收录 T0/T1/衍生信号
     （最多 20 条，单一渠道限 5 条防快照类刷屏），不受 T3 噪声挤占，
     溢出条目仍在下方流与层级筛选中；区内按四维总权重降序，同分保持时间序。
-    权重列口径（四维评分 v0，intel/scoring.py）：总权重 = 身位 × 事实 × 时效
-    （悬停看各项分值）；意外分未实现（需共识数据源：期权隐含波动或分析师预期），
-    暂不乘入——评分在查询层实时算，随时间自然衰减，不回写事件表。
+    权重列口径（四维评分 v1，intel/scoring.py）：四项齐时总权重 = 身位 × 事实 ×
+    时效 × 意外（悬停看各项分值）；意外分 v1 = 期权 IV 基线——事件日 TSLA ATM IV
+    相对前 5 个有效快照日均值的相对变化归一化到 0-1（IV 快照 2026-07-24 起前向积累，
+    Yahoo IV 抽风日按质量门槛剔除），{esc(sur_cov_note or "覆盖率统计缺失")}；
+    事件日无有效覆盖 → 意外分缺席、总权重按三项乘积（partial）——评分在查询层
+    实时算，随时间自然衰减，不回写事件表。
     标题旁「AI↑/↓/→」小标 = LLM 晨间解读的方向判断（悬停看一句话解读与强度；
     带黄边 = 意外事件）；只覆盖解读模块上线后的新事件，历史行无标属正常。</p>
   </div>
@@ -6137,7 +6252,13 @@ def render(db_path: Path = DB_PATH) -> str:
             det["trades"] if det else [], has_trades_table, fresh_badge,
         )
         health_rows = load_health(conn, sources)
-        score4_avgs = load_score4_avgs(conn, sources, now)
+        # -- 意外分 v1 数据：ATM IV 日序列（质量门槛后）+ 事件覆盖率（脚注用）
+        try:
+            iv_series = scoring.load_atm_iv_series(conn)
+        except Exception:  # noqa: BLE001
+            iv_series = {}
+        sur_cov_note = _surprise_coverage_note(conn, iv_series)
+        score4_avgs = load_score4_avgs(conn, sources, now, iv_series)
         for h in health_rows:
             h["score4"] = score4_avgs.get(h["source_id"])
         extras, nitter_alert = load_health_extras(conn, health_rows, now)
@@ -6148,9 +6269,9 @@ def render(db_path: Path = DB_PATH) -> str:
             render_detector(det, now, render_waitboard(det, px, finra, now),
                             nitter_alert),
             symbol_block,
-            render_health(health_rows, now, extras),
+            render_health(health_rows, now, extras, sur_cov_note),
             render_timeline(load_timeline(conn), load_hi_timeline(conn), now,
-                            load_interp_map(conn)),
+                            load_interp_map(conn), iv_series, sur_cov_note),
             render_counts_latency(
                 load_tier_counts(conn, now), load_latency(conn), sources
             ),
