@@ -19,9 +19,11 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
      零改动续算到最新完整交易日，留出段与存档核对一致、前向段 segment=forward
      标记），缺失时降级回旧静态存档 outputs/e8a_replay；页头算法版本卡 +
      留出/前向分段统计；同款播放器骨架（交易密，速度预设 20x）；
-     页内折叠区「what-if 沙盘」= gate 滑杆 / tp×sl 九宫格 / S2 开关 client 端
-     即时重算（数据 outputs/replay_current/sandbox.json，intel/sandbox_export
-     预结算网格；常驻护栏横幅 + 尝试计数 + 事后选择提示，沙盘 ≠ 结论）。
+     页内折叠区「what-if 沙盘」= gate 滑杆 / tp×sl 九宫格 / S2 开关 / 杠杆滑杆
+     L∈[1,2]×0.25（每笔 ret×L 重算，融资成本按 E17-A 结论忽略，蒙特卡洛注脚
+     outputs/e17a_mc）client 端即时重算（数据 outputs/replay_current/sandbox.json，
+     intel/sandbox_export 预结算网格；常驻护栏横幅 + 尝试计数 + 事后选择提示 +
+     杠杆>1 未证实期望警示，沙盘 ≠ 结论）。
 
 板块（等宽序号按实际渲染顺序编排）：
   顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
@@ -977,6 +979,35 @@ def load_sandbox() -> dict | None:
         return sbx
     except Exception:  # noqa: BLE001
         return None
+
+
+def load_mc_leverage_note() -> str:
+    """outputs/e17a_mc/grid.csv → 沙盘杠杆区蒙特卡洛静态注脚（L=2 关键数字）.
+
+    research/e17a_montecarlo.py 产物（预登记零调参）。缺失/坏行 → 生成指引短句，
+    不炸页面。历史路径 +32.1% 为 e17_ab 存档冻结值（track_a_leverage.csv L=2）。
+    """
+    try:
+        blk = con = None
+        with (PROJECT_ROOT / "outputs" / "e17a_mc" / "grid.csv").open(
+                newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if abs(float(row["L"]) - 2.0) < 1e-9:
+                    if row["scheme"] == "block":
+                        blk = row
+                    elif row["scheme"] == "contam":
+                        con = row
+        if not blk or not con:
+            return "蒙特卡洛注脚缺失——先跑 research/e17a_montecarlo.py。"
+        return (
+            f"L=2 历史路径 +32.1%；蒙特卡洛中位 "
+            f"{float(blk['ann_med']) * 100:+.1f}%、亏损年概率 "
+            f"{float(blk['p_loss_year']) * 100:.1f}%（块抽样口径）；崩盘污染注入"
+            f"口径中位 {float(con['ann_med']) * 100:+.1f}%、亏损年 "
+            f"{float(con['p_loss_year']) * 100:.1f}%"
+            f"（outputs/e17a_mc，预登记 10000 路径）。")
+    except Exception:  # noqa: BLE001
+        return "蒙特卡洛注脚缺失——先跑 research/e17a_montecarlo.py。"
 
 
 def load_app_results() -> dict | None:
@@ -2430,6 +2461,20 @@ def render_sandbox(sbx: dict | None) -> str:
             开 = 按历史 S2 拦截（被拦笔占流位、不入权益）；关 = 忽略开关全部成交</label>
           <button id="sbx-reset" class="rp-btn" type="button">回到冻结基线</button>
         </div>
+        <div class="sbx-ctl lev">
+          <div class="sbx-k">杠杆 L（E17-A 轨：每笔净收益 ×L 后重算复利 / 回撤 / 年化）</div>
+          <div class="sbx-gate-row">
+            <input type="range" id="sbx-lev" min="1" max="2" step="0.25"
+              value="1" aria-label="杠杆倍数">
+            <span class="num" id="sbx-lev-val">1.00×</span>
+          </div>
+          <div class="sbx-cherry sbx-levwarn" id="sbx-levwarn" hidden>
+            <b>杠杆放大的是未证实的期望</b>（54 笔，9 月 shadow 裁决前不构成依据）
+            ——L 只等比放大每笔盈亏与回撤，不产生任何新证据。</div>
+          <div class="sbx-hint">融资成本按 E17-A 轨结论忽略（6.5%/年按实际持仓
+            秒数计，54 笔合计 &lt;4bp——日内持仓短）；保证金/爆仓口径见
+            outputs/e17_ab。{esc(load_mc_leverage_note())}</div>
+        </div>
       </div>
       <div class="sbx-tblwrap"><table class="sbx-tbl">
         <thead><tr><th>配置</th><th>成交</th><th>胜率</th><th>总收益</th>
@@ -2464,7 +2509,8 @@ def render_sandbox(sbx: dict | None) -> str:
         gate 通过的 {n_ev} 个入场（62 留出 + {n_fwd} 前向）。*年化按沙盘窗口实际
         {int(w["cal_days"])} 天复利折算——与总结卡「留出段 10 个月口径」年化不同源，
         对比请看总收益。†最大回撤为逐笔平仓口径（bar 级盯市回撤会更深，见总结卡；
-        沙盘不逐组合算盯市路径）。尝试计数存于本浏览器 localStorage，跨会话累计。</p>
+        沙盘不逐组合算盯市路径）。杠杆行：每笔净收益 ×L 后复利（融资成本忽略，
+        见杠杆区注脚）；基线行恒为 L=1。尝试计数存于本浏览器 localStorage，跨会话累计。</p>
     </div>
     <script type="application/json" id="sbx-data">{sbx_json}</script>
   </details>"""
@@ -5457,6 +5503,12 @@ details.sbx .sbx-sub { font: 400 11px var(--font-sans); color: var(--muted);
 .sbx-s2lab { display: flex; gap: 8px; align-items: flex-start; cursor: pointer;
   font-size: 12px; color: var(--ink-2); line-height: 1.65; margin-bottom: 10px; }
 #sbx-s2 { accent-color: var(--accent); margin-top: 2px; flex: none; }
+.sbx-ctl.lev { grid-column: 1 / -1; border-top: 1px dashed var(--border);
+  padding-top: 12px; }
+#sbx-lev { flex: 1; min-width: 120px; max-width: 340px;
+  accent-color: var(--accent); }
+#sbx-lev-val { font-size: 13px; font-weight: 700; color: var(--ink); }
+.sbx-levwarn { margin: 8px 0 2px; }
 .sbx-tblwrap { overflow-x: auto; }
 .sbx-tbl { width: 100%; min-width: 560px; border-collapse: collapse;
   font-size: 12.5px; }
@@ -6125,7 +6177,8 @@ _FS_JS = """
 # 不经 %-格式化，直接拼接。
 _SBX_JS = """
 /* what-if 沙盘：gate 过滤 → 贪心非重叠流（各几何用自己的出场 bar）→ S2 →
-   笔数/胜率/总收益/年化/MDD；与 Python 导出侧同一算法，基线自校验。 */
+   杠杆 ×L → 笔数/胜率/总收益/年化/MDD；与 Python 导出侧同一算法，基线自校验。
+   杠杆口径（E17-A 轨）：每笔净收益 ×L 后复利，融资成本忽略（存档 <4bp）。 */
 (function () {
   var box = document.getElementById("sbx");
   var dataEl = document.getElementById("sbx-data");
@@ -6135,27 +6188,29 @@ _SBX_JS = """
   if (!D || !D.events || !D.events.length) return;
   function $(id) { return document.getElementById(id); }
   var gateEl = $("sbx-gate"), gateVal = $("sbx-gate-val"), s2El = $("sbx-s2");
+  var levEl = $("sbx-lev"), levVal = $("sbx-lev-val"), levWarn = $("sbx-levwarn");
   var tryEl = $("sbx-try"), cherry = $("sbx-cherry"), selfchk = $("sbx-selfcheck");
   var resetBtn = $("sbx-reset");
   var cells = box.querySelectorAll(".sbx-cell");
-  if (!gateEl || !s2El) return;
-  var BASE = { g: D.gate_ui["default"], ci: D.frozen_ci, s2: true };
-  var cfg = { g: BASE.g, ci: BASE.ci, s2: BASE.s2 };
+  if (!gateEl || !s2El || !levEl) return;
+  var BASE = { g: D.gate_ui["default"], ci: D.frozen_ci, s2: true, L: 1 };
+  var cfg = { g: BASE.g, ci: BASE.ci, s2: BASE.s2, L: BASE.L };
   var calDays = Math.max(1, D.window.cal_days);
   var LS_KEY = "tsla_sbx_tries";
   var tries = 0;
   try { tries = parseInt(localStorage.getItem(LS_KEY), 10) || 0; } catch (e) {}
   var touched = false;
 
-  function compute(g, ci, s2on) {
+  function compute(g, ci, s2on, lev) {
     var busy = -1, rets = [], nblk = 0, i, ev, c;
+    lev = lev || 1;
     for (i = 0; i < D.events.length; i++) {
       ev = D.events[i];
       if (ev.p < g - 1e-9 || ev.epos <= busy) continue;
       c = ev.c[ci];
       busy = c[0];
       if (s2on && ev.s2) { nblk++; continue; }  /* 被拦笔占流位、不入权益 */
-      rets.push(c[1]);
+      rets.push(c[1] * lev);
     }
     var n = rets.length, wins = 0, eq = 1, peak = 1, mdd = 0, k, dd;
     for (k = 0; k < n; k++) {
@@ -6169,7 +6224,7 @@ _SBX_JS = """
     return { n: n, nblk: nblk, wr: n ? wins / n : null, total: total,
              ann: Math.pow(1 + total, 365 / calDays) - 1, mdd: mdd };
   }
-  var baseStats = compute(BASE.g, BASE.ci, BASE.s2);
+  var baseStats = compute(BASE.g, BASE.ci, BASE.s2, 1);
   /* 自校验：JS 重算的冻结基线必须与导出侧（已对存档）一致，漂移即亮警示 */
   var B = D.baseline || {};
   if (B.n !== baseStats.n || Math.abs((B.total || 0) - baseStats.total) > 1e-6) {
@@ -6186,7 +6241,8 @@ _SBX_JS = """
   }
   function cfgLab() {
     return "gate " + (+cfg.g).toFixed(4).replace(/0+$/, "").replace(/\\.$/, "") +
-      " \\u00b7 " + geoLab(cfg.ci) + " \\u00b7 S2 " + (cfg.s2 ? "\\u5f00" : "\\u5173");
+      " \\u00b7 " + geoLab(cfg.ci) + " \\u00b7 S2 " + (cfg.s2 ? "\\u5f00" : "\\u5173") +
+      (cfg.L !== 1 ? " \\u00b7 L" + cfg.L + "\\u00d7" : "");
   }
   function ppd(a, b2, dp) {  /* Δ 以百分点计 */
     if (a == null || b2 == null) return "—";
@@ -6195,10 +6251,10 @@ _SBX_JS = """
   }
   function isBase() {
     return cfg.ci === BASE.ci && cfg.s2 === BASE.s2 &&
-      Math.abs(cfg.g - BASE.g) < 1e-9;
+      Math.abs(cfg.g - BASE.g) < 1e-9 && Math.abs(cfg.L - BASE.L) < 1e-9;
   }
   function recalc() {
-    var s = compute(cfg.g, cfg.ci, cfg.s2);
+    var s = compute(cfg.g, cfg.ci, cfg.s2, cfg.L);
     $("sbx-c-cfg").textContent = cfgLab() + (isBase() ? "（= 基线）" : "");
     $("sbx-c-n").textContent = s.n + " \\u7b14\\uff08\\u62e6 " + s.nblk + "\\uff09";
     $("sbx-c-wr").textContent = s.wr == null ? "—" : (s.wr * 100).toFixed(1) + "%";
@@ -6211,8 +6267,13 @@ _SBX_JS = """
     $("sbx-d-total").textContent = ppd(s.total, baseStats.total, 2);
     $("sbx-d-ann").textContent = s.n ? ppd(s.ann, baseStats.ann, 1) : "—";
     $("sbx-d-mdd").textContent = ppd(s.mdd, baseStats.mdd, 2);
-    if (cherry)
-      cherry.hidden = !(!isBase() && s.total > baseStats.total + 1e-12);
+    /* cherry 判定按 L=1 口径：纯加杠杆不是「翻到好看」，由 levWarn 单独警示 */
+    if (cherry) {
+      var s1 = Math.abs(cfg.L - 1) < 1e-9
+        ? s : compute(cfg.g, cfg.ci, cfg.s2, 1);
+      cherry.hidden = !(!isBase() && s1.total > baseStats.total + 1e-12);
+    }
+    if (levWarn) levWarn.hidden = !(cfg.L > 1 + 1e-9);
     return s;
   }
   function bump() {  /* 每次参数改动累计一次尝试（localStorage 跨会话） */
@@ -6235,6 +6296,12 @@ _SBX_JS = """
     recalc();
   });
   gateEl.addEventListener("change", bump);  /* 拖动松手才计一次尝试 */
+  levEl.addEventListener("input", function () {
+    cfg.L = parseFloat(levEl.value) || 1;
+    if (levVal) levVal.textContent = cfg.L.toFixed(2) + "\\u00d7";
+    recalc();
+  });
+  levEl.addEventListener("change", bump);  /* 拖动松手才计一次尝试 */
   cells.forEach(function (b2) {
     b2.addEventListener("click", function () {
       var ci = parseInt(b2.getAttribute("data-ci"), 10) || 0;
@@ -6253,9 +6320,11 @@ _SBX_JS = """
     bump(); recalc();
   });
   if (resetBtn) resetBtn.addEventListener("click", function () {
-    cfg = { g: BASE.g, ci: BASE.ci, s2: BASE.s2 };  /* 回基线不计尝试 */
+    cfg = { g: BASE.g, ci: BASE.ci, s2: BASE.s2, L: BASE.L };  /* 回基线不计尝试 */
     gateEl.value = BASE.g; gateVal.textContent = (+BASE.g).toFixed(4);
     s2El.checked = true;
+    levEl.value = "1";
+    if (levVal) levVal.textContent = "1.00\\u00d7";
     cells.forEach(function (x2) {
       var on = parseInt(x2.getAttribute("data-ci"), 10) === BASE.ci;
       x2.classList.toggle("act", on);
