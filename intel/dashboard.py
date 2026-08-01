@@ -69,6 +69,7 @@ import html as html_mod
 import json
 import math
 import re
+import socket
 import sqlite3
 from bisect import bisect_left, bisect_right
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -105,6 +106,20 @@ except Exception:  # noqa: BLE001
 DENSE_QUANT_TXT = f"{DENSE_QUANTILE:.4f}"
 
 OUT_PATH = DB_PATH.parent / "dashboard.html"
+
+
+def _lan_ip() -> str | None:
+    """本机局域网 IP（UDP connect 只选路由不发包，离线安全）；取不到返回 None."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        return None if ip.startswith("127.") else ip
+    except OSError:
+        return None
 
 STALE_S = 30 * 60  # 最后轮询距今超过此秒数 → 顶栏标红
 
@@ -6300,6 +6315,7 @@ def render(db_path: Path = DB_PATH) -> str:
         )
     finally:
         conn.close()
+    lan_ip = _lan_ip() or "<本机IP>"
     body.append(
         "<footer>"
         f'<span class="chip">CALIB {CALIB_BDAYS}bd</span>'
@@ -6309,6 +6325,7 @@ def render(db_path: Path = DB_PATH) -> str:
         f'<span class="chip">COST {COST_LINE * 1e4:+.2f}bp</span>'
         f"<span>数据源 {esc(str(db_path))} · 只读渲染 · "
         "重生成 <code>python -m intel.dashboard</code></span>"
+        f"<span>手机访问：http://{esc(lan_ip)}:8765（同一 WiFi，intel.serve）</span>"
         '<span class="end">静态快照 · 非实时 · 假想推演不碰真钱</span>'
         "</footer>"
     )

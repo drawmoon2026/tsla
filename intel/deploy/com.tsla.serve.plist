@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 局域网只读静态服务：常驻 intel.serve（0.0.0.0:8765，仅服务 data/intel/ 的
+       html/json 白名单，防目录穿越，sentinel.sqlite/.env 不在服务范围）。
+       KeepAlive=true 崩溃自动拉起。手机同一 WiFi 访问 http://<本机IP>:8765。
+       与其余 com.tsla.* label 独立，互不冲突。 -->
+  <key>Label</key><string>com.tsla.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tom/project/tsla/.venv/bin/python</string>
+    <string>-m</string>
+    <string>intel.serve</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/tom/project/tsla</string>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/tom/project/tsla/outputs/sentinel/serve.log</string>
+  <key>StandardErrorPath</key><string>/Users/tom/project/tsla/outputs/sentinel/serve.err</string>
+</dict>
+</plist>

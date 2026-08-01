@@ -159,6 +159,37 @@ N5（跨标的验证）/ N6（紧急复核）的修正逻辑已沉淀为共享�
   2025-06 起被 ProShares ETF 复用。META 系列由 FB+META 双 symbolCode 按
   issueName 白名单（Facebook/Meta Platforms 前缀）过滤拼接，剔除 ETF 行。
 
+## 备份与恢复（2026-08-01 起，com.tsla.backup 每日 08:30）
+
+`intel/backup.py` 每日把**不可再生前向数据**打包成
+`backups/sentinel-YYYYMMDD.tar.gz`（gitignore，保留最近 30 份滚动删除）：
+sentinel.sqlite、position.json、shadow_live/shadow_e8a 的 journal.sqlite
+（sqlite 一律 backup API 热备份，绝不 cp 运行中的库）、outputs/n8_scoring/、
+outputs/replay_current/meta.json。打包前逐库 PRAGMA integrity_check，
+打包后校验 tar 可读且成员数一致。
+
+```bash
+# 手动备份一次 / 恢复演练（解包临时目录 + 逐库 integrity_check）
+.venv/bin/python -m intel.backup
+.venv/bin/python -m intel.backup --check backups/sentinel-20260801.tar.gz
+
+# 恢复：tar 内是项目相对路径，先停相关 launchd 任务再解包覆盖
+launchctl unload ~/Library/LaunchAgents/com.tsla.{sentinel,dashboard,shadow,shadow-e8a}.plist
+tar -xzf backups/sentinel-YYYYMMDD.tar.gz -C /Users/tom/project/tsla   # 全量覆盖恢复
+# 或只恢复单个库：
+tar -xzf backups/sentinel-YYYYMMDD.tar.gz -C /tmp data/intel/sentinel.sqlite
+cp /tmp/data/intel/sentinel.sqlite data/intel/sentinel.sqlite
+launchctl load ~/Library/LaunchAgents/com.tsla.{sentinel,dashboard,shadow,shadow-e8a}.plist
+```
+
+## 局域网服务（手机看盘，com.tsla.serve 常驻）
+
+`intel/serve.py`：绑定 0.0.0.0:8765 的只读静态服务，`/` 重定向 dashboard.html，
+手机同一 WiFi 访问 `http://<本机IP>:8765`（IP 见仪表盘 footer，动态生成）。
+安全边界：仅局域网（无公网映射）、只读 GET/HEAD、只服务 data/intel/ 下
+**.html/.json 白名单后缀**——sentinel.sqlite、*.csv、.env、隐藏文件与一切
+目录穿越（含 URL 编码）一律 403（2026-08-01 实测通过）。
+
 ## 加一个新渠道的方法
 
 1. `intel/collectors/` 下新建模块，继承 `base.Collector`：

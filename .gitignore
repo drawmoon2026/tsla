@@ -9,6 +9,7 @@ __pycache__/
 # 数据缓存与生成产物
 data/
 outputs/
+backups/
 figures/
 summary.md
 daily_v_count.csv

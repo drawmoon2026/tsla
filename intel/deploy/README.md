@@ -27,3 +27,10 @@ tail -f outputs/sentinel/launchd.log
 
 与既有 `com.tsla.shadow`（每交易日 21:00 UTC 一次的 shadow 交易）label 独立、
 日志目录独立（outputs/sentinel/），互不影响。
+
+其余模板（2026-08-01 起已安装并 load）：
+
+- `com.tsla.backup.plist`：每日 08:30 本地时间跑 `intel.backup`（不可再生数据
+  备份到 backups/，热备+校验+30 份滚动，见 intel/README.md「备份与恢复」）。
+- `com.tsla.serve.plist`：常驻 KeepAlive 跑 `intel.serve`（0.0.0.0:8765 局域网
+  只读静态服务，仅 data/intel/ 的 html/json 白名单）。

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 前向数据每日备份：每天 08:30 本地时间（避开盘中采集高峰）跑 intel.backup。
+       sqlite 全部走 backup API 热备，产物 backups/sentinel-YYYYMMDD.tar.gz，
+       保留最近 30 份。错过时刻（如睡眠）launchd 会在唤醒后补跑一次。
+       与 com.tsla.sentinel / dashboard / shadow* 的 label 独立，互不冲突。 -->
+  <key>Label</key><string>com.tsla.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tom/project/tsla/.venv/bin/python</string>
+    <string>-m</string>
+    <string>intel.backup</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/tom/project/tsla</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/tom/project/tsla/outputs/sentinel/backup.log</string>
+  <key>StandardErrorPath</key><string>/Users/tom/project/tsla/outputs/sentinel/backup.err</string>
+</dict>
+</plist>
