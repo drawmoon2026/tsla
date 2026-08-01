@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 外部看门狗（ops_review P1-5）：每 30 分钟核查各子系统最后活动新鲜度，
+       写 outputs/watchdog.json，异常发 macOS 系统通知（每系统 6h 冷却）。
+       它必须比被监控者更简单可靠：走系统 /usr/bin/python3 + 纯标准库，
+       不吃 .venv 损坏 / pip 依赖挂掉的连坐；label 独立，与 com.tsla.sentinel
+       / dashboard / backup / shadow* 互不影响。阈值表见 intel/watchdog.py。 -->
+  <key>Label</key><string>com.tsla.watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-m</string>
+    <string>intel.watchdog</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/tom/project/tsla</string>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/tom/project/tsla/outputs/sentinel/watchdog_launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/tom/project/tsla/outputs/sentinel/watchdog_launchd.err</string>
+</dict>
+</plist>

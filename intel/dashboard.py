@@ -79,6 +79,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from intel.store import DB_PATH
+from intel import market_calendar as mcal  # 统一 NYSE 交易日历（口径修正 2026-08-02）
 from intel import scoring  # 四维评分 v0（查询层实时算，不回写库）
 
 try:  # 价格上下文（yfinance 增量 + S2 读数）；导入失败降级为"取价失败"
@@ -245,26 +246,16 @@ def tier_badge(tier: str | None) -> str:
 
 
 def bdays_between(a: date, b: date) -> int:
-    """[a, b) 间的工作日数（周一至周五，近似交易日）。"""
-    if b <= a:
-        return 0
-    n, d = 0, a
-    while d < b:
-        if d.weekday() < 5:
-            n += 1
-        d += timedelta(days=1)
-    return n
+    """[a, b) 间的交易日数（统一 NYSE 日历；原为周一至周五 busday 近似）。"""
+    return mcal.trading_days_between(a, b)
 
 
 def add_bdays(d: date, n: int) -> date:
-    """d 之后第 n 个工作日（n>=0；n=0 返回 d 本身或下个工作日）。"""
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    while n > 0:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            n -= 1
-    return d
+    """d 之后第 n 个交易日（n>=0；n=0 返回 d 本身或下个交易日）。
+
+    原为周一至周五 busday 近似（不剔假日）；2026-08-02 起走统一 NYSE 日历。
+    """
+    return mcal.add_trading_days(d, n)
 
 
 def calib_eta(state_date: str, baseline_days: int) -> date | None:
@@ -297,7 +288,14 @@ def _calib_eta_selftest() -> None:
     # add_bdays 基础口径
     assert add_bdays(date(2026, 8, 20), 1) == date(2026, 8, 21)
     assert add_bdays(date(2026, 8, 21), 1) == date(2026, 8, 24)
-    print("calib_eta selftest: OK（出闸日 = 第 20 个有效基线行的次一交易日）")
+    # 统一日历接线（2026-08-02）：8 月无假日 → 出闸 ETA 与 busday 口径一致（回归）；
+    # 跨 Labor Day（09-07）的位移/计数按真实 NYSE 日历修正
+    assert add_bdays(date(2026, 9, 4), 1) == date(2026, 9, 8)      # 跳 Labor Day
+    assert bdays_between(date(2026, 9, 4), date(2026, 9, 9)) == 2  # 09-04、09-08
+    assert mcal.add_trading_days(date(2026, 8, 26), 19) == date(2026, 9, 23)  # F20 端点
+    assert mcal.close_time_et(date(2026, 11, 27)) == dt_time(13, 0)  # 感恩节次日半日市
+    print("calib_eta selftest: OK（出闸日 = 第 20 个有效基线行的次一交易日；"
+          "统一 NYSE 日历接线回归通过）")
 
 
 def age_badge(d: date | None, now: datetime, warn_days: int, label: str = "数据龄") -> str:
@@ -1111,7 +1109,8 @@ def load_trigger_cards() -> dict[str, dict] | None:
 
 
 def _roll_back_weekday(d: date) -> date:
-    while d.weekday() >= 5:
+    # 原：仅避周末；现走统一日历（周末+假日均前移，如 15 日逢假日）
+    while not mcal.is_trading_day(d):
         d -= timedelta(days=1)
     return d
 
@@ -1120,7 +1119,8 @@ def next_short_period(latest_settle: date) -> tuple[date, date]:
     """按 FINRA 结算日规则（每月 15 日与月末，遇周末前移）推算下一期。
 
     返回 (下一结算日, 预计发布日)；发布 ≈ 结算 + 9 交易日 16:00 ET
-    （与 finra_short.csv publication_rule 同口径，busday 近似不剔假日）。
+    （与 finra_short.csv publication_rule 同口径；交易日按统一 NYSE 日历，
+    原为 busday 近似不剔假日）。
     """
     y, m = latest_settle.year, latest_settle.month
     cands: list[date] = []
@@ -1972,7 +1972,7 @@ def render_waitboard(det: dict | None, px: dict | None,
     <div class="wb-grid three">{cell_next}{cell_eta}{cell_remain}</div>
     <div class="wb-sec">条件行动手册（IF → THEN，每条注明依据）</div>
     <div class="playbook">{"".join(rows)}</div>
-    <p class="footnote">推算口径：下期发布日按「结算 + 9 交易日」busday 近似（不剔美股假日，可能偏移 ~1 日）；
+    <p class="footnote">推算口径：下期发布日按「结算 + 9 交易日」推算（交易日按统一 NYSE 日历，intel/market_calendar.py；仍属近似，±1 日）；
     最新空头 change_pct {f"{latest_chg:+.2f}%" if latest_chg is not None else "—"} 未达 +{SHORT_JUMP_PCT:.0f}% 时腿 A 未命中，手册首条分支等的是<b>下一期</b>发布。
     行动手册全部为假想推演口径（不碰真钱）；分支依据：N3-H 冻结规则（intel/detector.py）·
     N6 SPLIT_GUARD（intel/splits.py，阈值 +{SPLIT_GUARD_PCT_V:.0f}%）· E11 S2（models/e8a/meta.json s2_switch）。</p>
@@ -3198,13 +3198,14 @@ CAL_HORIZON_D = 30  # 日历条时间窗（天）；≤7 天高亮
 
 
 def last_market_open(now: datetime) -> datetime:
-    """最近一次已发生的美股开盘时刻（工作日 09:30 ET，busday 近似不剔假日）。"""
+    """最近一次已发生的美股开盘时刻（交易日 09:30 ET，统一 NYSE 日历）。
+
+    原为工作日 busday 近似不剔假日（假日当开盘）。
+    """
     et_now = now.astimezone(ET)
     d = et_now.date()
-    if d.weekday() >= 5 or et_now.time() < dt_time(9, 30):
-        d -= timedelta(days=1)
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
+    if not mcal.is_trading_day(d) or et_now.time() < dt_time(9, 30):
+        d = mcal.prev_trading_day(d)
     return datetime.combine(d, dt_time(9, 30), tzinfo=ET).astimezone(timezone.utc)
 
 
@@ -3653,7 +3654,7 @@ def render_morning_brief(conn: sqlite3.Connection, det: dict | None,
     {_ai_brief(conn, today_et)}
     {_cal_strip(cal[0], cal[1], today_et)}
     <p class="footnote">口径：「新事件」按哨兵入库时刻（observed）统计，回填的老事件
-    不会伪装成新闻；「上次开盘」为工作日 09:30 ET 的 busday 近似（不剔美股假日）。
+    不会伪装成新闻；「上次开盘」为交易日 09:30 ET（统一 NYSE 日历，含假日剔除）。
     S2 前值 = 同一价格序列去掉最新一根重算，非独立存档。日历中财报/FINRA 发布日
     为推算或第三方预计，以官方公告为准。</p>
   </div>
@@ -3688,6 +3689,57 @@ def _topbar_price(px: dict | None, now: datetime) -> str:
         + (f'<span class="px-lab warn-text">缓存</span>' if px.get("from_cache") else "")
         + "</span>"
     )
+
+
+WD_JSON = PROJECT_ROOT / "outputs" / "watchdog.json"
+WD_SELF_STALE_MIN = 75  # 看门狗自身超龄阈值（分钟）；与 intel.watchdog 同值，
+                        # json 里带 self_stale_min 时以 json 为准
+
+
+def _watchdog_pill(now: datetime) -> str:
+    """顶栏外部看门狗状态 pill（P1-5）。
+
+    「谁来看守看守者」：看门狗自身超龄（json 生成时刻距今 > 2.5 个周期）
+    也要显示「看门狗失联」——服务端渲染 + 前端 JS 双重龄期检查兜底。
+    """
+    try:
+        wd = json.loads(WD_JSON.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ('<span class="pill warn" id="wd-pill" '
+                'title="outputs/watchdog.json 不存在——com.tsla.watchdog 未部署或未跑过">'
+                '<span class="dot"></span>看门狗未部署</span>')
+    except Exception as e:  # noqa: BLE001
+        return (f'<span class="pill warn" id="wd-pill" title="{esc(str(e))}">'
+                f'<span class="dot"></span>看门狗数据异常</span>')
+    gen = parse_ts(wd.get("generated_utc"))
+    self_thr = wd.get("self_stale_min") or WD_SELF_STALE_MIN
+    iso = gen.isoformat() if gen else ""
+    def _wd_age(m):
+        if m is None:
+            return ""
+        return (f"（{m:.0f} 分钟前）" if m < 90 else
+                f"（{m / 60:.1f} 小时前）" if m < 48 * 60 else
+                f"（{m / 1440:.1f} 天前）")
+
+    detail = " · ".join(
+        f"{r.get('label', k)} {'ok' if r.get('ok') else 'STALE'}{_wd_age(r.get('age_min'))}"
+        for k, r in (wd.get("systems") or {}).items()
+    )
+    if gen is None or (now - gen).total_seconds() / 60 > self_thr:
+        age_txt = fmt_ago(gen, now) if gen else "无时戳"
+        return (f'<span class="pill crit" id="wd-pill" data-iso="{esc(iso)}" '
+                f'title="watchdog.json 生成于 {esc(age_txt)}（阈值 {self_thr} 分钟）——'
+                f'com.tsla.watchdog 本身停了"><span class="dot"></span>看门狗失联</span>')
+    if wd.get("overall") == "ok":
+        return (f'<span class="pill good" id="wd-pill" data-iso="{esc(iso)}" '
+                f'title="{esc(detail)}"><span class="dot"></span>看守全绿</span>')
+    stale = wd.get("stale") or ["?"]
+    labels = [
+        (wd.get("systems") or {}).get(k, {}).get("label") or k for k in stale
+    ]
+    txt = "、".join(labels[:3]) + ("…" if len(labels) > 3 else "")
+    return (f'<span class="pill crit" id="wd-pill" data-iso="{esc(iso)}" '
+            f'title="{esc(detail)}"><span class="dot"></span>看守告警 · {esc(txt)}</span>')
 
 
 def render_topbar(conn: sqlite3.Connection, now: datetime,
@@ -3727,6 +3779,7 @@ def render_topbar(conn: sqlite3.Connection, now: datetime,
         <div class="sub">TSLA CAUSAL SENTINEL — INTEL COMMAND</div>
       </div>
       <span class="pill {pill_cls}" id="poll-pill"><span class="dot"></span>{pill_txt}</span>
+      {_watchdog_pill(now)}
       {_topbar_price(px, now)}
     </div>
     <div class="topmeta">
@@ -5593,6 +5646,7 @@ _JS = """
 })();
 (function () {
   var STALE_MS = %(stale_ms)d;
+  var WD_STALE_MS = %(wd_stale_ms)d;  // 看门狗自身超龄 → 顶栏「看门狗失联」
   function ago(iso) {
     var s = (Date.now() - Date.parse(iso)) / 1000;
     if (isNaN(s)) return "";
@@ -5623,6 +5677,12 @@ _JS = """
         pill.className = "pill crit";
         pill.innerHTML = '<span class="dot"></span>轮询中断';
       }
+    }
+    var wd = document.getElementById("wd-pill");
+    if (wd && wd.getAttribute("data-iso") &&
+        Date.now() - Date.parse(wd.getAttribute("data-iso")) > WD_STALE_MS) {
+      wd.className = "pill crit";
+      wd.innerHTML = '<span class="dot"></span>看门狗失联';
     }
     var gen = document.getElementById("gen-ts");
     var banner = document.getElementById("stale-banner");
@@ -6511,7 +6571,8 @@ def render(db_path: Path = DB_PATH) -> str:
         f"<style>{_CSS}</style>\n</head>\n<body>\n"
         + "\n".join(body)
         + "\n<script>"
-        + _JS % {"stale_ms": STALE_S * 1000}
+        + _JS % {"stale_ms": STALE_S * 1000,
+                 "wd_stale_ms": WD_SELF_STALE_MIN * 60 * 1000}
         + _TV_JS
         + _RP_JS
         + _FS_JS

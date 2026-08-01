@@ -55,7 +55,7 @@ import json
 import shutil
 import sqlite3
 import sys
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -232,9 +232,13 @@ def refresh_rolling(now: datetime, offline: bool) -> dict:
                                     "note": "API 未回旧尾时刻 bar，重叠核对跳过，"
                                             "仅靠隔夜跳变防线"}
         df = df[df.index > last_ts]
-        # 盘中运行：当日残段不收（只续到最新完整交易日）
+        # 盘中运行：当日残段不收（只续到最新完整交易日）。当日完整性截止时刻
+        # 按统一日历收盘 +5min（半日市 13:05 即可收当日；原固定 16:05）
+        from intel.market_calendar import close_time_et
         now_et = now.astimezone(ET)
-        if now_et.time() < dt_time(16, 5):
+        done_t = (datetime.combine(now_et.date(), close_time_et(now_et.date()))
+                  + timedelta(minutes=5)).time()
+        if now_et.time() < done_t:
             et_dates = df.index.tz_convert("America/New_York").date
             df = df[np.asarray(et_dates) != now_et.date()]
         # ② 隔夜跳变防线：首根新 bar 相对旧尾收盘跳变超阈值 → 中止（拆股日

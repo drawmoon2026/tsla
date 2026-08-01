@@ -203,6 +203,20 @@ launchctl load ~/Library/LaunchAgents/com.tsla.{sentinel,dashboard,shadow,shadow
 3. 跑 `--once` 验证，看 `--status` 里 poll_log 与时延。
 去重、入库、poll_log、sources 注册全部由基类完成，单渠道通常 <100 行。
 
+## 维护事项：统一交易日历年度续期（intel/market_calendar.py）
+
+全项目交易日口径的单一来源（2026-08-02 接线，替换零散 busday 近似——探测器
+F20/回看窗、判分器定稿时刻、仪表盘 ETA/等待板/晨间简报、shadow 会话收盘与
+EOD 强平、replay_refresh 当日截止）。**假日表与半日市表硬编码 2026–2027**
+（出处 NYSE 官方 https://www.nyse.com/markets/hours-calendars ）：
+
+- **每年 NYSE 公布次年日历后，人工把新一年补进 `HOLIDAYS` / `HALF_DAYS`**
+  （通常提前 2-3 年公布；建议每年 12 月顺手续下一年）。
+- 越界年份自动 fallback 到 busday 近似（周一至周五）并在日志打一次警告——
+  fallback 状态下假日/半日市重新失准（回到 P2-1/P1-8 的老毛病），不要长期依赖。
+- 续期后跑 `.venv/bin/python -m intel.market_calendar --selftest` 与
+  `.venv/bin/python -m intel.dashboard --selftest` 验证。
+
 ## 已知边界
 
 - edgar 采集器只入库申报元数据（form/items/acceptance 时刻/URL）；Form 4 逐笔

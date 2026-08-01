@@ -9,7 +9,8 @@
     python -m trading.run --mode shadow --live \
         --trigger 0.0173 --tp 0.0285 --sl 0.0148 --out outputs/shadow_live
 
-    # bounded smoke run: stop after N bars / at the 16:00 ET close
+    # bounded smoke run: stop after N bars / at the session close
+    # (16:00 ET; 13:00 on NYSE half days via intel.market_calendar)
     python -m trading.run --mode shadow --live --max-bars 160 --once-session ...
 
 Outputs: <out>/trades.csv (same columns as run_sim's sim_trades.csv, for
@@ -44,7 +45,8 @@ def main() -> None:
     ap.add_argument("--live", action="store_true",
                     help="shadow: poll real-time Alpaca bars (iex) instead of CSV replay")
     ap.add_argument("--once-session", action="store_true",
-                    help="live: exit after the 16:00 ET close instead of waiting overnight")
+                    help="live: exit after the session close (16:00 ET; 13:00 on NYSE "
+                         "half days via intel.market_calendar) instead of waiting overnight")
     ap.add_argument("--max-bars", type=int, default=None,
                     help="live: stop after N bars (bounded smoke runs)")
     # strategy selection: e2 = 1H breakout-follow (default, existing launchd);

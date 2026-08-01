@@ -10,7 +10,9 @@ State machine per symbol:
 
 ``apply_fill`` is the ONLY entry point that mutates the position/cash — the
 whole account state is reconstructable from the Fill journal. ``on_bar``
-emits forced-exit orders (TTL deadline, end-of-day 15:55 ET flatten) as
+emits forced-exit orders (TTL deadline, end-of-day flatten at 5 minutes
+before the session close — 15:55 ET normally, 12:55 ET on NYSE half days
+per intel.market_calendar, wired 2026-08-02 for ops-review P1-8) as
 market-on-close orders (tif="cls": fill at the current bar's close, matching
 run_sim's TTL exit at the last 5m close of the execution window).
 """
@@ -21,6 +23,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+from intel.market_calendar import close_time_et  # 半日市 EOD 提前（P1-8）
 
 from trading.core.types import (
     AccountState, Bar, Fill, Order, OrderSide, OrderType, Position,
@@ -123,7 +127,14 @@ class Portfolio:
             return []
         bar_end = bar.start + timedelta(seconds=bar.duration_s)
         et_end = bar_end.astimezone(_ET)
-        eod = et_end.replace(hour=self._eod_flat_et[0], minute=self._eod_flat_et[1],
+        # EOD 强平时刻 = 当日收盘 − 固定提前量（配置 eod_flat_et 相对 16:00 的
+        # 提前量，默认 5 分钟）。半日市 13:00 收盘 → 12:55 强平（P1-8：原固定
+        # eod = et_end.replace(hour=self._eod_flat_et[0], ...) 在半日市 13:00 后
+        # 无 bar，永不触发，持仓过夜）。
+        close_t = close_time_et(et_end.date())
+        lead_min = 16 * 60 - (self._eod_flat_et[0] * 60 + self._eod_flat_et[1])
+        eod_min = close_t.hour * 60 + close_t.minute - lead_min
+        eod = et_end.replace(hour=eod_min // 60, minute=eod_min % 60,
                              second=0, microsecond=0)
         tag = None
         if self._ttl_deadline is not None and bar_end >= self._ttl_deadline:

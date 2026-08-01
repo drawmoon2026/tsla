@@ -7,7 +7,7 @@ __pycache__/
 .DS_Store
 
 # 数据缓存与生成产物
-data/
+/data/
 outputs/
 backups/
 figures/

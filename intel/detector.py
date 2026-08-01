@@ -19,7 +19,11 @@
 已知口径边界（如实声明，不修饰）：
 - nitter RT 的时间是原帖时间；实例宕机（整自然日无成功轮询）的日子按 blind 处理：
   计数存 null，不入基线、不参与密集判定，出闸按「有效」基线日数计（P0-1 修复）；
-- 交易日用 numpy busday（周一至周五）近似，不剔美股假日，F20 因此可能偏移 ~1 日；
+- 交易日口径：2026-08-02 起改用统一 NYSE 日历（intel/market_calendar.py，含假日
+  与半日市；此前为 numpy busday 周一至周五近似，彩排实证跨 Labor Day 的 F20 端点
+  偏 1 天）。**这是口径修正非规则变更**：F20=「20 个交易日」语义不变，只是交易日
+  的定义从 busday 近似修正为真实日历（类比 N6 拆股修正先例）；已落库的历史行
+  不追溯改写；
 - 首个标定日覆盖的自然日可能因轮询未满一天而低估——都是基线噪声，标定期本身
   就是为吸收这类口径差而设。
 
@@ -45,6 +49,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from intel import market_calendar as mcal  # 统一 NYSE 交易日历（口径修正 2026-08-02）
 from intel import store
 from intel.collectors.base import Collector, cli
 
@@ -109,12 +114,14 @@ CREATE TABLE IF NOT EXISTS detector_trades (
 
 
 def prev_bday(d: date) -> date:
-    return np.busday_offset(d, -1, roll="forward").astype("datetime64[D]").astype(date)
+    # 原 busday 近似：np.busday_offset(d, -1, roll="forward")（不剔假日）
+    return mcal.prev_trading_day(d)
 
 
 def next_bday_after(d: date) -> date:
-    """严格晚于 d 的第一个交易日（d 可为周末）——act 日近似."""
-    return np.busday_offset(d, 1, roll="backward").astype("datetime64[D]").astype(date)
+    """严格晚于 d 的第一个交易日（d 可为周末/假日）——act 日."""
+    # 原 busday 近似：np.busday_offset(d, 1, roll="backward")（不剔假日）
+    return mcal.next_trading_day(d)
 
 
 def _et_date(iso_utc: str) -> date:
@@ -220,7 +227,8 @@ def recent_upjumps(shorts: list[dict], today: date) -> tuple[list[dict], list[di
         if s["chg_pct"] < SHORT_JUMP_PCT:
             continue
         act = next_bday_after(_et_date(s["pub_time_utc"]))
-        if act <= today and int(np.busday_count(act, today)) <= LOOKBACK_BDAYS:
+        # 原 busday 近似：int(np.busday_count(act, today))（不剔假日）
+        if act <= today and mcal.trading_days_between(act, today) <= LOOKBACK_BDAYS:
             (suspects if s["chg_pct"] >= SPLIT_GUARD_PCT else out).append(s)
     return out, suspects
 
@@ -271,9 +279,10 @@ def evaluate(conn, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     now_iso = now.isoformat(timespec="seconds")
     today = now.astimezone(ET).date()
-    if not bool(np.is_busday(today)):
+    # 原 busday 近似：np.is_busday(today)（假日照常评估并写行——彩排 Labor Day 实证）
+    if not mcal.is_trading_day(today):
         return {"state": None, "switched": False, "n_new_events": 0,
-                "note": f"{today} 非交易日（busday 近似），跳过"}
+                "note": f"{today} 非交易日（NYSE 日历），跳过"}
 
     conn.executescript(_SCHEMA)
 
@@ -353,8 +362,9 @@ def evaluate(conn, now: datetime | None = None) -> dict:
                     musk_day, musk_cnt = d, c   # 展示触发那一天的读数
                     break
         if triggered:
-            new_until = str(np.busday_offset(today, PERSIST_BDAYS - 1)
-                            .astype("datetime64[D]").astype(date))
+            # F20 端点：触发日起第 20 个交易日（含触发日）。原 busday 近似：
+            # np.busday_offset(today, PERSIST_BDAYS - 1)——跨假日会早 1 天结束
+            new_until = str(mcal.add_trading_days(today, PERSIST_BDAYS - 1))
             until = max(until or "", new_until)  # 重叠触发顺延
             state = "RISK_OFF"
         elif until and until >= str(today):

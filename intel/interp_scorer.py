@@ -47,6 +47,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from intel import market_calendar as mcal  # 统一 NYSE 交易日历（口径修正 2026-08-02）
 from intel import store
 
 ET = ZoneInfo("America/New_York")
@@ -59,7 +60,8 @@ VERDICT_MIN_N_1D = 60        # 1 日口径已判分样本达此数才跑预登�
 SURPRISE_MIN_N = 5           # H2 检验意外组最少样本
 ALPHA = 0.05                 # 预登记显著性水平
 MARKET_OPEN = time(9, 30)    # ET
-SESSION_DONE = time(16, 5)   # ET：此刻之后视当日线为收盘定稿
+SESSION_DONE = time(16, 5)   # ET：常规日收盘定稿时刻（半日市按日历收盘+5min，
+                             # 见 _session_done_t；统一日历口径修正 2026-08-02）
 
 _SCHEMA = """
 -- interp_scores：N8 前向判分（口径冻结见 intel/interp_scorer.py docstring）。
@@ -136,12 +138,22 @@ def load_ohlc(now: datetime) -> tuple[dict[date, tuple[float, float]], str | Non
     return out, err
 
 
+def _session_done_t(d: date) -> time:
+    """交易日 d 的日线定稿时刻（ET）= 日历收盘 + 5 分钟（半日市 13:05）."""
+    close_t = mcal.close_time_et(d)
+    return time(close_t.hour, close_t.minute + 5)
+
+
 def _session_complete(d: date, now: datetime) -> bool:
-    """交易日 d 的日线是否已收盘定稿（当日 16:05 ET 前不算）."""
+    """交易日 d 的日线是否已收盘定稿（当日日历收盘 +5min 前不算）.
+
+    原口径：固定 16:05 ET（SESSION_DONE）——半日市只慢不错；现按统一日历，
+    半日市 13:05 即定稿。D1 锚点本身取自真实 OHLC 交易日序列，天然含假日口径。
+    """
     now_et = now.astimezone(ET)
     if d < now_et.date():
         return True
-    return d == now_et.date() and now_et.time() >= SESSION_DONE
+    return d == now_et.date() and now_et.time() >= _session_done_t(d)
 
 
 # ---------------------------------------------------------------- 判分
@@ -346,12 +358,15 @@ def write_verdict(verdict: dict) -> None:
 # ---------------------------------------------------------------- auto 节流
 
 def _last_close_utc(now: datetime) -> datetime:
-    """最近一个「工作日 16:05 ET」时刻（busday 近似，不剔假日——假日多跑一次无害）."""
+    """最近一个「交易日收盘定稿」时刻（统一 NYSE 日历，半日市 13:05）.
+
+    原口径：工作日固定 16:05 ET（busday 近似，不剔假日——假日多跑一次无害）。
+    """
     et = now.astimezone(ET)
     d = et.date()
     while True:
-        if d.weekday() < 5:
-            t = datetime.combine(d, SESSION_DONE, tzinfo=ET)
+        if mcal.is_trading_day(d):   # 原：d.weekday() < 5
+            t = datetime.combine(d, _session_done_t(d), tzinfo=ET)
             if t <= et:
                 return t.astimezone(timezone.utc)
         d -= timedelta(days=1)

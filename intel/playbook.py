@@ -128,14 +128,13 @@ def esc(s: object) -> str:
 
 
 def add_bdays(d: date, n: int) -> date:
-    """d 之后第 n 个工作日（周一至周五近似，不剔假日——与探测器同口径）。"""
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    while n > 0:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            n -= 1
-    return d
+    """d 之后第 n 个交易日（统一 NYSE 日历——与探测器同口径）。
+
+    原为周一至周五 busday 近似（不剔假日）；2026-08-02 起随探测器一并接
+    intel/market_calendar.py（口径修正非规则变更）。
+    """
+    from intel import market_calendar as mcal
+    return mcal.add_trading_days(d, n)
 
 
 # ---------------------------------------------------------------- data pulls
