@@ -63,6 +63,11 @@ def struct_time_to_utc_iso(st) -> str | None:
 class Collector:
     SOURCE: dict = {}  # 子类覆盖
 
+    # P1-7「绿灯零产出」守卫：对"理应恒有产出"的渠道，连续 ZERO_SEEN_ALERT_N 轮
+    # ok 且 seen=0 → 发一条 quality 告警事件（每日至多一条）。默认 None = 豁免
+    # （日历类/稀疏渠道 seen=0 属正常）。阈值按渠道节奏由子类设定。
+    ZERO_SEEN_ALERT_N: int | None = None
+
     def fetch(self):
         raise NotImplementedError
 
@@ -70,6 +75,36 @@ class Collector:
         raise NotImplementedError
 
     # ------------------------------------------------------------------ run
+
+    def _zero_seen_guard(self, conn, sid: str) -> None:
+        """连续零产出告警（P1-7）：HTTP 200 但 normalize 恒为空 = 疑似源改版哑火."""
+        n_alert = self.ZERO_SEEN_ALERT_N
+        if not n_alert:
+            return
+        streak = 0  # 含刚记录的这一轮
+        for r in conn.execute(
+            "SELECT ok, n_seen FROM poll_log WHERE source_id=? "
+            "ORDER BY poll_id DESC LIMIT ?", (sid, max(n_alert * 3, 50)),
+        ):
+            if r["ok"] == 1 and r["n_seen"] == 0:
+                streak += 1
+            else:
+                break
+        if streak < n_alert:
+            return
+        today = datetime.now(timezone.utc).date()
+        n = store.insert_events(conn, sid, [{
+            "dedupe_key": f"zero_seen_alert_{today}",
+            "event_time_utc": store.utcnow_iso(),
+            "symbol": None,
+            "type": "quality_zero_seen",
+            "title": (f"绿灯零产出告警：{sid} 已连续 {streak} 轮采集成功但 0 条目"
+                      f"（阈值 {n_alert}）——疑似源站改版/结构变化导致静默哑火，需人工核查"),
+            "payload": {"streak": streak, "threshold": n_alert,
+                        "rule": "P1-7 zero-seen guard"},
+        }])
+        if n:
+            print(f"  [{sid}] 零产出告警：连续 {streak} 轮 ok 且 seen=0（已发告警事件）")
 
     def run_once(self, verbose: bool = True) -> dict:
         sid = self.SOURCE["source_id"]
@@ -83,6 +118,8 @@ class Collector:
             dur = int((time.time() - t0) * 1000)
             store.record_poll(conn, sid, ok=True, n_seen=len(events), n_new=n_new,
                               duration_ms=dur)
+            if not events:
+                self._zero_seen_guard(conn, sid)
             stats = {"source_id": sid, "ok": True, "n_seen": len(events),
                      "n_new": n_new, "duration_ms": dur, "error": None}
         except Exception as e:  # noqa: BLE001

@@ -78,31 +78,46 @@ class OptionsSnapshotCollector(Collector):
     def fetch(self):
         import yfinance as yf
 
+        from intel import prices
+
+        # P1-4：与价格上下文共享 yfinance 退避状态（data/intel/price_cache.json）
+        # ——限流期不再对同一 IP 追打整条期权链，快速失败（poll_log 红灯可见）
+        remaining = prices.yf_backoff_remaining()
+        if remaining > 0:
+            raise RuntimeError(
+                f"yfinance 共享退避中（还剩 {remaining:.0f}s）——跳过期权链抓取")
         t = yf.Ticker("TSLA")
         now_utc = datetime.now(ZoneInfo("UTC"))
         snap_date = now_utc.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
         rows = []
-        for exp in t.options:
-            ch = t.option_chain(exp)
-            for right, df in [("C", ch.calls), ("P", ch.puts)]:
-                for r in df.itertuples(index=False):
-                    rows.append(
-                        {
-                            "snapshot_date": snap_date,
-                            "snapshot_time_utc": now_utc.isoformat(timespec="seconds"),
-                            "contract_symbol": r.contractSymbol,
-                            "expiration": exp,
-                            "opt_right": right,
-                            "strike": _f(r.strike),
-                            "last_price": _f(r.lastPrice),
-                            "bid": _f(r.bid),
-                            "ask": _f(r.ask),
-                            "volume": _i(r.volume),
-                            "open_interest": _i(r.openInterest),
-                            "iv": _f(r.impliedVolatility),
-                            "in_the_money": int(bool(r.inTheMoney)),
-                        }
-                    )
+        try:
+            for exp in t.options:
+                ch = t.option_chain(exp)
+                for right, df in [("C", ch.calls), ("P", ch.puts)]:
+                    for r in df.itertuples(index=False):
+                        rows.append(
+                            {
+                                "snapshot_date": snap_date,
+                                "snapshot_time_utc": now_utc.isoformat(timespec="seconds"),
+                                "contract_symbol": r.contractSymbol,
+                                "expiration": exp,
+                                "opt_right": right,
+                                "strike": _f(r.strike),
+                                "last_price": _f(r.lastPrice),
+                                "bid": _f(r.bid),
+                                "ask": _f(r.ask),
+                                "volume": _i(r.volume),
+                                "open_interest": _i(r.openInterest),
+                                "iv": _f(r.impliedVolatility),
+                                "in_the_money": int(bool(r.inTheMoney)),
+                            }
+                        )
+        except Exception as e:  # noqa: BLE001 —— 失败推进共享退避计数，再如实上抛
+            prices.yf_failure(f"options_chain: {type(e).__name__}: {e}")
+            raise
+        if not rows:
+            prices.yf_failure("options_chain: 空链（疑似限流）")
+            raise RuntimeError("期权链为空（疑似限流），已计入共享退避")
         return {"snapshot_date": snap_date, "time_utc": now_utc.isoformat(timespec="seconds"),
                 "rows": rows}
 

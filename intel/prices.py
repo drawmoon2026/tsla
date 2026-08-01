@@ -2,9 +2,15 @@
 
 职责（roadmap #1/#2 的数据层）：
 - 每次仪表盘生成时拉 yfinance TSLA 日线（增量补到今天）与现价快照；
-- 成功则写 JSON 缓存（data/intel/price_daily_cache.json），失败降级读缓存，
-  再失败如实报错（页面显示"取价失败"与 STALE 徽章，不装新鲜）；
+- 进程外共享缓存 data/intel/price_cache.json（P1-4 限流治理）：
+    * 5 分钟内的成功结果直接复用，不打 API——同一 5 分钟链条上的
+      仪表盘 / 判分器（OHLC 同源）/ 期权快照退避判断共用这一份；
+    * 取数失败记入退避状态（连续失败指数退避，上限 1 小时）：退避窗内
+      不再打 API，直接用旧缓存降级（页面显示 STALE 徽章，不装新鲜）；
 - 与本地 CSV 日线合并成一条连续日收盘序列（CSV 为主，yfinance 只补尾部）；
+  P0-2 拆股防护：合并前核对 CSV 末日收盘与 yfinance 同日收盘，差异 >5%
+  视为口径断裂（疑似拆股，yfinance 拆股日会整体重写为拆后口径）——放弃 CSV
+  段，整体改用 yfinance 序列并在返回值里如实标注（splice_mismatch）；
 - 计算 S2 开关读数：距 252 交易日滚动高点回撤 %（E11 冻结口径：
   drawdown from 252d rolling high > 20% → 停用买入策略）。
 
@@ -21,23 +27,33 @@ from zoneinfo import ZoneInfo
 from intel.store import DB_PATH, utcnow_iso
 
 ET = ZoneInfo("America/New_York")
-CACHE_PATH = DB_PATH.parent / "price_daily_cache.json"
+CACHE_PATH = DB_PATH.parent / "price_cache.json"          # 共享缓存（P1-4）
+LEGACY_CACHE_PATH = DB_PATH.parent / "price_daily_cache.json"  # 旧缓存，只读兜底
 
 S2_WINDOW = 252        # E11 冻结口径：252 交易日滚动高点
 S2_LINE_PCT = -20.0    # 回撤超过 -20% → S2 触发
 
+CACHE_TTL_S = 300          # 5 分钟内直接复用缓存，不打 API
+BACKOFF_BASE_S = 300       # 首次失败退避 5 分钟
+BACKOFF_MAX_S = 3600       # 退避上限 1 小时
+SPLICE_TOL_PCT = 5.0       # CSV 末日 vs yfinance 同日收盘差异容忍（P0-2）
+
 
 def _fetch_yf() -> dict:
-    """拉 yfinance 日线 + 现价；任何失败抛异常由调用方降级."""
+    """拉 yfinance 日线（含 OHLC）+ 现价；任何失败抛异常由调用方降级."""
     import yfinance as yf
 
     tk = yf.Ticker("TSLA")
     h = tk.history(period="2y", interval="1d", auto_adjust=False)
-    daily = {
-        str(idx.date()): float(c)
-        for idx, c in h["Close"].items()
-        if c == c  # 滤 NaN
-    }
+    daily: dict[str, float] = {}
+    ohlc: dict[str, list[float]] = {}
+    for idx, row in h.iterrows():
+        o, c = float(row["Open"]), float(row["Close"])
+        if c == c and c > 0:
+            ds = str(idx.date())
+            daily[ds] = c
+            if o == o and o > 0:
+                ohlc[ds] = [o, c]
     if not daily:
         raise RuntimeError("yfinance 日线为空")
     live = None
@@ -50,17 +66,21 @@ def _fetch_yf() -> dict:
     return {
         "fetched_utc": utcnow_iso(),
         "daily": daily,
+        "ohlc": ohlc,
         "live_price": live,
         "live_time_utc": utcnow_iso(),
     }
 
 
 def _read_cache() -> dict | None:
-    try:
-        d = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        return d if d.get("daily") else None
-    except Exception:  # noqa: BLE001
-        return None
+    for p in (CACHE_PATH, LEGACY_CACHE_PATH):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if d.get("daily"):
+                return d
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _write_cache(data: dict) -> None:
@@ -69,6 +89,93 @@ def _write_cache(data: dict) -> None:
                               encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass  # 缓存写失败不影响本次渲染
+
+
+def _age_s(iso: str | None, now: datetime) -> float | None:
+    try:
+        t = datetime.fromisoformat(iso or "")
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (now - t).total_seconds()
+    except ValueError:
+        return None
+
+
+def yf_backoff_remaining(now: datetime | None = None) -> float:
+    """yfinance 失败退避剩余秒数（0 = 可以打 API）——期权快照等共享此状态."""
+    now = now or datetime.now(timezone.utc)
+    cache = _read_cache() or {}
+    fail = cache.get("fail") or {}
+    n = int(fail.get("count") or 0)
+    if n <= 0:
+        return 0.0
+    age = _age_s(fail.get("last_utc"), now)
+    if age is None:
+        return 0.0
+    backoff = min(BACKOFF_MAX_S, BACKOFF_BASE_S * 2 ** (n - 1))
+    return max(0.0, backoff - age)
+
+
+def yf_failure(err: str, now: datetime | None = None) -> None:
+    """登记一次 yfinance 失败（推进共享退避计数）——期权快照采集器也调用."""
+    now = now or datetime.now(timezone.utc)
+    cache = _read_cache() or {}
+    fail = cache.get("fail") or {}
+    cache["fail"] = {"count": int(fail.get("count") or 0) + 1,
+                     "last_utc": now.isoformat(timespec="seconds"),
+                     "error": str(err)[:500]}
+    _write_cache(cache)
+
+
+def yf_ok() -> None:
+    """清除共享退避状态（任一模块成功取数即调用）."""
+    cache = _read_cache() or {}
+    if cache.get("fail"):
+        cache.pop("fail", None)
+        _write_cache(cache)
+
+
+def fetch_daily(now: datetime | None = None) -> tuple[dict | None, str | None, str]:
+    """共享取数入口：返回 (data, error, src)，src ∈ api|ttl|stale|none.
+
+    - ttl   ：缓存 5 分钟内新鲜，直接复用（不打 API，error=None）
+    - api   ：真打了 yfinance 且成功（缓存已更新，退避清零）
+    - stale ：本次没拿到新数据（失败或退避中），用旧缓存降级
+    - none  ：连缓存都没有
+    """
+    now = now or datetime.now(timezone.utc)
+    cache = _read_cache()
+    age = _age_s((cache or {}).get("fetched_utc"), now)
+    if cache and age is not None and age < CACHE_TTL_S:
+        return cache, None, "ttl"
+    remaining = yf_backoff_remaining(now)
+    if remaining > 0:
+        fail = (cache or {}).get("fail") or {}
+        err = (f"yfinance 退避中（还剩 {remaining:.0f}s，连续失败 "
+               f"{fail.get('count')} 次）：{fail.get('error', '')}")
+        return (cache, err, "stale") if cache else (None, err, "none")
+    try:
+        data = _fetch_yf()
+        fresh = dict(data)
+        _write_cache(fresh)   # 成功即覆盖（不带 fail 键 = 退避清零）
+        return fresh, None, "api"
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+        yf_failure(err, now)
+        return (cache, err, "stale") if cache else (None, err, "none")
+
+
+def get_ohlc(now: datetime | None = None
+             ) -> tuple[dict[date, tuple[float, float]], str | None]:
+    """{date: (open, close)}（共享缓存/退避同源）——判分器（N8）取价入口."""
+    data, err, _src = fetch_daily(now)
+    out: dict[date, tuple[float, float]] = {}
+    for k, v in ((data or {}).get("ohlc") or {}).items():
+        try:
+            out[date.fromisoformat(k)] = (float(v[0]), float(v[1]))
+        except (ValueError, TypeError, IndexError):
+            continue
+    return out, err
 
 
 def s2_reading(dates: list[date], closes: list[float]) -> dict | None:
@@ -105,28 +212,41 @@ def get_price_context(
       live_price/live_time_utc  现价快照；error 非 None 时二者可能取自缓存
       chg_pct/chg_date     最近一根日线的涨跌与其日期（若为今日即"今日涨跌"）
       appended_dates       相对 CSV 新补的日期数（含临时今日点）
-      from_cache           本次取价失败、用的是上次缓存
+      from_cache           本次取价失败/退避，用的是上次缓存（STALE 徽章）
+      cache_hit            缓存 5 分钟内新鲜直接复用（正常，不算降级）
       error                取价失败原因（成功为 None）
+      splice_mismatch      P0-2：CSV 末日 vs yfinance 同日收盘断裂详情
+                           （非 None 时序列已整体改用 yfinance，CSV 段弃用）
       s2                   s2_reading() 结果
       price_asof           序列最后一根的日期
     """
     now = now or datetime.now(timezone.utc)
     today_et = now.astimezone(ET).date()
 
-    error = None
-    from_cache = False
-    data = None
-    try:
-        data = _fetch_yf()
-        _write_cache(data)
-    except Exception as e:  # noqa: BLE001
-        error = f"{type(e).__name__}: {e}"
-        data = _read_cache()
-        from_cache = data is not None
+    data, error, src = fetch_daily(now)
+    from_cache = src == "stale"
 
     merged: dict[date, float] = dict(zip(csv_dates, csv_closes))
     n_before = len(merged)
     csv_last = csv_dates[-1] if csv_dates else None
+
+    # P0-2 拆股防护：CSV 末日与 yfinance 同日收盘核对，断裂即弃用 CSV 段
+    splice_mismatch = None
+    if data and csv_last is not None and str(csv_last) in data["daily"]:
+        yf_close = data["daily"][str(csv_last)]
+        diff_pct = abs(yf_close / csv_closes[-1] - 1.0) * 100.0
+        if diff_pct > SPLICE_TOL_PCT:
+            splice_mismatch = {
+                "date": str(csv_last),
+                "csv_close": csv_closes[-1],
+                "yf_close": yf_close,
+                "diff_pct": round(diff_pct, 3),
+                "tol_pct": SPLICE_TOL_PCT,
+                "action": "疑似拆股/口径断裂——CSV 段弃用，整体改用 yfinance 序列",
+            }
+            merged = {}
+            csv_last = None
+
     live_price = live_time = None
     if data:
         for ds, c in sorted(data["daily"].items()):
@@ -162,7 +282,9 @@ def get_price_context(
         "chg_date": chg_date,
         "appended_dates": len(dates) - n_before,
         "from_cache": from_cache,
+        "cache_hit": src == "ttl",
         "error": error,
+        "splice_mismatch": splice_mismatch,
         "s2": s2_reading(dates, closes),
         "price_asof": dates[-1] if dates else None,
     }
@@ -172,7 +294,8 @@ if __name__ == "__main__":
     ctx = get_price_context([], [])
     s2 = ctx["s2"]
     print(f"live={ctx['live_price']} asof={ctx['price_asof']} "
-          f"chg={ctx['chg_pct']} err={ctx['error']} cache={ctx['from_cache']}")
+          f"chg={ctx['chg_pct']} err={ctx['error']} cache={ctx['from_cache']} "
+          f"ttl_hit={ctx['cache_hit']}")
     if s2:
         print(f"S2: dd={s2['drawdown_pct']:.2f}% high={s2['high']:.2f} "
               f"({s2['high_date']}) triggered={s2['triggered']}")

@@ -266,12 +266,36 @@ def add_bdays(d: date, n: int) -> date:
 
 
 def calib_eta(state_date: str, baseline_days: int) -> date | None:
-    """标定期满预计日：state_date 起再累积 (CALIB_BDAYS - baseline_days) 个交易日。"""
+    """出闸预计日 = 首个可出信号交易日（P2 off-by-one 修正）。
+
+    state_date 行含 baseline_days 个有效基线日；还需 (CALIB_BDAYS - baseline_days)
+    个交易日集齐第 20 个基线行——但状态机 active 条件是「今日之前已有 >= 20 个
+    有效行」（intel/detector.py），第 20 行当天仍 CALIBRATING，**次一交易日**才
+    首次可出信号，故再 +1。若后续再出现 blind 日（无成功采集），出闸日顺延。
+    """
     try:
         sd = date.fromisoformat(state_date)
     except (TypeError, ValueError):
         return None
-    return add_bdays(sd, max(0, CALIB_BDAYS - baseline_days))
+    return add_bdays(sd, max(0, CALIB_BDAYS - baseline_days) + 1)
+
+
+def _calib_eta_selftest() -> None:
+    """calib_eta 单元自测（P2 出闸日 off-by-one）：python -m intel.dashboard --selftest"""
+    # 场景 1（审查报告原案）：07-31 行 6/20 → 第 20 行落在 08-20（+14bd），
+    # active 在次一交易日 08-21 才成立 → 出闸日 = 08-21（不是 08-20）
+    assert calib_eta("2026-07-31", 6) == date(2026, 8, 21), calib_eta("2026-07-31", 6)
+    # 场景 2（P0-1 审计后实况）：07-23 标 blind，07-31 行有效 5/20 → 出闸 08-24
+    assert calib_eta("2026-07-31", 5) == date(2026, 8, 24), calib_eta("2026-07-31", 5)
+    # 场景 3：第 20 个有效行当天（20/20）仍 CALIBRATING，出闸 = 次一交易日
+    assert calib_eta("2026-08-21", 20) == date(2026, 8, 24)   # 周五 → 下周一
+    assert calib_eta("2026-08-24", 20) == date(2026, 8, 25)
+    # 场景 4：坏输入
+    assert calib_eta("bad", 3) is None and calib_eta(None, 3) is None  # type: ignore[arg-type]
+    # add_bdays 基础口径
+    assert add_bdays(date(2026, 8, 20), 1) == date(2026, 8, 21)
+    assert add_bdays(date(2026, 8, 21), 1) == date(2026, 8, 24)
+    print("calib_eta selftest: OK（出闸日 = 第 20 个有效基线行的次一交易日）")
 
 
 def age_badge(d: date | None, now: datetime, warn_days: int, label: str = "数据龄") -> str:
@@ -325,7 +349,19 @@ def load_detector(conn: sqlite3.Connection) -> dict | None:
                 "SELECT * FROM detector_trades ORDER BY trade_time_utc, trade_id"
             )
         ]
-    return {"cur": dict(cur), "switches": switches, "trades": trades}
+    # P0-1：blind 自然日统计（musk_window_json 里 count=null 的日子——无成功采集，
+    # 不入基线、不参与判定；基线进度按「有效 N/20（跳过 blind M 天）」如实显示）
+    blind_days: set[str] = set()
+    for (j,) in conn.execute("SELECT musk_window_json FROM detector_state"):
+        try:
+            win = json.loads(j) if j else {}
+        except ValueError:
+            win = {}
+        blind_days.update(k for k, v in win.items() if v is None)
+    cur = dict(cur)
+    cur["blind_skipped"] = len(blind_days)
+    return {"cur": cur, "switches": switches, "trades": trades,
+            "blind_days": sorted(blind_days)}
 
 
 def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
@@ -1786,12 +1822,16 @@ def render_waitboard(det: dict | None, px: dict | None,
                            "取价失败或序列不足——缺口不是安全", " crit")
 
     thr = cur.get("dense_thr")
+    n_blind = int(cur.get("blind_skipped") or 0)
+    blind_txt = (f" · 跳过 blind {n_blind} 天（无成功采集，不入基线）" if n_blind else "")
     cell_calib = _wb_cell(
         "标定基线进度",
-        f"{baseline_days} / {CALIB_BDAYS} 交易日",
+        f"有效 {baseline_days} / {CALIB_BDAYS} 交易日",
         (f"标定期内不出信号 · 阈值未生效（历史参考 {DENSE_REF}帖/日，Sprinklr 口径）"
+         + blind_txt
          if calibrating
-         else f"标定完成 · 当日密集阈值 {_fmt_count(thr)} 帖/日（nitter 基线分位映射）"),
+         else f"标定完成 · 当日密集阈值 {_fmt_count(thr)} 帖/日（nitter 基线分位映射）"
+         + blind_txt),
     )
 
     # ---- 在等信息 ----
@@ -1816,15 +1856,17 @@ def render_waitboard(det: dict | None, px: dict | None,
     eta = calib_eta(str(cur.get("state_date")), baseline_days)
     remain = max(0, CALIB_BDAYS - baseline_days)
     cell_eta = _wb_cell(
-        "标定期满日",
+        "出闸日（首个可出信号交易日）",
         str(eta) if eta else "—",
-        ("期满起出正式信号（CALIBRATING → RISK_ON/OFF）" if calibrating
-         else "已期满，正常值班"),
+        ("第 20 个有效基线行的次一交易日起出正式信号（CALIBRATING → RISK_ON/OFF）；"
+         "再遇 blind 日则顺延" if calibrating
+         else "已出闸，正常值班"),
     )
     cell_remain = _wb_cell(
         "nitter 基线缺口",
-        f"还差 {remain} 交易日" if remain else "已集齐",
-        f"基线 = 扩张窗日计数，阈值取其 {DENSE_QUANT_TXT} 分位（65 帖/日的历史分位映射）",
+        f"还差 {remain} 有效交易日" if remain else "已集齐",
+        f"基线 = 扩张窗日计数（blind 日除外），阈值取其 {DENSE_QUANT_TXT} 分位"
+        "（65 帖/日的历史分位映射）",
     )
 
     # ---- 条件行动手册（动态分支）----
@@ -1832,7 +1874,8 @@ def render_waitboard(det: dict | None, px: dict | None,
                else "密集阈值（标定期满后由基线分位映射生效）")
     latest_chg = latest["chg"] if latest else cur.get("short_chg_pct")
     calib_note = (
-        f"；<b class=\"warn-text\">标定期内（至 {eta}）仅记录不触发</b>" if calibrating and eta
+        f"；<b class=\"warn-text\">标定期内（{eta} 出闸前）仅记录不触发</b>"
+        if calibrating and eta
         else "；<b class=\"warn-text\">标定期内仅记录不触发</b>" if calibrating else ""
     )
     rows = [
@@ -2632,7 +2675,7 @@ def render_fullsys_view(data: dict | None,
         det_m = cur.get("detector") or {}
         det_st = (det_m.get("current_state") or "").upper()
         if det_st == "CALIBRATING":
-            det_txt = (f"标定中 {det_m.get('baseline_days') or '?'}/{CALIB_BDAYS}"
+            det_txt = (f"标定中 有效 {det_m.get('baseline_days') or '?'}/{CALIB_BDAYS}"
                        "（不出信号）")
         elif det_st == "RISK_OFF":
             det_txt = "RISK_OFF 假想减仓中"
@@ -2901,6 +2944,11 @@ def render_consensus(det: dict | None, px: dict | None, shadow: dict,
         chg_cls = "crit-text" if (chg or 0) < 0 else "good-text"
         cache_tag = ('<span class="age warn">缓存价（本次取价失败）</span>'
                      if px.get("from_cache") else "")
+        if px.get("splice_mismatch"):
+            sm = px["splice_mismatch"]
+            cache_tag += (f'<span class="age crit" title="{esc(json.dumps(sm, ensure_ascii=False))}">'
+                          f'价格口径断裂（疑似拆股，差 {sm.get("diff_pct")}%）——'
+                          "CSV 段弃用，已整体改用 yfinance 序列</span>")
         cell_px = (
             '<div class="cx-cell"><div class="cx-k">TSLA 现价</div>'
             f'<div class="cx-v num">{px["live_price"]:,.2f}'
@@ -2954,8 +3002,12 @@ def render_consensus(det: dict | None, px: dict | None, shadow: dict,
         cls, phrase, why = DET_STATE.get(state, ("off", state, ""))
         eta = calib_eta(str(cur.get("state_date")), int(cur.get("baseline_days") or 0))
         if state == "CALIBRATING":
-            d_txt = (f"标定中 {cur.get('baseline_days') or 0}/{CALIB_BDAYS} · "
-                     + (f"预计 {eta.strftime('%m-%d')} 恢复出信号" if eta else "期满出信号"))
+            d_txt = (f"标定中 有效 {cur.get('baseline_days') or 0}/{CALIB_BDAYS}"
+                     + (f"（跳过 blind {cur.get('blind_skipped')} 天）"
+                        if cur.get("blind_skipped") else "")
+                     + " · "
+                     + (f"预计 {eta.strftime('%m-%d')} 出闸（首个可出信号日）"
+                        if eta else "期满出信号"))
         elif state == "RISK_OFF":
             d_txt = (f"假想减仓生效（全仓→现金口径）· F{PERSIST_BDAYS} 至 "
                      f"{cur.get('risk_off_until') or '—'}")
@@ -3163,8 +3215,9 @@ def load_calendar(conn: sqlite3.Connection, finra: list[dict] | None,
                         int(det["cur"].get("baseline_days") or 0))
         if eta:
             items.append({"date": eta, "kind": "calib",
-                          "label": "探测器标定期满",
-                          "detail": f"{CALIB_BDAYS} 交易日基线集齐 · 恢复出信号"})
+                          "label": "探测器出闸（恢复出信号）",
+                          "detail": f"{CALIB_BDAYS} 有效交易日基线集齐后的次一交易日 · "
+                                    "再遇 blind 日则顺延"})
     items = [it for it in items if it["date"] >= today]
     items.sort(key=lambda it: it["date"])
     near = [it for it in items if it["date"] <= horizon]
@@ -3236,14 +3289,41 @@ N8_VERDICT_PATH = PROJECT_ROOT / "outputs" / "n8_scoring" / "verdict.json"
 N8_MIN_N = 60  # 与 intel/interp_scorer.py VERDICT_MIN_N_1D 同步（展示用）
 
 
-def _n8_scoreboard(conn: sqlite3.Connection) -> str:
+def _n8_scoreboard(conn: sqlite3.Connection, today_et: date | None = None) -> str:
     """N8 记分牌行：累计判分 + 最近 5 条已判分解读的对错标记（前向积累）.
 
     数据来自 interp_scores 表（intel/interp_scorer.py，口径冻结见 N8 条目）；
-    样本不足时如实显示积累进度，不提前判读。
+    样本不足时如实显示积累进度，不提前判读。P1-1：挂判分器数据龄徽章
+    （interp_scorer_runs 最近成功运行；超 2 交易日未跑标黄，超 4 标红），
+    判分停摆不再只靠 pending 永不了结的肉眼观察。
     """
     if not has_table(conn, "interp_scores"):
         return ""
+    # -- 数据龄（P1-1）：最近成功运行时刻，回退 interp_scores 最新 scored_utc
+    age_html = ""
+    if today_et is not None:
+        last_ok = None
+        absent_note = ""
+        if has_table(conn, "interp_scorer_runs"):
+            r = conn.execute("SELECT MAX(run_utc) FROM interp_scorer_runs "
+                             "WHERE status='ok'").fetchone()
+            last_ok = parse_ts(r[0]) if r and r[0] else None
+            r2 = conn.execute("SELECT status, reason FROM interp_scorer_runs "
+                              "ORDER BY run_id DESC LIMIT 1").fetchone()
+            if r2 is not None and r2["status"] == "absent":
+                absent_note = (f'<span class="age crit" title="{esc(r2["reason"] or "")}">'
+                               "最近一次运行失败</span>")
+        if last_ok is None:
+            r = conn.execute("SELECT MAX(scored_utc) FROM interp_scores").fetchone()
+            last_ok = parse_ts(r[0]) if r and r[0] else None
+        if last_ok is not None:
+            d_ok = last_ok.astimezone(ET).date()
+            bd = bdays_between(d_ok, today_et)
+            cls = "crit" if bd > 4 else ("warn" if bd > 2 else "")
+            txt = "今日已跑" if d_ok >= today_et else f"{bd} 交易日前"
+            age_html = f'<span class="age {cls}">判分龄 {esc(txt)}</span>' + absent_note
+        else:
+            age_html = '<span class="age warn">判分器从未成功运行</span>' + absent_note
     c = {r["s"]: r["n"] for r in conn.execute(
         """SELECT score_1d s, COUNT(*) n FROM interp_scores
            WHERE direction IN ('bullish','bearish') GROUP BY score_1d""")}
@@ -3289,8 +3369,8 @@ def _n8_scoreboard(conn: sqlite3.Connection) -> str:
         recent_html = ('<div class="cx-ref muted">尚无已判分解读——'
                        f'{pend} 条方向解读待其 D1 交易日收盘后首判</div>')
     return (
-        '<div class="cal-head">N8 记分牌'
-        '<span class="h-sub">解读方向 vs 之后首个交易日 1 日/5 日 TSLA 绝对收益方向 · '
+        '<div class="cal-head">N8 记分牌' + age_html
+        + '<span class="h-sub">解读方向 vs 之后首个交易日 1 日/5 日 TSLA 绝对收益方向 · '
         "中性不计分 · 口径冻结于 N8 条目</span></div>"
         f'<div class="ai-brief"><p class="statement">累计判分（1 日口径）：{head}'
         f'<span class="muted"> —— {esc(verdict_note)}</span></p>'
@@ -3321,7 +3401,7 @@ def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
         return (head + '<div class="ai-brief"><span class="crit-text">'
                 f'{"" if not stale else esc(run["run_date"]) + " "}解读缺席</span>'
                 f'<span class="muted"> —— {esc(run["reason"] or "原因未记录")}</span></div>'
-                + _n8_scoreboard(conn))
+                + _n8_scoreboard(conn, today_et))
     rows = [dict(r) for r in conn.execute(
         """SELECT i.direction, i.strength, i.note, i.surprise,
                   e.title, e.type, e.url, s.tier, e.source_id
@@ -3364,7 +3444,7 @@ def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
           "记分牌判分口径见 docs/strategy-lab.md N8（解读时刻后首个交易日开盘起算，"
           "1 日 = D1 开盘→收盘，5 日 = D1 开盘→D5 收盘；主口径 TSLA 绝对方向；"
           "中性不计分，平局判 miss）。</p></div>"
-        + _n8_scoreboard(conn)
+        + _n8_scoreboard(conn, today_et)
     )
 
 
@@ -3685,14 +3765,18 @@ def _ring_svg(state: str, cls: str, phrase: str, cur: dict) -> tuple[str, str]:
     """
     if state == "CALIBRATING":
         days = int(cur.get("baseline_days") or 0)
+        n_blind = int(cur.get("blind_skipped") or 0)
         pct = min(100.0, days / CALIB_BDAYS * 100)
         eta = calib_eta(str(cur.get("state_date")), days)
-        prog_txt = f"{days} / {CALIB_BDAYS} 交易日"
+        prog_txt = f"有效 {days} / {CALIB_BDAYS} 交易日"
         sub_txt = (
-            f"不出信号 · 预计 {eta.strftime('%m-%d')} 恢复" if eta
+            f"不出信号 · 预计 {eta.strftime('%m-%d')} 出闸" if eta
             else f"基线累积 {pct:.0f}% · 不出信号"
         )
-        cap = (f"标定环 · 预计 {eta} 期满出信号" if eta else "标定环 · 期满出信号")
+        cap = (f"标定环 · 预计 {eta} 出闸（首个可出信号日）" if eta
+               else "标定环 · 期满出信号")
+        if n_blind:
+            cap += f" · 跳过 blind {n_blind} 天（无采集，不入基线）"
     elif state == "RISK_OFF":
         until = None
         try:
@@ -3756,7 +3840,8 @@ def _sparks_html(cur: dict) -> str:
     """腿 B 火花条：musk_window_json 的日计数（最多 14 日），p95 线 = 密集阈值。"""
     try:
         win = json.loads(cur.get("musk_window_json") or "{}")
-        vals = [float(win[k]) for k in sorted(win)][-14:]
+        # blind 日（null）不画（P0-1：无采集 ≠ 0 帖）
+        vals = [float(win[k]) for k in sorted(win) if win[k] is not None][-14:]
     except (ValueError, TypeError):
         vals = []
     if not vals:
@@ -3837,7 +3922,7 @@ def render_detector(data: dict | None, now: datetime, wait_html: str = "",
     if state == "CALIBRATING":
         stmt = (
             "重建 nitter 口径基线中，两腿读数仅观测、<b>不触发信号</b>"
-            + (f"（预计 <b>{eta}</b> 期满恢复出信号）" if eta else "")
+            + (f"（预计 <b>{eta}</b> 出闸，首个可出信号交易日）" if eta else "")
             + "；两腿需同时命中且各自持续，方转入假想减仓。"
         )
     elif state == "RISK_OFF":
@@ -6352,7 +6437,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="生成哨兵静态 HTML 仪表盘")
     ap.add_argument("--db", type=Path, default=DB_PATH, help="sentinel.sqlite 路径")
     ap.add_argument("--out", type=Path, default=OUT_PATH, help="输出 HTML 路径")
+    ap.add_argument("--selftest", action="store_true",
+                    help="只跑 calib_eta 出闸日单元自测（P2 off-by-one）")
     args = ap.parse_args()
+    if args.selftest:
+        _calib_eta_selftest()
+        return
     if not args.db.exists():
         raise SystemExit(f"数据库不存在：{args.db}（先跑哨兵采集）")
     html = render(args.db)

@@ -5,6 +5,9 @@
 1. 数据续接：data/TSLA_5m_rolling.csv（首次从冻结源 data/TSLA_5m_3y.csv 起步），
    经 Alpaca API 增量补 5m RTH bar 到最新完整交易日（盘中不收当日残段；
    取数失败降级用现有滚动数据，原因如实写入 meta，不装新鲜）。
+   P0-2 拆股防护：续接前对旧尾时刻做重叠收盘核对（差 >5% 中止）+ 首根新 bar
+   隔夜跳变核对（>25% 中止），中止时向 events 发 price_splice_alert 告警事件，
+   等待人工重建 rolling CSV——拆股后新旧口径静默拼接会造成假崩盘/S2 假触发。
 
 2. 交易续算（冻结管线零改动，参数全部读 models/e8a/meta.json）：
    - 留出段 = outputs/e8a_replay 冻结存档（research/e8a_trades_export.py 产物，
@@ -80,6 +83,11 @@ ALGO_VERSION = ("E8-A+S2 冻结 2026-07-24（models/e8a）× N3-H 探测器冻�
                 " · replay_refresh r1")
 
 
+# ---- 拆股/口径断裂防护（P0-2）：续接前重叠核对 + 隔夜跳变阈值 -----------------
+SPLICE_OVERLAP_TOL_PCT = 5.0   # 重叠 bar（同一时刻）收盘差异超此值 → 中止续接
+SPLICE_GAP_TOL_PCT = 25.0      # 首根新 bar 相对旧尾的隔夜跳变超此值 → 中止续接
+
+
 # ------------------------------------------------------------- small helpers
 
 def _last_line(path: Path) -> str:
@@ -92,6 +100,42 @@ def _last_line(path: Path) -> str:
 
 def _last_ts(path: Path) -> pd.Timestamp:
     return pd.Timestamp(_last_line(path).split(",")[0])
+
+
+def _last_close(path: Path) -> float:
+    # 列序固定：Datetime,Open,High,Low,Close,Volume
+    return float(_last_line(path).split(",")[4])
+
+
+def _price_splice_alert(kind: str, title: str, payload: dict) -> None:
+    """向 events 表发 price_splice_alert 告警事件（仪表盘情报流可见）；失败只打印."""
+    try:
+        from intel import store
+
+        conn = store.connect()
+        try:
+            store.upsert_source(conn, {
+                "source_id": "replay_refresh",
+                "name": "推演引擎数据续接守卫（价格线拆股/口径断裂防护）",
+                "tier": "T1",
+                "method": "derived",
+                "poll_interval_s": 0,
+                "cost": "free",
+                "weight_source": 0.5,
+                "notes": "非采集渠道：rolling CSV 续接前的重叠核对与隔夜跳变防护（P0-2）",
+            })
+            store.insert_events(conn, "replay_refresh", [{
+                "dedupe_key": f"price_splice_{kind}_{datetime.now(timezone.utc).date()}",
+                "event_time_utc": store.utcnow_iso(),
+                "symbol": "TSLA",
+                "type": "price_splice_alert",
+                "title": title,
+                "payload": payload,
+            }])
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[rolling] 告警事件写入失败（不影响中止决定）：{type(e).__name__}: {e}")
 
 
 def _detector_rows() -> list[dict]:
@@ -153,19 +197,63 @@ def refresh_rolling(now: datetime, offline: bool) -> dict:
         from src.alpaca_data import fetch_bars, filter_rth, load_keys
 
         last_ts = _last_ts(ROLLING_CSV)
+        last_close = _last_close(ROLLING_CSV)
         start = last_ts + pd.Timedelta(minutes=5)
         end = pd.Timestamp(now) - pd.Timedelta(minutes=17)  # free tier: >15min 前
         if start >= end:
             return info
         key, secret = load_keys()
-        df = fetch_bars("TSLA", start, end, "5Min", key, secret)
+        # P0-2 拆股防护：取数起点前移，覆盖旧尾时刻做重叠核对
+        fetch_start = last_ts - pd.Timedelta(days=5)
+        df = fetch_bars("TSLA", fetch_start, end, "5Min", key, secret)
         df = filter_rth(df)
+        # ① 重叠核对：同一时刻（旧 CSV 末 bar）的收盘必须一致（拆股后 Alpaca
+        #    adjustment="split" 会重写历史为拆后口径，与 CSV 旧段断裂）
+        overlap = df[df.index == last_ts]
+        if len(overlap):
+            new_close = float(overlap["Close"].iloc[0])
+            diff_pct = abs(new_close / last_close - 1) * 100
+            info["splice_check"] = {"overlap_bar": True,
+                                    "csv_close": last_close, "api_close": new_close,
+                                    "diff_pct": round(diff_pct, 3)}
+            if diff_pct > SPLICE_OVERLAP_TOL_PCT:
+                msg = (f"价格口径断裂（疑似拆股）：旧尾 {last_ts} 收盘 CSV={last_close:.4f} "
+                       f"vs API={new_close:.4f}（差 {diff_pct:.1f}% > "
+                       f"{SPLICE_OVERLAP_TOL_PCT:.0f}%）——中止续接，等待人工重建 rolling CSV")
+                print(f"[rolling] {msg}")
+                _price_splice_alert("overlap", "推演数据续接中止：" + msg,
+                                    {"bar_ts": str(last_ts), "csv_close": last_close,
+                                     "api_close": new_close, "diff_pct": diff_pct,
+                                     "tol_pct": SPLICE_OVERLAP_TOL_PCT})
+                info.update(ok=False, error=msg)
+                return info
+        else:
+            info["splice_check"] = {"overlap_bar": False,
+                                    "note": "API 未回旧尾时刻 bar，重叠核对跳过，"
+                                            "仅靠隔夜跳变防线"}
         df = df[df.index > last_ts]
         # 盘中运行：当日残段不收（只续到最新完整交易日）
         now_et = now.astimezone(ET)
         if now_et.time() < dt_time(16, 5):
             et_dates = df.index.tz_convert("America/New_York").date
             df = df[np.asarray(et_dates) != now_et.date()]
+        # ② 隔夜跳变防线：首根新 bar 相对旧尾收盘跳变超阈值 → 中止（拆股日
+        #    最小因子 2 产生 ~50% 跳变；TSLA 真实隔夜极值远小于 25%）
+        if len(df):
+            first_open = float(df["Open"].iloc[0])
+            gap_pct = abs(first_open / last_close - 1) * 100
+            if gap_pct > SPLICE_GAP_TOL_PCT:
+                msg = (f"隔夜跳变异常（疑似拆股）：旧尾收盘 {last_close:.4f} → "
+                       f"首根新 bar {df.index[0]} 开盘 {first_open:.4f}"
+                       f"（跳变 {gap_pct:.1f}% > {SPLICE_GAP_TOL_PCT:.0f}%）"
+                       "——中止续接，等待人工重建 rolling CSV")
+                print(f"[rolling] {msg}")
+                _price_splice_alert("gap", "推演数据续接中止：" + msg,
+                                    {"last_close": last_close, "first_open": first_open,
+                                     "first_bar_ts": str(df.index[0]),
+                                     "gap_pct": gap_pct, "tol_pct": SPLICE_GAP_TOL_PCT})
+                info.update(ok=False, error=msg)
+                return info
         if len(df):
             df.to_csv(ROLLING_CSV, mode="a", header=False,
                       date_format="%Y-%m-%dT%H:%M:%S%z")

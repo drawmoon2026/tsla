@@ -26,8 +26,10 @@
     结果（或积累进度）写 outputs/n8_scoring/verdict.json。
 
 存储：interp_scores 表（event_id 主键；中性行也入库存实际收益，供 H2 波动
-检验用，但 score_1d/5d 为 NULL 不计分）。价格用 yfinance 日线 OHLC，缓存
-data/intel/n8_ohlc_cache.json，取数失败降级读缓存，仍缺则保持 pending 不硬判。
+检验用，但 score_1d/5d 为 NULL 不计分）。价格走 intel.prices 共享缓存
+（data/intel/price_cache.json，5 分钟 TTL + 失败退避，P1-4 限流治理），
+取数失败降级读缓存，仍缺则保持 pending 不硬判。每次运行记 interp_scorer_runs
+（ok / absent+reason，P1-1）——崩溃不再静默。
 
 用法：
     .venv/bin/python -m intel.interp_scorer --once    # 立即判一轮（幂等）
@@ -58,7 +60,6 @@ SURPRISE_MIN_N = 5           # H2 检验意外组最少样本
 ALPHA = 0.05                 # 预登记显著性水平
 MARKET_OPEN = time(9, 30)    # ET
 SESSION_DONE = time(16, 5)   # ET：此刻之后视当日线为收盘定稿
-OHLC_TTL_S = 3600            # 缓存新鲜期（秒）；过期且有活可干才重新拉
 
 _SCHEMA = """
 -- interp_scores：N8 前向判分（口径冻结见 intel/interp_scorer.py docstring）。
@@ -78,6 +79,17 @@ CREATE TABLE IF NOT EXISTS interp_scores (
     scored_utc  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_interp_scores_date ON interp_scores (interp_date);
+
+-- interp_scorer_runs：判分器运行记录面（P1-1）——崩溃不再静默，
+-- 仿 interpret 的 runs 口径：ok / absent(+reason)；仪表盘记分牌挂数据龄。
+CREATE TABLE IF NOT EXISTS interp_scorer_runs (
+    run_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_utc    TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK (status IN ('ok','absent')),
+    reason     TEXT,
+    n_updated  INTEGER,
+    n_todo     INTEGER
+);
 """
 
 
@@ -105,47 +117,22 @@ def _write_cache(d: dict) -> None:
         pass
 
 
-def _fetch_yf_ohlc() -> dict[str, list[float]]:
-    """yfinance TSLA 日线 → {ISO日期: [open, close]}；失败抛异常由调用方降级."""
-    import yfinance as yf
-
-    h = yf.Ticker("TSLA").history(period="6mo", interval="1d", auto_adjust=False)
-    out: dict[str, list[float]] = {}
-    for idx, row in h.iterrows():
-        o, c = float(row["Open"]), float(row["Close"])
-        if o == o and c == c and o > 0 and c > 0:
-            out[str(idx.date())] = [o, c]
-    if not out:
-        raise RuntimeError("yfinance 日线为空")
-    return out
-
-
 def load_ohlc(now: datetime) -> tuple[dict[date, tuple[float, float]], str | None]:
-    """OHLC（缓存优先，过期重拉，拉失败降级用旧缓存）→ ({date: (o,c)}, error)."""
-    cache = _read_cache()
-    err = None
-    fresh = False
-    try:
-        t = datetime.fromisoformat(cache.get("fetched_utc", ""))
-        fresh = (now - t).total_seconds() < OHLC_TTL_S
-    except ValueError:
-        pass
-    daily = cache.get("daily") or {}
-    if not fresh:
-        try:
-            daily = _fetch_yf_ohlc()
-            cache = {**cache, "fetched_utc": now.isoformat(timespec="seconds"),
-                     "daily": daily}
-            _write_cache(cache)
-        except Exception as e:  # noqa: BLE001
-            err = f"{type(e).__name__}: {e}"
-            daily = cache.get("daily") or {}
-    out = {}
-    for k, v in daily.items():
-        try:
-            out[date.fromisoformat(k)] = (float(v[0]), float(v[1]))
-        except (ValueError, TypeError, IndexError):
-            continue
+    """OHLC → ({date: (o,c)}, error)——共享 intel.prices 缓存（P1-4 限流治理）.
+
+    取价统一走 data/intel/price_cache.json（5 分钟 TTL + 失败退避），与仪表盘
+    价格上下文同源，不再各自打 yfinance。共享缓存拿不到时降级读本模块旧缓存
+    （n8_ohlc_cache.json，只兜底不再写入 OHLC；该文件继续存 last_ok_utc）。
+    """
+    from intel import prices
+
+    out, err = prices.get_ohlc(now)
+    if not out:  # 共享缓存与 API 均空 → 旧缓存兜底
+        for k, v in (_read_cache().get("daily") or {}).items():
+            try:
+                out[date.fromisoformat(k)] = (float(v[0]), float(v[1]))
+            except (ValueError, TypeError, IndexError):
+                continue
     return out, err
 
 
@@ -394,15 +381,38 @@ def should_run_auto(conn: sqlite3.Connection, now: datetime) -> bool:
 
 # ---------------------------------------------------------------- 入口
 
+def _record_run(conn: sqlite3.Connection, status: str, reason: str | None,
+                stats: dict | None) -> None:
+    """interp_scorer_runs 落一行（P1-1）；记录失败本身只打印，不再抛."""
+    try:
+        conn.execute(
+            """INSERT INTO interp_scorer_runs (run_utc, status, reason,
+                                               n_updated, n_todo)
+               VALUES (?, ?, ?, ?, ?)""",
+            (store.utcnow_iso(), status, reason,
+             (stats or {}).get("n_updated"), (stats or {}).get("n_todo")))
+        conn.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f"[interp_scorer] runs 记录失败：{type(e).__name__}: {e}")
+
+
 def run(auto: bool = False) -> int:
     now = datetime.now(timezone.utc)
     conn = _connect()
+    stats: dict | None = None
     try:
         if auto and not should_run_auto(conn, now):
             return 0  # 静默速退：无新解读且无可了结的 pending
-        stats = run_score(conn, now)
-        verdict = build_verdict(conn, now)
-        write_verdict(verdict)
+        try:
+            stats = run_score(conn, now)
+            verdict = build_verdict(conn, now)
+            write_verdict(verdict)
+        except Exception as e:  # noqa: BLE001 —— P1-1：崩溃记 absent，不静默
+            _record_run(conn, "absent", f"{type(e).__name__}: {e}", stats)
+            raise
+        _record_run(conn, "ok",
+                    stats.get("ohlc_error") and f"取价降级：{stats['ohlc_error']}",
+                    stats)
         cache = _read_cache()
         cache["last_ok_utc"] = now.isoformat(timespec="seconds")
         _write_cache(cache)

@@ -61,6 +61,10 @@ def _parse_meetings(html: str) -> list[dict]:
 
 
 class FedCollector(Collector):
+    # P1-7：联储官网日历页恒有会议列表（整年场次），解析出 0 场 = 疑似改版正则失配；
+    # 日频轮询，连续 2 天零产出即告警（存量 FOMC 事件可掩盖哑火一年以上）
+    ZERO_SEEN_ALERT_N = 2
+
     SOURCE = {
         "source_id": "fed_fomc",
         "name": "FOMC meeting calendar (federalreserve.gov)",

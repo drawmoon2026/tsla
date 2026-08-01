@@ -17,7 +17,8 @@
 - 期满后阈值 = nitter 基线（扩张窗，含标定期后继续累积）的同分位数，每日重算。
 
 已知口径边界（如实声明，不修饰）：
-- nitter RT 的时间是原帖时间；实例宕机期间日计数会低估（poll_log 可查）；
+- nitter RT 的时间是原帖时间；实例宕机（整自然日无成功轮询）的日子按 blind 处理：
+  计数存 null，不入基线、不参与密集判定，出闸按「有效」基线日数计（P0-1 修复）；
 - 交易日用 numpy busday（周一至周五）近似，不剔美股假日，F20 因此可能偏移 ~1 日；
 - 首个标定日覆盖的自然日可能因轮询未满一天而低估——都是基线噪声，标定期本身
   就是为吸收这类口径差而设。
@@ -79,9 +80,11 @@ CREATE TABLE IF NOT EXISTS detector_state (
     state               TEXT NOT NULL CHECK (state IN ('CALIBRATING','RISK_ON','RISK_OFF')),
     musk_count          REAL,               -- 信号窗内最大日发帖数（nitter 口径）
     musk_count_day      TEXT,               -- 该计数对应的自然日
-    musk_window_json    TEXT,               -- 本行覆盖的自然日计数 {date: count}，基线即由此累积
+    musk_window_json    TEXT,               -- 本行覆盖的自然日计数 {date: count}，基线即由此累积；
+                                            -- count=null 表示该日 x_nitter 无成功采集（blind），
+                                            -- 不入基线、不参与密集判定（P0-1）
     dense_thr           REAL,               -- 当日生效密集阈值（标定期 NULL）
-    baseline_days       INTEGER NOT NULL,   -- 已累积基线交易日数（含当日）
+    baseline_days       INTEGER NOT NULL,   -- 已累积「有效」基线交易日数（含当日；blind 行不计）
     short_settlement    TEXT,               -- 最新已发布空头结算日
     short_chg_pct       REAL,               -- 最新已发布空头 change_pct
     short_upjump_recent INTEGER NOT NULL DEFAULT 0,  -- 回看20交易日内有无 up-jump 发布
@@ -130,6 +133,54 @@ def musk_day_counts(conn, lo: date, hi: date) -> dict[str, int]:
         if d in counts:
             counts[d] += 1
     return counts
+
+
+def nitter_covered_days(conn, lo: date, hi: date) -> set[str]:
+    """[lo, hi] 内有 x_nitter 成功轮询（poll_log ok=1，按 ET 自然日归属）的日期集合.
+
+    P0-1 blind 口径依据：某自然日整日无成功采集，则该日的事件计数不可信
+    （断供期一律计 0，会污染基线并在断供窗内漏触发）——该日标 blind。
+    """
+    if hi < lo:
+        return set()
+    # 粗筛（UTC 字符串区间左右各放宽一天），逐条按 ET 日精确归属
+    lo_s = (datetime.combine(lo, datetime.min.time(), tzinfo=ET)
+            - timedelta(days=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    hi_s = (datetime.combine(hi, datetime.max.time(), tzinfo=ET)
+            + timedelta(days=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    covered: set[str] = set()
+    for (t,) in conn.execute(
+        """SELECT poll_time_utc FROM poll_log
+           WHERE source_id='x_nitter' AND ok=1
+             AND poll_time_utc >= ? AND poll_time_utc <= ?""",
+        (lo_s, hi_s),
+    ):
+        d = str(_et_date(t))
+        if str(lo) <= d <= str(hi):
+            covered.add(d)
+    return covered
+
+
+def effective_baseline_days(conn, before_date: str) -> tuple[int, int]:
+    """(有效基线交易日数, 跳过的 blind 自然日数)，只数 before_date 之前的行.
+
+    有效行 = musk_window_json 至少含一个非 null 计数的行（blind 日计数为 null）；
+    blind 自然日数 = 各行窗口里 null 计数日去重后的总数。
+    """
+    n_eff = 0
+    blind_days: set[str] = set()
+    for (j,) in conn.execute(
+        "SELECT musk_window_json FROM detector_state WHERE state_date < ?",
+        (before_date,),
+    ):
+        try:
+            win = json.loads(j) if j else {}
+        except ValueError:
+            win = {}
+        if any(v is not None for v in win.values()):
+            n_eff += 1
+        blind_days.update(k for k, v in win.items() if v is None)
+    return n_eff, len(blind_days)
 
 
 def short_releases(conn, now_iso: str) -> list[dict]:
@@ -184,7 +235,8 @@ def baseline_from_rows(conn, before_date: str | None = None) -> dict[str, int]:
     base: dict[str, int] = {}
     for (j,) in conn.execute(sql, args):
         if j:
-            base.update(json.loads(j))
+            # blind 日（无成功采集，计数存 null）不入基线（P0-1）
+            base.update({k: v for k, v in json.loads(j).items() if v is not None})
     return base
 
 
@@ -236,17 +288,24 @@ def evaluate(conn, now: datetime | None = None) -> dict:
     ref = row_today or row_prev
     prev_state = ref["state"] if ref else None
     prev_until = ref["risk_off_until"] if ref else None
-    n_rows_before = conn.execute(
-        "SELECT COUNT(*) FROM detector_state WHERE state_date<?", (str(today),)
-    ).fetchone()[0]
-    baseline_days = n_rows_before + 1          # 含今日
-    active = n_rows_before >= CALIB_BDAYS      # 第 21 个交易日起出信号
+    # P0-1：出闸按「有效」基线交易日数计——blind 行（窗口全 null）不计入
+    n_eff_before, _n_blind_before = effective_baseline_days(conn, str(today))
+    active = n_eff_before >= CALIB_BDAYS       # 第 21 个有效交易日起出信号
 
     # -- 放风腿：信号窗 = 上一交易日（含）至昨日（含）的自然日，act 均为今日
     win_lo, win_hi = prev_bday(today), today - timedelta(days=1)
-    window = musk_day_counts(conn, win_lo, win_hi) if win_hi >= win_lo else {}
-    musk_day, musk_cnt = (max(window.items(), key=lambda kv: kv[1])
-                          if window else (None, None))
+    window: dict[str, int | None] = (
+        musk_day_counts(conn, win_lo, win_hi) if win_hi >= win_lo else {})
+    # P0-1 blind 判定：当日无成功 x_nitter 轮询 → 该自然日计数标 null（blind）：
+    # 不入基线、不参与密集判定（断供期计 0 既污染基线又假装「无密集」）
+    if window:
+        covered = nitter_covered_days(conn, win_lo, win_hi)
+        window = {d: (c if d in covered else None) for d, c in window.items()}
+    window_valid = {d: c for d, c in window.items() if c is not None}
+    leg_b_blind = bool(window) and not window_valid
+    baseline_days = n_eff_before + (1 if window_valid else 0)   # 含今日（今日有效才计）
+    musk_day, musk_cnt = (max(window_valid.items(), key=lambda kv: kv[1])
+                          if window_valid else (None, None))
 
     # -- 空头腿
     shorts = short_releases(conn, now_iso)
@@ -282,7 +341,7 @@ def evaluate(conn, now: datetime | None = None) -> dict:
         vals = np.array(list(base.values()), float)
         thr = float(np.quantile(vals, DENSE_QUANTILE)) if len(vals) else None
         if thr is not None:
-            for d, c in window.items():
+            for d, c in window_valid.items():   # blind 日不参与密集判定（P0-1）
                 if c <= thr:
                     continue
                 dense_end = datetime.combine(
@@ -322,6 +381,7 @@ def evaluate(conn, now: datetime | None = None) -> dict:
     n_new = 0
     if switched:
         musk_s = (f"Musk {musk_day} 发帖 {musk_cnt}（nitter 口径）" if musk_cnt is not None
+                  else "Musk 窗口 blind（x_nitter 无成功采集）" if leg_b_blind
                   else "Musk 无窗口数据")
         if thr is not None:
             musk_s += f"，阈值 {thr:.1f}"
@@ -373,9 +433,11 @@ def evaluate(conn, now: datetime | None = None) -> dict:
             conn.commit()
 
     return {"state": state, "switched": switched, "n_new_events": n_new + n_guard,
-            "note": f"{state} baseline={baseline_days}/{CALIB_BDAYS}"
+            "note": f"{state} baseline={baseline_days}/{CALIB_BDAYS}(有效)"
                     + (f" thr={thr:.1f}" if thr is not None else "")
                     + (f" until={until}" if state == "RISK_OFF" else "")
+                    + (" 腿B失明(blind：窗口内无成功采集，不入基线不判定)"
+                       if leg_b_blind else "")
                     + (f" split_guard={n_guard}" if n_guard else "")}
 
 

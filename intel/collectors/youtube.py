@@ -28,6 +28,10 @@ KEYWORDS = ("tesla", "tsla", "musk")
 
 
 class YoutubeCollector(Collector):
+    # P1-7：官方频道 feed 无关键词过滤恒回最近 15 条，持续 seen=0 = 渠道级异常；
+    # 15 分钟一轮，连续 8 轮（约 2 小时）零产出即告警
+    ZERO_SEEN_ALERT_N = 8
+
     SOURCE = {
         "source_id": "youtube",
         "name": "YouTube channel RSS (Tesla official + 财经媒体)",
@@ -36,14 +40,27 @@ class YoutubeCollector(Collector):
         "poll_interval_s": 900,
         "cost": "free",
         "weight_source": 0.3,
-        "notes": "官方频道全收；媒体频道标题含 tesla/tsla/musk 才入库；每频道仅最近15条",
+        "notes": "官方频道全收；媒体频道标题含 tesla/tsla/musk 才入库；每频道仅最近15条；"
+                 "单频道失败不拖垮整渠道（2026-08-01 查证：Tesla 官方 channel_id 有效，"
+                 "但 YouTube feed 端点存在间歇性 404，非 ID 失效）",
     }
 
     def fetch(self):
+        # 单频道容错（P2-11）：一个频道 404/超时不拖垮其余频道；全军覆没才算渠道失败。
+        # 2026-08-01 查证：UC5WjFrtBdufl6CZojX3D8dQ（Tesla 官方）仍有效，404 为
+        # YouTube 端间歇性抽风——按单频道降级处理并打印，不改 channel_id。
         out = []
+        errors = []
         for cid, label, kw_only in CHANNELS:
-            resp = http_get(FEED.format(cid=cid))
-            out.append((label, kw_only, feedparser.parse(resp.content)))
+            try:
+                resp = http_get(FEED.format(cid=cid))
+                out.append((label, kw_only, feedparser.parse(resp.content)))
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{label}({cid}): {type(e).__name__}: {e}")
+        if not out:
+            raise RuntimeError("; ".join(errors))
+        if errors:
+            print(f"  [youtube] partial fail: {'; '.join(errors)}")
         return out
 
     def normalize(self, raw) -> list[dict]:

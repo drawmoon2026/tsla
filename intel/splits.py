@@ -99,6 +99,30 @@ def adjust_levels(payloads: list[dict], symbol: str) -> None:
             p["short_interest"] = p["short_interest"] / f
 
 
+def price_split_factor(symbol: str, day: str) -> float:
+    """价格层折算因子（P0-2 备用接口）：day（拆前口径日）之后生效的拆股因子累计乘积.
+
+    用法：把 day 当天的拆前价格折算到当前（拆后）口径 → price / price_split_factor。
+    与 split_factor 互补：split_factor 数「day 及之前已生效」的因子（股数口径），
+    本函数数「day 之后才生效」的因子（价格折算需要的是后续拆股）。
+    """
+    f = 1.0
+    for eff, k in SPLITS.get(symbol, []):
+        if day < eff:
+            f *= k
+    return f
+
+
+def adjust_price_series(symbol: str, dates: list, closes: list[float]) -> list[float]:
+    """把混合口径/拆前口径的日收盘序列统一折算到当前（拆后）口径（P0-2 备用）.
+
+    dates 元素可为 date 或 ISO 字符串；返回新列表，不改原序列。已知拆股表
+    （SPLITS）驱动，供价格线在确认拆股后人工重建/校验时调用——正常路径不启用
+    （replay_refresh / prices.py 的防线是「检出断裂即中止并告警」，折算须人工确认）。
+    """
+    return [c / price_split_factor(symbol, str(d)) for d, c in zip(dates, closes)]
+
+
 def unexplained_jumps(payloads: list[dict], symbol: str) -> list[dict]:
     """折算后仍 change_pct >= SPLIT_GUARD_PCT 的行——拆股表无法解释的大跳变.
 

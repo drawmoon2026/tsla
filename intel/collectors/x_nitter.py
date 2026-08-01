@@ -52,6 +52,7 @@ class XNitterCollector(Collector):
     def fetch(self):
         out = []
         errors = []
+        failed_users = set()
         for user in ACCOUNTS:
             try:
                 resp = http_get(BASE.format(user=user),
@@ -61,8 +62,15 @@ class XNitterCollector(Collector):
                     raise RuntimeError("empty feed (可能被反爬/实例降级)")
                 out.append((user, feed))
             except Exception as e:  # noqa: BLE001
+                failed_users.add(user)
                 errors.append(f"{user}: {type(e).__name__}: {e}")
-        if not out:  # 全军覆没才算渠道失败
+        # P0-1a：elonmusk 账号是探测器腿 B 唯一前向数据源——它失败即整渠道失败
+        # （poll_log ok=0、连败计数生效、detector 的 blind 判定得以感知），
+        # 即便 Tesla 账号成功也不算本轮成功（其事件下轮 recent-20 会补上）。
+        if "elonmusk" in failed_users:
+            raise RuntimeError("elonmusk feed 失败（腿 B 唯一数据源，按整渠道失败处理）: "
+                               + "; ".join(errors))
+        if not out:
             raise RuntimeError("; ".join(errors))
         if errors:
             print(f"  [x_nitter] partial fail: {'; '.join(errors)}")

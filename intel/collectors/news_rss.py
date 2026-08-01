@@ -35,6 +35,10 @@ KEYWORDS = ("tesla", "tsla", "musk")
 
 
 class NewsRssCollector(Collector):
+    # P1-7：五路 feed 聚合理应恒有产出（HTTP 200 但 entries 全空 = 疑似结构改版）；
+    # 盘中 5 分钟一轮，连续 12 轮（约 1 小时）零产出即告警
+    ZERO_SEEN_ALERT_N = 12
+
     SOURCE = {
         "source_id": "news_rss",
         "name": "财经 RSS 聚合 (Yahoo/CNBC/MarketWatch/GoogleNews)",
