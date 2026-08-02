@@ -77,6 +77,8 @@ def fetch_bars(
     while True:
         r = requests.get(DATA_URL.format(symbol=symbol), headers=headers, params=params, timeout=30)
         if r.status_code == 403 and feed == "sip":
+            # P0-B: fallback is no longer silent — the recursive call stamps the
+            # actually-used feed into df.attrs["feed"], which callers persist.
             print("SIP feed rejected for this account — falling back to IEX feed.")
             return fetch_bars(symbol, start, end, timeframe, key, secret, feed="iex")
         if r.status_code == 429:
@@ -99,6 +101,7 @@ def fetch_bars(
     df = df.rename(columns={"t": "Datetime", "o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
     df["Datetime"] = pd.to_datetime(df["Datetime"], utc=True)
     df = df.set_index("Datetime")[["Open", "High", "Low", "Close", "Volume"]].astype(float).sort_index()
+    df.attrs["feed"] = feed  # P0-B: record the feed actually used (sip may fall back to iex)
     print(f"Fetched {len(df):,} raw bars via feed={feed}")
     return df
 
@@ -108,7 +111,37 @@ def filter_rth(df: pd.DataFrame) -> pd.DataFrame:
     day-anchored resampling keeps its 9:30 anchor."""
     et = df.index.tz_convert(ET)
     mask = ((et.hour > 9) | ((et.hour == 9) & (et.minute >= 30))) & (et.hour < 16)
-    return df[mask]
+    out = df[mask]
+    out.attrs = dict(df.attrs)  # keep feed provenance through filtering
+    return out
+
+
+def write_sidecar_meta(csv_path: Path, df: pd.DataFrame, *, symbol: str,
+                       timeframe: str, requested_feed: str = "sip") -> Path:
+    """P0-B 数据口径披露：CSV 旁车 meta json（不动 CSV 本体，load_bars 兼容）.
+
+    记录实际使用的 feed（sip 被 403 拒后自动回落 iex——回落不再只留 stdout）。
+    """
+    import json
+    from datetime import datetime, timezone
+
+    meta = {
+        "source": "alpaca",
+        "feed": df.attrs.get("feed"),
+        "feed_requested": requested_feed,
+        "feed_note": "sip=全市场合并带（历史，免费层 >15min 延迟可用）；"
+                     "iex=IEX 单一交易所（sip 被 403 拒时自动回落）",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "adjustment": "split",
+        "rth_only": True,
+        "n_bars": int(len(df)),
+        "range_utc": [df.index.min().isoformat(), df.index.max().isoformat()] if len(df) else None,
+        "fetched_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    meta_path = csv_path.with_suffix(".meta.json")
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta_path
 
 
 def main() -> None:
@@ -144,9 +177,11 @@ def main() -> None:
 
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index_label="Datetime", date_format="%Y-%m-%dT%H:%M:%S%z")
+    meta_path = write_sidecar_meta(out, df, symbol=args.symbol.upper(), timeframe=timeframe)
     et = df.index.tz_convert(ET)
     n_days = len(pd.unique(et.date))
     print(f"Saved {len(df):,} RTH bars across {n_days} trading days -> {out}")
+    print(f"Feed provenance -> {meta_path} (feed={df.attrs.get('feed')})")
     print(f"Range (ET): {et.min()} -> {et.max()}")
     print("Use it anywhere the yfinance CSV is used, e.g.:")
     print(f"  .venv/bin/python src/hourly_signal_backtest.py --walkforward --input_csv {out}")

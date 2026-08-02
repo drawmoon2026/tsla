@@ -207,6 +207,9 @@ def refresh_rolling(now: datetime, offline: bool) -> dict:
         fetch_start = last_ts - pd.Timedelta(days=5)
         df = fetch_bars("TSLA", fetch_start, end, "5Min", key, secret)
         df = filter_rth(df)
+        # P0-B 数据口径披露：实际使用的 feed 记入 meta（sip 被 403 拒会静默回落 iex，
+        # 此处把回落结果落盘，页面据此显示口径）
+        info["feed"] = df.attrs.get("feed")
         # ① 重叠核对：同一时刻（旧 CSV 末 bar）的收盘必须一致（拆股后 Alpaca
         #    adjustment="split" 会重写历史为拆后口径，与 CSV 旧段断裂）
         overlap = df[df.index == last_ts]

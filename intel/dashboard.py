@@ -1947,12 +1947,14 @@ def render_waitboard(det: dict | None, px: dict | None,
             rows.append(_pb_row(
                 f"S2 当前 {dd:+.1f}%（未触发），若回撤跌破 −20% 线"
                 f"（现余量 {s2['margin_pp']:.1f} pp）",
-                "E8-A 买入侧停用发信号资格（S2 开关关闸，只记录不出买入）",
+                "E8-A 买入侧停用发信号资格（S2 开关关闸，只记录不出买入）"
+                "（E18 全历史校验为负，该策略线证据等级已降级——见 strategy-lab）",
                 "E11 S2",
             ))
             rows.append(_pb_row(
                 f"S2 当前 {dd:+.1f}%，若维持在 −20% 以内",
-                "E8-A 买入侧保持发信号资格（gate+几何冻结口径照常出单）",
+                "E8-A 买入侧保持发信号资格（gate+几何冻结口径照常出单）"
+                "（E18 全历史校验为负，该策略线证据等级已降级——见 strategy-lab）",
                 "E11 S2",
             ))
     else:
@@ -2737,6 +2739,13 @@ def render_fullsys_view(data: dict | None,
         fetch = (cur.get("data") or {}).get("fetch") or {}
         stale_chip = ("" if not fetch.get("error") else
                       '<span class="chip warn">增量取数失败 · 数据为上次续到</span>')
+        # P0-B 数据口径披露：meta 有 feed 字段（本次增量取数实测）则动态显示，
+        # 否则静态声明默认口径与回落规则
+        feed = fetch.get("feed")
+        feed_chip = (
+            f'<span class="chip">数据源 Alpaca {esc(str(feed).upper())} feed'
+            "（本次增量取数实测）</span>" if feed else
+            '<span class="chip">数据源 Alpaca SIP（历史，403 时自动回落 IEX）</span>')
         h_n = int(hseg["n_trades"]) if hseg else int(s2["n"])
         h_b = int(hseg["n_blocked"]) if hseg else int(blk["n"])
         if fseg:
@@ -2762,6 +2771,7 @@ def render_fullsys_view(data: dict | None,
       <span class="chip">E8-A+S2 · 冻结 {esc(cur["algo"]["frozen_at"])}（models/e8a）</span>
       <span class="chip">因果探测器 N3-H · {esc(det_txt)}</span>
       <span class="chip">数据截至 {esc(cur["data"]["data_through"])}</span>
+      {feed_chip}
       {stale_chip}
     </div>
     <p class="av-seg"><span class="segkey hold"></span><b>留出段</b>
@@ -6568,6 +6578,20 @@ def render(db_path: Path = DB_PATH) -> str:
                     '<span class="pill sm good"><span class="dot"></span>'
                     "价格已更新至今日</span>"
                 )
+        # P0-B 数据口径披露（数据龄徽章旁）：底仓 CSV 旁车 meta 有 feed 字段则动态
+        # 显示实测口径，否则静态声明默认口径与回落规则；shadow 的 iex 口径另有披露
+        bars_feed = None
+        try:
+            _sc = BARS_CSV.with_suffix(".meta.json")
+            if _sc.exists():
+                bars_feed = (json.loads(_sc.read_text(encoding="utf-8")) or {}).get("feed")
+        except (OSError, json.JSONDecodeError):
+            bars_feed = None
+        fresh_badge += (
+            f'<span class="micro muted">数据源 Alpaca {esc(str(bars_feed).upper())} feed'
+            "（取数实测）· 增量/现价 yfinance</span>" if bars_feed else
+            '<span class="micro muted">数据源 Alpaca SIP（历史，403 时自动回落 IEX）'
+            "· 增量/现价 yfinance</span>")
 
         shadow = load_shadow(now)
         finra = load_finra_releases()

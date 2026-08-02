@@ -7,6 +7,12 @@
 - outputs/shadow_e8a/journal.sqlite     shadow E8-A 日记（热备）
 - outputs/n8_scoring/                   N8 前向判分产物（整目录）
 - outputs/replay_current/meta.json      推演续演状态
+- data/intel/musk_tweets.csv            Musk 推文归档（72k 条不可再生，探测器标定源）
+- data/TSLA_5m_3y.csv                   冻结数据源单副本（meta.json 引用其 sha256）
+
+体积（P0-C 实测 2026-08-02）：两个 CSV 原文 10.7 MB + 3.8 MB，压缩后 tar.gz
+从 3.1 MB 增至 7.2 MB（+4.1 MB/份，30 份滚动共约 220 MB）——远低于 50 MB
+分层阈值，维持每日全量方案。
 
 产物：backups/sentinel-YYYYMMDD.tar.gz（项目内 backups/，已 gitignore），
 保留最近 BACKUP_KEEP 份滚动删除。每次备份后校验：
@@ -45,6 +51,9 @@ ITEMS: list[tuple[str, str]] = [
     ("outputs/shadow_e8a/journal.sqlite", "sqlite"),
     ("outputs/n8_scoring", "dir"),
     ("outputs/replay_current/meta.json", "file"),
+    # P0-C：不可再生资产（不在 git，/data/ 被 gitignore）
+    ("data/intel/musk_tweets.csv", "file"),   # 72,743 条归档，DENSE_QUANTILE 标定源
+    ("data/TSLA_5m_3y.csv", "file"),          # 冻结数据源，meta.json 钉其 sha256
 ]
 
 
