@@ -3457,9 +3457,12 @@ def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
     run = dict(run)
     stale = run["run_date"] != str(today_et)
     if run["status"] != "ok":
+        n_sel = run.get("n_selected") or 0
+        sel_note = (f'（{n_sel} 条候选不丢失，下轮重选）' if n_sel else "")
         return (head + '<div class="ai-brief"><span class="crit-text">'
                 f'{"" if not stale else esc(run["run_date"]) + " "}解读缺席</span>'
-                f'<span class="muted"> —— {esc(run["reason"] or "原因未记录")}</span></div>'
+                f'<span class="muted"> —— {esc(run["reason"] or "原因未记录")}'
+                f'{sel_note}</span></div>'
                 + _n8_scoreboard(conn, today_et))
     rows = [dict(r) for r in conn.execute(
         """SELECT i.direction, i.strength, i.note, i.surprise,
@@ -3491,10 +3494,16 @@ def _ai_brief(conn: sqlite3.Connection, today_et: date) -> str:
     stale_note = ("" if not stale else
                   f'<span class="pill sm warn"><span class="dot"></span>'
                   f'最近解读 {esc(run["run_date"])} · 今日尚未运行</span> ')
+    # P0-2 可见性：本轮被 T3/HI 上限截断的事件数（不在解读表，下轮仍会被选中）
+    n_trunc = run.get("n_truncated") or 0
+    trunc_note = ("" if not n_trunc else
+                  f'<span class="pill sm warn" title="被 T3/HI 上限截掉的事件'
+                  f'不在解读表，下轮运行仍会被选中（主键幂等口径），不会丢失">'
+                  f'<span class="dot"></span>本轮截断 {n_trunc} 条待下轮</span> ')
     n_sp = sum(r["surprise"] for r in rows)
     return (
         head
-        + f'<div class="ai-brief">{stale_note}'
+        + f'<div class="ai-brief">{stale_note}{trunc_note}'
         + f'<p class="statement">「{esc(run["overall"] or "")}」</p>'
         + f'<div class="mb-list">{lis}</div>{more}'
         + '<p class="footnote">口径：方向/强度/意外为 LLM（本机 Claude CLI）对新事件的'
@@ -3697,49 +3706,119 @@ WD_SELF_STALE_MIN = 75  # 看门狗自身超龄阈值（分钟）；与 intel.wa
 
 
 def _watchdog_pill(now: datetime) -> str:
-    """顶栏外部看门狗状态 pill（P1-5）。
+    """顶栏外部看门狗状态 pill（P1-5；P1-2 加固）。
 
     「谁来看守看守者」：看门狗自身超龄（json 生成时刻距今 > 2.5 个周期）
     也要显示「看门狗失联」——服务端渲染 + 前端 JS 双重龄期检查兜底。
+
+    P1-2 可靠性倒挂封堵：整个渲染包 try——一份「合法 JSON 但字段类型不对」的
+    watchdog.json（age_min/self_stale_min 为字符串、systems 非 dict、时戳
+    垃圾值…）只降级为灰 pill「看门狗数据异常」，绝不打挂仪表盘渲染。
     """
     try:
-        wd = json.loads(WD_JSON.read_text(encoding="utf-8"))
+        return _watchdog_pill_inner(now)
     except FileNotFoundError:
         return ('<span class="pill warn" id="wd-pill" '
                 'title="outputs/watchdog.json 不存在——com.tsla.watchdog 未部署或未跑过">'
                 '<span class="dot"></span>看门狗未部署</span>')
-    except Exception as e:  # noqa: BLE001
-        return (f'<span class="pill warn" id="wd-pill" title="{esc(str(e))}">'
+    except Exception as e:  # noqa: BLE001 —— 监控件绝不打挂被监控页
+        return (f'<span class="pill" id="wd-pill" '
+                f'title="watchdog.json 无法解析：{esc(f"{type(e).__name__}: {e}"[:200])}">'
                 f'<span class="dot"></span>看门狗数据异常</span>')
+
+
+def _watchdog_pill_inner(now: datetime) -> str:
+    wd = json.loads(WD_JSON.read_text(encoding="utf-8"))
+    if not isinstance(wd, dict):
+        raise TypeError(f"watchdog.json 顶层应为对象，得到 {type(wd).__name__}")
     gen = parse_ts(wd.get("generated_utc"))
-    self_thr = wd.get("self_stale_min") or WD_SELF_STALE_MIN
+    try:
+        self_thr = float(wd.get("self_stale_min") or WD_SELF_STALE_MIN)
+    except (TypeError, ValueError):
+        self_thr = float(WD_SELF_STALE_MIN)
     iso = gen.isoformat() if gen else ""
+    thr_txt = esc(f"{self_thr:.0f}")
+
     def _wd_age(m):
-        if m is None:
+        try:
+            m = float(m)
+        except (TypeError, ValueError):
             return ""
         return (f"（{m:.0f} 分钟前）" if m < 90 else
                 f"（{m / 60:.1f} 小时前）" if m < 48 * 60 else
                 f"（{m / 1440:.1f} 天前）")
 
+    systems = wd.get("systems") if isinstance(wd.get("systems"), dict) else {}
     detail = " · ".join(
         f"{r.get('label', k)} {'ok' if r.get('ok') else 'STALE'}{_wd_age(r.get('age_min'))}"
-        for k, r in (wd.get("systems") or {}).items()
+        for k, r in systems.items() if isinstance(r, dict)
     )
     if gen is None or (now - gen).total_seconds() / 60 > self_thr:
         age_txt = fmt_ago(gen, now) if gen else "无时戳"
         return (f'<span class="pill crit" id="wd-pill" data-iso="{esc(iso)}" '
-                f'title="watchdog.json 生成于 {esc(age_txt)}（阈值 {self_thr} 分钟）——'
+                f'title="watchdog.json 生成于 {esc(age_txt)}（阈值 {thr_txt} 分钟）——'
                 f'com.tsla.watchdog 本身停了"><span class="dot"></span>看门狗失联</span>')
     if wd.get("overall") == "ok":
         return (f'<span class="pill good" id="wd-pill" data-iso="{esc(iso)}" '
                 f'title="{esc(detail)}"><span class="dot"></span>看守全绿</span>')
-    stale = wd.get("stale") or ["?"]
+    stale = wd.get("stale") if isinstance(wd.get("stale"), list) else ["?"]
     labels = [
-        (wd.get("systems") or {}).get(k, {}).get("label") or k for k in stale
+        (systems.get(k, {}) if isinstance(systems.get(k), dict) else {})
+        .get("label") or str(k) for k in (stale or ["?"])
     ]
     txt = "、".join(labels[:3]) + ("…" if len(labels) > 3 else "")
     return (f'<span class="pill crit" id="wd-pill" data-iso="{esc(iso)}" '
             f'title="{esc(detail)}"><span class="dot"></span>看守告警 · {esc(txt)}</span>')
+
+
+def _watchdog_pill_selftest() -> None:
+    """P1-2 单元自测：坏 watchdog.json 只降级为 pill，绝不炸渲染。
+    python -m intel.dashboard --selftest 一并运行。
+    """
+    import tempfile
+    global WD_JSON
+    now = datetime.now(timezone.utc)
+    cases = [
+        ("非法 JSON", "{not json"),
+        ("顶层非对象", '["a","b"]'),
+        ("age_min 为字符串", json.dumps({
+            "generated_utc": now.isoformat(),
+            "systems": {"s1": {"label": "哨兵", "ok": False, "age_min": "abc"}},
+            "overall": "stale", "stale": ["s1"]})),
+        ("self_stale_min 为字符串", json.dumps({
+            "generated_utc": now.isoformat(), "self_stale_min": "bogus",
+            "overall": "ok", "systems": {}})),
+        ("systems 为列表 / stale 含非串", json.dumps({
+            "generated_utc": now.isoformat(), "systems": [1, 2],
+            "overall": "stale", "stale": [{"x": 1}, None]})),
+        ("时戳垃圾值", json.dumps({
+            "generated_utc": "not-a-time", "overall": "ok", "systems": {}})),
+        ('self_thr 注入尝试（须 esc）', json.dumps({
+            "generated_utc": now.isoformat(),
+            "self_stale_min": '"><script>alert(1)</script>',
+            "overall": "ok", "systems": {}})),
+        ("正常样例（回归）", json.dumps({
+            "generated_utc": now.isoformat(), "self_stale_min": 75,
+            "overall": "ok",
+            "systems": {"s1": {"label": "哨兵", "ok": True, "age_min": 3.2}}})),
+    ]
+    orig = WD_JSON
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            WD_JSON = Path(td) / "watchdog.json"
+            # 文件不存在 → 「未部署」pill
+            html = _watchdog_pill(now)
+            assert "看门狗未部署" in html, html
+            for name, payload in cases:
+                WD_JSON.write_text(payload, encoding="utf-8")
+                html = _watchdog_pill(now)  # 关键：任何输入都不许抛异常
+                assert 'id="wd-pill"' in html, (name, html)
+                assert "<script>" not in html, (name, html)  # esc 生效
+            assert "看守全绿" in html  # 最后一例正常样例仍走正常路径
+    finally:
+        WD_JSON = orig
+    print("watchdog pill selftest: OK（坏 JSON/坏类型/注入样例全部降级不炸；"
+          "正常样例回归通过）")
 
 
 def render_topbar(conn: sqlite3.Connection, now: datetime,
@@ -6587,10 +6666,11 @@ def main() -> None:
     ap.add_argument("--db", type=Path, default=DB_PATH, help="sentinel.sqlite 路径")
     ap.add_argument("--out", type=Path, default=OUT_PATH, help="输出 HTML 路径")
     ap.add_argument("--selftest", action="store_true",
-                    help="只跑 calib_eta 出闸日单元自测（P2 off-by-one）")
+                    help="单元自测：calib_eta 出闸日 + watchdog pill 加固（P1-2）")
     args = ap.parse_args()
     if args.selftest:
         _calib_eta_selftest()
+        _watchdog_pill_selftest()
         return
     if not args.db.exists():
         raise SystemExit(f"数据库不存在：{args.db}（先跑哨兵采集）")

@@ -166,8 +166,13 @@ def fetch_daily(now: datetime | None = None) -> tuple[dict | None, str | None, s
 
 
 def get_ohlc(now: datetime | None = None
-             ) -> tuple[dict[date, tuple[float, float]], str | None]:
-    """{date: (open, close)}（共享缓存/退避同源）——判分器（N8）取价入口."""
+             ) -> tuple[dict[date, tuple[float, float]], str | None, str | None]:
+    """{date: (open, close)}（共享缓存/退避同源）——判分器（N8）取价入口.
+
+    返回 (ohlc, error, fetched_utc)：fetched_utc 为这份数据实际抓取时刻
+    （ISO，缓存/降级时是旧值）——判分器用它做收盘价把关（P1-1）：
+    仅当数据抓取于当日收盘定稿之后才允许判当日。
+    """
     data, err, _src = fetch_daily(now)
     out: dict[date, tuple[float, float]] = {}
     for k, v in ((data or {}).get("ohlc") or {}).items():
@@ -175,7 +180,7 @@ def get_ohlc(now: datetime | None = None
             out[date.fromisoformat(k)] = (float(v[0]), float(v[1]))
         except (ValueError, TypeError, IndexError):
             continue
-    return out, err
+    return out, err, (data or {}).get("fetched_utc")
 
 
 def s2_reading(dates: list[date], closes: list[float]) -> dict | None:

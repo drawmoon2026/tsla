@@ -17,7 +17,12 @@
     判分     = bullish 且 ret>0 → hit；bearish 且 ret<0 → hit；否则 miss
                （ret=0 平局判 miss，保守）；中性解读不计分（score 置 NULL）
     收益主口径 = TSLA 绝对收益方向；池等权超额为可选口径，v1 未启用（如实记录）
-    交易日完整性：仅用已收盘的交易日判分（当日 16:05 ET 前不判当日）
+    交易日完整性：仅用已收盘的交易日判分（当日收盘+5min 前不判当日）；且价格
+               数据必须抓取于该日收盘定稿之后（fetched_utc ≥ close+5min，
+               P1-1 收盘价把关）——宁可晚判（pending）不可错判
+    判分不可改写（P0-1）：已判定的 score/ret/D1 锚一经写入即冻结，永不覆盖；
+               重算不一致落 interp_score_conflicts 告警行；后续补 5 日分
+               沿用存储的 D1 锚，不重算
 
   自动裁决（「在此之前只积累不判读」）：
     每次运行统计样本量；1 日口径已判分样本 n ≥ 60 时才跑预登记检验：
@@ -60,8 +65,7 @@ VERDICT_MIN_N_1D = 60        # 1 日口径已判分样本达此数才跑预登�
 SURPRISE_MIN_N = 5           # H2 检验意外组最少样本
 ALPHA = 0.05                 # 预登记显著性水平
 MARKET_OPEN = time(9, 30)    # ET
-SESSION_DONE = time(16, 5)   # ET：常规日收盘定稿时刻（半日市按日历收盘+5min，
-                             # 见 _session_done_t；统一日历口径修正 2026-08-02）
+RET_TOL = 1e-9               # P0-1：重算收益与已存值的浮点一致性容差
 
 _SCHEMA = """
 -- interp_scores：N8 前向判分（口径冻结见 intel/interp_scorer.py docstring）。
@@ -92,6 +96,17 @@ CREATE TABLE IF NOT EXISTS interp_scorer_runs (
     n_updated  INTEGER,
     n_todo     INTEGER
 );
+
+-- interp_score_conflicts：P0-1 判分不可改写——重算值与已存已判值不一致时
+-- 落告警行（stored 保持不动，绝不覆盖），供审计缓存切换/数据源事后修正。
+CREATE TABLE IF NOT EXISTS interp_score_conflicts (
+    conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id    TEXT NOT NULL,
+    field       TEXT NOT NULL,
+    stored      TEXT,
+    recomputed  TEXT,
+    noted_utc   TEXT NOT NULL
+);
 """
 
 
@@ -119,41 +134,64 @@ def _write_cache(d: dict) -> None:
         pass
 
 
-def load_ohlc(now: datetime) -> tuple[dict[date, tuple[float, float]], str | None]:
-    """OHLC → ({date: (o,c)}, error)——共享 intel.prices 缓存（P1-4 限流治理）.
+def _parse_utc(iso: str | None) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(iso or "")
+    except ValueError:
+        return None
+    return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
+
+
+def load_ohlc(now: datetime
+              ) -> tuple[dict[date, tuple[float, float]], str | None,
+                         datetime | None]:
+    """OHLC → ({date: (o,c)}, error, fetched_utc)——共享 intel.prices 缓存.
 
     取价统一走 data/intel/price_cache.json（5 分钟 TTL + 失败退避），与仪表盘
     价格上下文同源，不再各自打 yfinance。共享缓存拿不到时降级读本模块旧缓存
     （n8_ohlc_cache.json，只兜底不再写入 OHLC；该文件继续存 last_ok_utc）。
+
+    fetched_utc = 这份数据实际抓取时刻（P1-1 收盘价把关用）；旧缓存兜底段
+    没有可信抓取时刻 → None（其数据只能保持 pending，不用于定稿判分）。
     """
     from intel import prices
 
-    out, err = prices.get_ohlc(now)
-    if not out:  # 共享缓存与 API 均空 → 旧缓存兜底
+    out, err, fetched_iso = prices.get_ohlc(now)
+    fetched = _parse_utc(fetched_iso)
+    if not out:  # 共享缓存与 API 均空 → 旧缓存兜底（无抓取时刻，不可定稿判分）
+        fetched = None
         for k, v in (_read_cache().get("daily") or {}).items():
             try:
                 out[date.fromisoformat(k)] = (float(v[0]), float(v[1]))
             except (ValueError, TypeError, IndexError):
                 continue
-    return out, err
+    return out, err, fetched
 
 
-def _session_done_t(d: date) -> time:
-    """交易日 d 的日线定稿时刻（ET）= 日历收盘 + 5 分钟（半日市 13:05）."""
-    close_t = mcal.close_time_et(d)
-    return time(close_t.hour, close_t.minute + 5)
+def _session_done_dt(d: date) -> datetime:
+    """交易日 d 的日线定稿时刻（ET aware）= 日历收盘 + 5 分钟（半日市 13:05）.
 
-
-def _session_complete(d: date, now: datetime) -> bool:
-    """交易日 d 的日线是否已收盘定稿（当日日历收盘 +5min 前不算）.
-
-    原口径：固定 16:05 ET（SESSION_DONE）——半日市只慢不错；现按统一日历，
-    半日市 13:05 即定稿。D1 锚点本身取自真实 OHLC 交易日序列，天然含假日口径。
+    combine+timedelta 写法（P2-1）：非整点收盘也不会分钟溢出。
     """
-    now_et = now.astimezone(ET)
-    if d < now_et.date():
-        return True
-    return d == now_et.date() and now_et.time() >= _session_done_t(d)
+    return (datetime.combine(d, mcal.close_time_et(d), tzinfo=ET)
+            + timedelta(minutes=5))
+
+
+def _session_complete(d: date, now: datetime, fetched: datetime | None) -> bool:
+    """交易日 d 的日线是否可用于定稿判分（P1-1 收盘价把关）.
+
+    两个条件缺一不可：
+      1. 现在已过 d 的日历收盘 +5min（半日市 13:05）；
+      2. 这份价格数据抓取于 d 的收盘定稿之后（fetched >= close+5min）——
+         否则 d 行的 close 可能是盘中残值/陈旧缓存，宁可晚判（pending）不可错判。
+    fetched 未知（旧缓存兜底）一律不定稿。
+    """
+    done = _session_done_dt(d)
+    if now.astimezone(ET) < done:
+        return False
+    if fetched is None:
+        return False
+    return fetched >= done
 
 
 # ---------------------------------------------------------------- 判分
@@ -181,25 +219,44 @@ def _judge(direction: str, ret: float) -> str:
 
 
 def score_one(direction: str, anchor_utc: str,
-              ohlc: dict[date, tuple[float, float]], now: datetime) -> dict:
-    """单条解读判分 → d1_date/ret_1d/ret_5d/score_1d/score_5d（未到期=pending）."""
+              ohlc: dict[date, tuple[float, float]], now: datetime,
+              fetched: datetime | None = None,
+              frozen_d1: str | None = None) -> dict:
+    """单条解读判分 → d1_date/ret_1d/ret_5d/score_1d/score_5d（未到期=pending）.
+
+    frozen_d1（P0-1）：D1 锚一经写入即冻结——已存 d1_date 的行沿用存储的锚，
+    不重算 _d1_index（缓存切换/键集漂移不换锚）；冻结锚不在当前日线里时
+    本轮不判（返回全 pending，字段留待下轮）。
+    fetched（P1-1）：价格数据抓取时刻，_session_complete 收盘价把关用。
+    """
     directional = direction in ("bullish", "bearish")
     pend = "pending" if directional else None
     out = {"d1_date": None, "ret_1d": None, "ret_5d": None,
            "score_1d": pend, "score_5d": pend}
     trade_dates = sorted(ohlc)
-    i = _d1_index(anchor_utc, trade_dates)
-    if i is None:
-        return out  # D1 尚未出现在日线里（未来交易日）→ pending
-    d1 = trade_dates[i]
-    out["d1_date"] = str(d1)
-    if _session_complete(d1, now):
+    if frozen_d1:
+        try:
+            d1 = date.fromisoformat(frozen_d1)
+        except ValueError:
+            return out
+        out["d1_date"] = frozen_d1
+        if d1 not in ohlc:
+            return out  # 冻结锚不在当前日线（缓存切换）→ 本轮不判，不换锚
+        i = trade_dates.index(d1)
+    else:
+        i = _d1_index(anchor_utc, trade_dates)
+        if i is None:
+            return out  # D1 尚未出现在日线里（未来交易日）→ pending
+        d1 = trade_dates[i]
+        out["d1_date"] = str(d1)
+    if _session_complete(d1, now, fetched):
         o1, c1 = ohlc[d1]
         ret1 = c1 / o1 - 1.0
         out["ret_1d"] = ret1
         if directional:
             out["score_1d"] = _judge(direction, ret1)
-        if i + 4 < len(trade_dates) and _session_complete(trade_dates[i + 4], now):
+        if (i + 4 < len(trade_dates)
+                and _session_complete(trade_dates[i + 4], now, fetched)):
             c5 = ohlc[trade_dates[i + 4]][1]
             ret5 = c5 / o1 - 1.0
             out["ret_5d"] = ret5
@@ -208,8 +265,53 @@ def score_one(direction: str, anchor_utc: str,
     return out
 
 
-def run_score(conn: sqlite3.Connection, now: datetime) -> dict:
-    """对所有需要（新增或未了结）的解读判分，落 interp_scores，返回统计."""
+_FINAL_SCORES = ("hit", "miss")
+
+
+def _merge_score(ex: dict, s: dict) -> tuple[dict, list[tuple[str, str, str]]]:
+    """P0-1 合并：已判定字段只写一次，返回 (要更新的字段, 冲突清单).
+
+    - d1_date / ret_1d / ret_5d：已存非 NULL 即冻结，只补 NULL；
+    - score_1d / score_5d：hit/miss 即冻结；pending 可推进为 hit/miss；
+      NULL（中性不计分）永远保持 NULL；
+    - 重算值与已存冻结值不一致 → 记冲突（告警行），存值保持不动。
+    """
+    updates: dict = {}
+    conflicts: list[tuple[str, str, str]] = []
+
+    for f in ("d1_date", "ret_1d", "ret_5d"):
+        new = s[f]
+        old = ex.get(f)
+        if old is None:
+            if new is not None:
+                updates[f] = new
+        elif new is not None:
+            same = (abs(new - old) <= RET_TOL if f != "d1_date"
+                    else str(new) == str(old))
+            if not same:
+                conflicts.append((f, str(old), str(new)))
+
+    for f in ("score_1d", "score_5d"):
+        new = s[f]
+        old = ex.get(f)
+        if old in _FINAL_SCORES:
+            if new in _FINAL_SCORES and new != old:
+                conflicts.append((f, str(old), str(new)))
+        elif old == "pending" and new in _FINAL_SCORES:
+            updates[f] = new
+        # old is NULL（中性）→ 保持 NULL，不写
+    return updates, conflicts
+
+
+def run_score(conn: sqlite3.Connection, now: datetime,
+              ohlc_override: tuple | None = None) -> dict:
+    """对所有需要（新增或未了结）的解读判分，落 interp_scores，返回统计.
+
+    P0-1 判分不可改写：已判定的 score/ret/D1 锚永不覆盖——UPDATE 只补 NULL
+    （或推进 pending）字段；重算值与已存值不一致时写 interp_score_conflicts
+    告警行而非覆盖；scored_utc 仅在实际补写了字段时刷新。
+    ohlc_override=(ohlc, err, fetched)：单测注入合成价格数据用。
+    """
     interps = [dict(r) for r in conn.execute(
         """SELECT i.event_id, i.interp_date, i.direction, i.strength,
                   i.surprise, i.created_utc
@@ -222,30 +324,48 @@ def run_score(conn: sqlite3.Connection, now: datetime) -> dict:
             or existing[it["event_id"]]["ret_1d"] is None
             or existing[it["event_id"]]["ret_5d"] is None]
     stats = {"n_interps": len(interps), "n_todo": len(todo),
-             "n_updated": 0, "ohlc_error": None}
+             "n_updated": 0, "n_conflicts": 0, "ohlc_error": None}
     if not todo:
         return stats
-    ohlc, err = load_ohlc(now)
+    ohlc, err, fetched = (ohlc_override if ohlc_override is not None
+                          else load_ohlc(now))
     stats["ohlc_error"] = err
     if not ohlc:
         return stats  # 无任何价格数据：保持现状（pending），不硬判
     ts = store.utcnow_iso()
     for it in todo:
-        s = score_one(it["direction"], it["created_utc"], ohlc, now)
-        conn.execute(
-            """INSERT INTO interp_scores
-               (event_id, interp_date, direction, strength, surprise, anchor_utc,
-                d1_date, ret_1d, ret_5d, score_1d, score_5d, scored_utc)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(event_id) DO UPDATE SET
-                 d1_date=excluded.d1_date, ret_1d=excluded.ret_1d,
-                 ret_5d=excluded.ret_5d, score_1d=excluded.score_1d,
-                 score_5d=excluded.score_5d, scored_utc=excluded.scored_utc""",
-            (it["event_id"], it["interp_date"], it["direction"], it["strength"],
-             it["surprise"], it["created_utc"], s["d1_date"], s["ret_1d"],
-             s["ret_5d"], s["score_1d"], s["score_5d"], ts),
-        )
-        stats["n_updated"] += 1
+        ex = existing.get(it["event_id"])
+        s = score_one(it["direction"], it["created_utc"], ohlc, now, fetched,
+                      frozen_d1=(ex or {}).get("d1_date"))
+        if ex is None:
+            conn.execute(
+                """INSERT INTO interp_scores
+                   (event_id, interp_date, direction, strength, surprise,
+                    anchor_utc, d1_date, ret_1d, ret_5d, score_1d, score_5d,
+                    scored_utc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(event_id) DO NOTHING""",
+                (it["event_id"], it["interp_date"], it["direction"],
+                 it["strength"], it["surprise"], it["created_utc"],
+                 s["d1_date"], s["ret_1d"], s["ret_5d"], s["score_1d"],
+                 s["score_5d"], ts),
+            )
+            stats["n_updated"] += 1
+            continue
+        updates, conflicts = _merge_score(ex, s)
+        for field, old, new in conflicts:
+            conn.execute(
+                """INSERT INTO interp_score_conflicts
+                   (event_id, field, stored, recomputed, noted_utc)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (it["event_id"], field, old, new, ts))
+            stats["n_conflicts"] += 1
+        if updates:
+            sets = ", ".join(f"{f}=?" for f in updates) + ", scored_utc=?"
+            conn.execute(
+                f"UPDATE interp_scores SET {sets} WHERE event_id=?",  # noqa: S608
+                (*updates.values(), ts, it["event_id"]))
+            stats["n_updated"] += 1
     conn.commit()
     return stats
 
@@ -366,7 +486,7 @@ def _last_close_utc(now: datetime) -> datetime:
     d = et.date()
     while True:
         if mcal.is_trading_day(d):   # 原：d.weekday() < 5
-            t = datetime.combine(d, _session_done_t(d), tzinfo=ET)
+            t = _session_done_dt(d)
             if t <= et:
                 return t.astimezone(timezone.utc)
         d -= timedelta(days=1)
@@ -425,9 +545,13 @@ def run(auto: bool = False) -> int:
         except Exception as e:  # noqa: BLE001 —— P1-1：崩溃记 absent，不静默
             _record_run(conn, "absent", f"{type(e).__name__}: {e}", stats)
             raise
-        _record_run(conn, "ok",
-                    stats.get("ohlc_error") and f"取价降级：{stats['ohlc_error']}",
-                    stats)
+        notes = []
+        if stats.get("ohlc_error"):
+            notes.append(f"取价降级：{stats['ohlc_error']}")
+        if stats.get("n_conflicts"):
+            notes.append(f"冻结冲突 {stats['n_conflicts']} 条"
+                         "（重算≠已存，未覆盖，见 interp_score_conflicts）")
+        _record_run(conn, "ok", " · ".join(notes) or None, stats)
         cache = _read_cache()
         cache["last_ok_utc"] = now.isoformat(timespec="seconds")
         _write_cache(cache)
@@ -436,7 +560,7 @@ def run(auto: bool = False) -> int:
               f"（解读共 {stats['n_interps']}）· 1 日口径 "
               f"hit {c1['hit']} / miss {c1['miss']} / pending {c1['pending']}"
               f" · 状态 {verdict['status']} → {VERDICT_PATH}"
-              + (f" · 取价降级：{stats['ohlc_error']}" if stats["ohlc_error"] else ""))
+              + (f" · {' · '.join(notes)}" if notes else ""))
         return 0
     finally:
         conn.close()
@@ -463,12 +587,91 @@ def print_status() -> None:
         conn.close()
 
 
+# ---------------------------------------------------------------- 自测
+
+def _selftest() -> None:
+    """P0-1/P1-1 合成场景单测（不碰真实 DB / 不打网络）：
+    python -m intel.interp_scorer --selftest
+    """
+    d5, d6, d7, d8, d9 = (date(2026, 1, i) for i in (5, 6, 7, 8, 9))  # 周一~五
+
+    def _et(d: date, h: int, m: int = 0) -> datetime:
+        return datetime.combine(d, time(h, m), tzinfo=ET)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE llm_interpretations (interp_date TEXT, event_id TEXT "
+        "PRIMARY KEY, direction TEXT, strength INTEGER, surprise INTEGER, "
+        "created_utc TEXT);" + _SCHEMA.replace("REFERENCES llm_interpretations(event_id)", ""))
+    anchor = _et(d5, 7).astimezone(timezone.utc).isoformat()  # D1 = 01-05
+    conn.execute("INSERT INTO llm_interpretations VALUES ('2026-01-05','ev1',"
+                 "'bullish',2,0,?)", (anchor,))
+    conn.execute("INSERT INTO llm_interpretations VALUES ('2026-01-05','ev2',"
+                 "'neutral',1,0,?)", (anchor,))
+    ohlc_a = {d5: (100.0, 110.0), d6: (111.0, 112.0), d7: (112.0, 113.0),
+              d8: (113.0, 114.0), d9: (114.0, 120.0)}
+
+    def _row(eid: str = "ev1") -> dict:
+        return dict(conn.execute(
+            "SELECT * FROM interp_scores WHERE event_id=?", (eid,)).fetchone())
+
+    # 1) P1-1 stale 价拒判：收盘后判分但数据抓于收盘前 → 保持 pending
+    run_score(conn, _et(d5, 17), (ohlc_a, None, _et(d5, 15)))
+    r = _row()
+    assert r["score_1d"] == "pending" and r["ret_1d"] is None, r
+    # 2) 数据抓于收盘定稿后 → 判 hit，D1 锚落定
+    run_score(conn, _et(d5, 17), (ohlc_a, None, _et(d5, 16, 10)))
+    r = _row()
+    assert (r["score_1d"], r["d1_date"]) == ("hit", "2026-01-05"), r
+    assert abs(r["ret_1d"] - 0.10) < 1e-12, r
+    frozen = (r["ret_1d"], r["score_1d"], r["d1_date"], r["scored_utc"])
+    # 3) P0-1 价格事后修正（ret 翻面）→ 已判行不变，落冲突告警行
+    ohlc_fix = dict(ohlc_a); ohlc_fix[d5] = (100.0, 90.0)
+    st = run_score(conn, _et(d6, 17), (ohlc_fix, None, _et(d6, 16, 10)))
+    r = _row()
+    assert (r["ret_1d"], r["score_1d"], r["d1_date"]) == frozen[:3], r
+    ncf_ev1 = conn.execute("SELECT COUNT(*) FROM interp_score_conflicts "
+                           "WHERE event_id='ev1'").fetchone()[0]
+    assert ncf_ev1 == 2, ncf_ev1  # ret_1d + score_1d 双冲突（ev2 另记 ret 冲突）
+    total_cf = conn.execute(
+        "SELECT COUNT(*) FROM interp_score_conflicts").fetchone()[0]
+    assert total_cf == st["n_conflicts"], (total_cf, st)
+    # 4) P0-1 缓存切换键集漂移（D1 从当前日线消失）→ 不换锚、不改行
+    ohlc_b = {k: v for k, v in ohlc_a.items() if k != d5}
+    run_score(conn, _et(d7, 17), (ohlc_b, None, _et(d7, 16, 10)))
+    r = _row()
+    assert (r["ret_1d"], r["score_1d"], r["d1_date"]) == frozen[:3], r
+    # 5) 冻结锚沿用补 5 日分：ret_5d 按存储 D1 开盘计，1 日字段保持原值
+    st = run_score(conn, _et(d9, 17), (ohlc_a, None, _et(d9, 16, 10)))
+    r = _row()
+    assert (r["ret_1d"], r["score_1d"], r["d1_date"]) == frozen[:3], r
+    assert abs(r["ret_5d"] - 0.20) < 1e-12 and r["score_5d"] == "hit", r
+    assert r["scored_utc"] is not None
+    # 6) 中性行：ret 填充但 score 恒 NULL（不计分）
+    r2 = _row("ev2")
+    assert r2["score_1d"] is None and r2["score_5d"] is None, r2
+    assert r2["ret_1d"] is not None and r2["ret_5d"] is not None, r2
+    # 7) score_one 冻结锚优先于重算：frozen_d1 指定 01-06 则用 01-06 行情
+    s = score_one("bullish", anchor, ohlc_a, _et(d9, 17), _et(d9, 16, 10),
+                  frozen_d1="2026-01-06")
+    assert s["d1_date"] == "2026-01-06" and abs(s["ret_1d"] - 1.0 / 111.0) < 1e-12
+    conn.close()
+    print("interp_scorer selftest: OK（stale 价拒判 / 已判不可变+冲突告警 / "
+          "缓存切换不换锚 / 冻结锚补 5 日 / 中性不计分）")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--once", action="store_true", help="立即判一轮（幂等）")
     p.add_argument("--auto", action="store_true", help="链尾模式：无事速退")
     p.add_argument("--status", action="store_true", help="打印判分表统计")
+    p.add_argument("--selftest", action="store_true",
+                   help="P0-1/P1-1 合成场景单测（不碰真实 DB）")
     args = p.parse_args()
+    if args.selftest:
+        _selftest()
+        return 0
     if args.status or not (args.once or args.auto):
         print_status()
         return 0
