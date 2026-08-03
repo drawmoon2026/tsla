@@ -35,6 +35,11 @@
    供 intel/dashboard.py 全系统推演页读取；旧 outputs/e8a_replay 保持不动，
    页面在本数据集缺失时自动降级回它。
 
+5. 链尾追加导出 outputs/replay_current/cycle.json（周期推演模式数据集：
+   8 年价格周线降采样 + N4 27 坑 / N10 25 顶共 52 转折点依据档案 + 宏观相位
+   逐月序列 + N10 规则雏形信号 + 当前周期定位与相似度提示）。N10 判决不变：
+   规则前向无区分力（时代标签）——该数据集只做态势感知，不产生信号。
+
 已知口径边界（如实声明）：
 - 最新一日收盘前 ~2 小时内确认的事件，其训练标签在当日数据内无法结算
   （build_dataset label_unresolved 丢行），会在下一交易日数据到位后自动补入——
@@ -510,6 +515,7 @@ def build(force: bool, offline: bool) -> None:
               f"{old_meta['data']['data_through']}）——已是最新，跳过重算")
         if not (OUT / "sandbox.json").exists():   # 沙盘缺失单独补（不整链重算）
             _refresh_sandbox()
+        _refresh_cycle()   # 链尾：周期推演数据集（自带输入签名，独立判断跳过）
         return
 
     from research.e9_frontier_search import BarSet
@@ -644,6 +650,7 @@ def build(force: bool, offline: bool) -> None:
           f"（{fwd_stats['trading_days']} 交易日）")
     print(f"written: {OUT}/trades.csv, daily.csv, meta.json")
     _refresh_sandbox(bars=bars, bs=bs)
+    _refresh_cycle(force=force)
 
 
 def _refresh_sandbox(bars=None, bs=None) -> None:
@@ -655,6 +662,238 @@ def _refresh_sandbox(bars=None, bs=None) -> None:
         print(f"[replay_refresh] 沙盘导出中止：{e}")
     except Exception as e:  # noqa: BLE001
         print(f"[replay_refresh] 沙盘导出失败（页面将降级为生成指引）："
+              f"{type(e).__name__}: {e}")
+
+
+# --------------------------------------- 4. 周期推演数据集（cycle.json，链尾）
+#
+# 供仪表盘「周期推演（买卖点反推）」模式：8 年价格全景 + 52 转折点依据档案 +
+# 宏观相位逐月序列 + N10 规则雏形信号 + 当前周期定位（相似度提示）。
+# N10 判决不变：规则前向无区分力（时代标签）——本数据集只做态势感知与案例库。
+
+CYCLE_HOURLY_CSV = ROOT / "data" / "TSLA_1h_alpaca.csv"
+N10_DIR = ROOT / "outputs" / "n10_cycle_audit"
+MACRO_DIR = ROOT / "data" / "intel" / "macro"
+MACRO_SERIES = ["FEDFUNDS", "M2SL", "INDPRO", "MANEMP", "DGS10", "T10Y2Y"]
+CYCLE_DISCOVERY_END = date(2023, 6, 30)   # 发现段/考场段分界（N3/N4/N10 口径）
+# N10 规则雏形（发现段构建；summary.txt 第三步。考场段零触发 = 判决依据，
+# 阈值 6.67 为发现段合并中位数——弱数据依赖，如实标注）
+PIT_RULE = {"m2_yoy": 6.67, "t10y2y": 0.0}
+TOP_RULE = {"manemp_chg_6m": 0.0, "dgs10_chg_6m": 0.0}
+SIM_FEATS = ["fedfunds_chg_6m", "indpro_yoy", "manemp_chg_6m",
+             "m2_yoy", "dgs10_chg_6m", "t10y2y"]
+MACRO_CAT_FEATS = ["rate_phase", "indpro_yoy_dir", "m2_yoy_dir", "curve_inverted"]
+
+
+def _cycle_inputs_sig() -> dict:
+    files = ([N10_DIR / "pits_macro.csv", N10_DIR / "tops_catalog.csv",
+              CYCLE_HOURLY_CSV, ROLLING_CSV]
+             + [MACRO_DIR / f"{sid}.csv" for sid in MACRO_SERIES])
+    return {p.name: ([int(p.stat().st_mtime), p.stat().st_size]
+                     if p.exists() else None) for p in files}
+
+
+def _cycle_daily_closes() -> "pd.Series":
+    """日线收盘（ET 日）：1h 全景 CSV 聚合 + rolling 5m 尾段补齐到最新完整交易日."""
+    h = pd.read_csv(CYCLE_HOURLY_CSV, usecols=["Datetime", "Close"])
+    ts = pd.to_datetime(h["Datetime"], utc=True).dt.tz_convert("America/New_York")
+    dc = h["Close"].groupby(ts.dt.date).last()
+    if ROLLING_CSV.exists():
+        r = pd.read_csv(ROLLING_CSV, usecols=["Datetime", "Close"])
+        rts = pd.to_datetime(r["Datetime"], utc=True).dt.tz_convert("America/New_York")
+        rdc = r["Close"].groupby(rts.dt.date).last()
+        tail = rdc[rdc.index > dc.index[-1]]
+        if len(tail):
+            dc = pd.concat([dc, tail])
+    return dc.astype(float)
+
+
+def _round_or_none(v, nd: int = 2):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if np.isnan(f) else round(f, nd)
+
+
+def export_cycle(force: bool = False) -> None:
+    """导出 outputs/replay_current/cycle.json（幂等：输入签名不变即跳过）."""
+    sig = _cycle_inputs_sig()
+    out_path = OUT / "cycle.json"
+    if not force and out_path.exists():
+        try:
+            old = json.loads(out_path.read_text(encoding="utf-8"))
+            if (old.get("meta") or {}).get("inputs_sig") == sig:
+                print("[cycle] 输入无变化——cycle.json 已是最新，跳过")
+                return
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    from research.n10_cycle_audit import MacroBook  # 相位变量计算逻辑，复用
+
+    pits = pd.read_csv(N10_DIR / "pits_macro.csv")
+    tops = pd.read_csv(N10_DIR / "tops_catalog.csv")
+    mb = MacroBook()
+
+    def _lvl(sid: str, t: pd.Timestamp):
+        """序列 as-of 水平值 + 观测月份（vintage 近似口径同 N10）."""
+        p = mb._asof_pos(sid, t)  # noqa: SLF001 — 同一研究代码族内复用
+        if p is None:
+            return None, None
+        df = mb.s[sid]
+        return float(df["value"].iloc[p]), str(df.index[p].date())
+
+    # ---- 价格日线 + ATH 距离 + 周线降采样（体积控制） ----------------------
+    dc = _cycle_daily_closes()
+    ath = dc.cummax()
+    dist_ath = (dc / ath - 1.0) * 100
+    dcs = pd.Series(dc.to_numpy(), index=pd.DatetimeIndex(dc.index))
+    wk = dcs.resample("W-FRI").last().dropna()
+    px = {"d": [str(d.date()) for d in wk.index],
+          "c": [round(float(v), 2) for v in wk.to_numpy()]}
+
+    # ---- 52 转折点档案 ------------------------------------------------------
+    def point_rows(df: pd.DataFrame, kind: str) -> list[dict]:
+        dcol, ccol = (("pit_date", "pit_close") if kind == "pit"
+                      else ("top_date", "top_close"))
+        rows = []
+        for _, r in df.iterrows():
+            d = date.fromisoformat(str(r[dcol]))
+            t = pd.Timestamp(d, tz="UTC") + pd.Timedelta(hours=23)
+            ff_lvl, ff_obs = _lvl("FEDFUNDS", t)
+            macro = {k: _round_or_none(r.get(k)) for k in SIM_FEATS}
+            for k in MACRO_CAT_FEATS:
+                v = r.get(k)
+                macro[k] = (str(v) if isinstance(v, str) and v else None)
+            macro["fedfunds"] = _round_or_none(ff_lvl)
+            macro["fedfunds_obs"] = ff_obs
+            rule = PIT_RULE if kind == "pit" else TOP_RULE
+            legs, fire = {}, True
+            for k, th in rule.items():
+                v = macro.get(k)
+                legs[k] = (None if v is None else bool(v >= th))
+                fire = fire and bool(legs[k])
+            rows.append({
+                "d": str(d), "k": kind,
+                "lb": {"true": "true", "false": "false", "mid": "mid",
+                       "truncated": "trunc"}.get(str(r["label"]), str(r["label"])),
+                "c": _round_or_none(r[ccol]),
+                "mag": _round_or_none(r["dd_pct"] if kind == "pit"
+                                      else r["rise_pct"], 1),
+                "f60x": _round_or_none(r.get("fwd60_max_pct"), 1),
+                "f60n": _round_or_none(r.get("fwd60_min_pct"), 1),
+                "nfd": int(r["n_fwd_days"]) if not pd.isna(r.get("n_fwd_days")) else None,
+                "seg": "disc" if d <= CYCLE_DISCOVERY_END else "exam",
+                "macro": macro,
+                "micro": {"si6": _round_or_none(r.get("si_chg_6wk_pct"), 1),
+                          "ath": _round_or_none(dist_ath.get(d), 1)},
+                "rule": {"fire": fire, "legs": legs},
+            })
+        return rows
+
+    points = sorted(point_rows(pits, "pit") + point_rows(tops, "top"),
+                    key=lambda p: p["d"])
+    for i, p in enumerate(points):
+        p["i"] = i
+
+    # ---- 宏观相位逐月序列（色带用；as-of 口径） -----------------------------
+    now = datetime.now(timezone.utc)
+    phase_rows = []
+    for m in pd.period_range("2018-07", now.strftime("%Y-%m"), freq="M"):
+        t = min(pd.Timestamp(m.end_time, tz="UTC"), pd.Timestamp(now))
+        f = mb.phases(t)
+        ff_lvl, _ = _lvl("FEDFUNDS", t)
+        phase_rows.append({
+            "m": str(m), "ph": f.get("rate_phase") or None,
+            "m2d": f.get("m2_yoy_dir") or None,
+            "ff": _round_or_none(ff_lvl),
+            "m2y": _round_or_none(f.get("m2_yoy"), 1),
+        })
+
+    # ---- 当前周期定位：最新读数 + 与 52 转折点的宏观相似度 ------------------
+    t_now = pd.Timestamp(now)
+    cur = mb.phases(t_now)
+    cur_macro = {k: _round_or_none(cur.get(k)) for k in SIM_FEATS}
+    for k in MACRO_CAT_FEATS:
+        v = cur.get(k)
+        cur_macro[k] = v if isinstance(v, str) else None
+    ff_lvl, ff_obs = _lvl("FEDFUNDS", t_now)
+    cur_macro["fedfunds"] = _round_or_none(ff_lvl)
+    cur_macro["fedfunds_obs"] = ff_obs
+    asof = {}
+    for sid in MACRO_SERIES:
+        _, obs = _lvl(sid, t_now)
+        asof[sid] = obs
+
+    # 相似度：6 维连续宏观向量，52 点池内 z 标准化后欧氏距离（缺维按可比维缩放）
+    X = np.array([[np.nan if p["macro"][k] is None else p["macro"][k]
+                   for k in SIM_FEATS] for p in points], dtype=float)
+    mu = np.nanmean(X, axis=0)
+    sd = np.nanstd(X, axis=0)
+    sd[sd == 0] = 1.0
+    Z = (X - mu) / sd
+    zc = np.array([np.nan if cur_macro[k] is None else (cur_macro[k] - mu[j]) / sd[j]
+                   for j, k in enumerate(SIM_FEATS)], dtype=float)
+    dists = []
+    for i, p in enumerate(points):
+        diff = Z[i] - zc
+        ok = ~np.isnan(diff)
+        if not ok.any():
+            continue
+        d2 = float(np.sum(diff[ok] ** 2)) * (len(SIM_FEATS) / int(ok.sum()))
+        dists.append((float(np.sqrt(d2)), i))
+    dists.sort()
+    sim = [{"i": i, "dist": round(dv, 2)} for dv, i in dists[:3]]
+
+    # 规则腿当前读数（仅陈列——N10 判决：无前向区分力，不构成信号）
+    def legs_now(rule: dict) -> dict:
+        return {k: {"v": cur_macro.get(k), "th": th,
+                    "ok": (None if cur_macro.get(k) is None
+                           else bool(cur_macro[k] >= th))}
+                for k, th in rule.items()}
+
+    n_pit = sum(1 for p in points if p["k"] == "pit")
+    n_top = len(points) - n_pit
+    out = {
+        "meta": {
+            "version": "cycle r1 · N4 27 坑 + N10 25 顶 · 宏观 FRED 六序列（vintage 近似）",
+            "generated_utc": now.isoformat(timespec="seconds"),
+            "inputs_sig": sig,
+            "discovery_end": str(CYCLE_DISCOVERY_END),
+            "price_through": str(dc.index[-1]),
+            "n_points": len(points), "n_pit": n_pit, "n_top": n_top,
+            "rules": {
+                "pit": "m2_yoy ≥ 6.67（发现段合并中位数阈，弱数据依赖）∧ t10y2y ≥ 0",
+                "top": "manemp_chg_6m ≥ 0 ∧ dgs10_chg_6m ≥ 0",
+            },
+            "verdict": ("N10 判决：宏观相位签名无前向区分力（时代标签）——"
+                        "考场段（2023-07 起）两侧规则零触发；本数据集仅供态势感知"
+                        "与历史案例对照，不产生买卖信号"),
+        },
+        "px": px,
+        "points": points,
+        "phase": phase_rows,
+        "now": {"asof": asof, "macro": cur_macro,
+                "pit_rule": legs_now(PIT_RULE), "top_rule": legs_now(TOP_RULE),
+                "sim": sim,
+                "sim_note": ("相似 ≠ 预测：6 维宏观向量（52 点池内 z 标准化）"
+                             "欧氏距离；样本 52、宏观慢变量高度非独立")},
+    }
+    OUT.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")),
+                        encoding="utf-8")
+    top3 = "、".join(f"{points[s['i']]['d']}({points[s['i']]['k']}/"
+                    f"{points[s['i']]['lb']},d={s['dist']})" for s in sim)
+    print(f"[cycle] written: {out_path}（{out_path.stat().st_size:,} bytes · "
+          f"{len(points)} 点 · 相似 Top3 {top3}）")
+
+
+def _refresh_cycle(force: bool = False) -> None:
+    """周期推演数据导出——失败不拖垮续演链（页面降级为生成指引），如实打印."""
+    try:
+        export_cycle(force=force)
+    except Exception as e:  # noqa: BLE001
+        print(f"[replay_refresh] 周期推演导出失败（页面将降级为生成指引）："
               f"{type(e).__name__}: {e}")
 
 

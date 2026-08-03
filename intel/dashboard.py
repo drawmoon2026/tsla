@@ -8,7 +8,8 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
 
 视图（顶部标的标签栏之下切换，hash 记忆）：
   实时值班 = 下列全部板块（默认）；
-  模拟探测（历史推演）= 双模式（模式切换 hash 记忆：#replay 探测器 / #fullsys 全系统）：
+  模拟探测（历史推演）= 三模式（模式切换 hash 记忆：#detector 探测器 /
+  #fullsys 全系统（#replay 旧锚点也落这里）/ #cycle 周期推演）：
    · 探测器推演（防守层）= N3-H 考场（2023-07→2026-07）逐日回放播放器——
      价格曲线光标推进 + 两腿指标面板同步 + 触发日自动暂停弹日记卡
      （trigger_diary.md：看到什么→决定→之后 20 日实际→判对/错）+
@@ -24,6 +25,11 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
      outputs/e17a_mc）client 端即时重算（数据 outputs/replay_current/sandbox.json，
      intel/sandbox_export 预结算网格；常驻护栏横幅 + 尝试计数 + 事后选择提示 +
      杠杆>1 未证实期望警示，沙盘 ≠ 结论）。
+   · 周期推演（买卖点反推）= 周期态势感知 + 52 转折点案例库（用户三步法的
+     可视化操作化；数据 outputs/replay_current/cycle.json，replay_refresh 链尾
+     导出）——8 年价格全景（对数轴）+ 坑▲顶▼真假全标 + 宏观相位色带 +
+     点选出依据档案卡 + N10 规则雏形顺推层（考场段灰底「规则沉默」，失效
+     可视化）+ 当前周期定位卡（相似 ≠ 预测）。N10 判决不变：不产生买卖信号。
 
 板块（等宽序号按实际渲染顺序编排）：
   顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
@@ -1001,6 +1007,24 @@ def load_sandbox() -> dict | None:
         return None
 
 
+def load_cycle_data() -> dict | None:
+    """outputs/replay_current/cycle.json → 周期推演数据集.
+
+    intel/replay_refresh.py 链尾产物：8 年价格周线降采样 + 52 转折点依据档案
+    （N4 27 坑 + N10 25 顶）+ 宏观相位逐月序列 + N10 规则雏形信号 +
+    当前周期定位。缺失/坏行 → None（周期推演页降级为生成指引，不炸页面）。
+    """
+    try:
+        cyc = json.loads(
+            (REPLAY_CURRENT_DIR / "cycle.json").read_text(encoding="utf-8"))
+        if (not cyc.get("points") or not cyc.get("px")
+                or not cyc.get("phase") or "now" not in cyc):
+            return None
+        return cyc
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def load_mc_leverage_note() -> str:
     """outputs/e17a_mc/grid.csv → 沙盘杠杆区蒙特卡洛静态注脚（L=2 关键数字）.
 
@@ -1624,8 +1648,9 @@ def render_view_tabs() -> str:
         'aria-selected="false">模拟探测（历史推演）</button>'
         '<a class="vt vt-link" href="playbook.html">棋谱预案 ↗</a>'
         "</div>"
-        '<span class="sym-hint">模拟探测 = 历史推演双模式：防守层（N3-H 探测器'
-        "考场回放）／进攻层（E8-A+S2 留出段逐笔回放）</span></div>"
+        '<span class="sym-hint">模拟探测 = 历史推演三模式：防守层（N3-H 探测器'
+        "考场回放）／进攻层（E8-A+S2 留出段逐笔回放）／周期推演"
+        "（52 转折点案例库 + 宏观相位，态势感知）</span></div>"
     )
 
 
@@ -2408,12 +2433,16 @@ def render_replay_modebar() -> str:
         'aria-selected="true">探测器推演（防守层）</button>'
         '<button class="rm" type="button" data-mode="full" role="tab" '
         'aria-selected="false">全系统推演（进攻层 E8-A+S2）</button>'
+        '<button class="rm" type="button" data-mode="cycle" role="tab" '
+        'aria-selected="false">周期推演（买卖点反推）</button>'
         "</div>"
         '<span class="rm-cmp"><b>探测器推演 = 防守层</b>：稀疏出手，只为躲开特定'
         "类型的大跌（3 年考场仅 2 段避险、4 次假想买卖）；"
         "<b>全系统推演 = 进攻层</b>：E8-A 高频小额抄底 + 双开关"
         "（留出 10 个月 54 笔；E18 全历史为负）。——「系统 3 年只交易 2 次」"
-        "是只看防守层的误读，两层并行、各管一件事。</span></div>"
+        "是只看防守层的误读，两层并行、各管一件事。"
+        "<b>周期推演 = 态势感知层</b>：52 个历史转折点案例库 + 宏观相位——"
+        "只帮你看清位置，不产生信号（N10 判决）。</span></div>"
     )
 
 
@@ -3026,6 +3055,297 @@ def render_fullsys_view(data: dict | None,
   {render_sandbox(sbx)}
   {sum_card}
   <script type="application/json" id="fs-data">{data_json}</script>
+</section>"""
+
+
+# ------------------------------- 周期推演（买卖点反推 · 态势感知）· rendering
+
+_CYC_VB_H = 404          # 周期全景视框高：价格 330 + 年份轴 + 相位色带两行
+_CYC_PH_LAB = {"hiking": "加息中", "plateau": "平台", "cutting": "降息中"}
+_CYC_DIR_LAB = {"up": "上行", "down": "下行"}
+_CYC_INV_LAB = {"inverted": "倒挂", "normal": "正常"}
+_CYC_KIND_LAB = {"pit": "坑（买点）", "top": "顶（卖点）"}
+_CYC_LB_LAB = {
+    "pit": {"true": "真坑", "false": "假坑", "mid": "中间态", "trunc": "窗口不足"},
+    "top": {"true": "真顶", "false": "假顶", "mid": "中间态", "trunc": "窗口不足"},
+}
+
+_CYC_DECL = ("本模式为<b>周期态势感知与历史案例库</b>。N10 判决：宏观相位签名"
+             "<b>无前向区分力</b>（时代标签问题）——本页不产生买卖信号，"
+             "帮助你像 2019/2021/2024 的自己一样看清当时与现在的异同。")
+
+
+def _cyc_num(v, unit: str = "", nd: int = 2, sign: bool = True) -> str:
+    """数值格式化；None → 「无数据」（缺列如实）."""
+    if v is None:
+        return "无数据"
+    return (f"{v:+.{nd}f}" if sign else f"{v:.{nd}f}") + unit
+
+
+def _cyc_point_brief(p: dict) -> str:
+    """marker tooltip 一句话."""
+    lb = _CYC_LB_LAB[p["k"]].get(p["lb"], p["lb"])
+    mag = ("深度 " + _cyc_num(p["mag"], "%", 1) if p["k"] == "pit"
+           else "60 日涨幅 " + _cyc_num(p["mag"], "%", 1))
+    return (f'{p["d"]} {lb} · 收盘 {p["c"]:g} · {mag} · '
+            f'之后 60 日 max {_cyc_num(p["f60x"], "%", 1)} / '
+            f'min {_cyc_num(p["f60n"], "%", 1)} —— 点选看依据档案')
+
+
+def render_cycle_view(cyc: dict | None) -> str:
+    """周期推演页：8 年全景（对数轴）+ 52 转折点 + 宏观相位色带 + 依据档案卡
+    + N10 规则顺推层（考场段灰底 = 失效可视化）+ 当前周期定位卡。
+
+    数据 = outputs/replay_current/cycle.json（replay_refresh 链尾导出）；
+    缺失 → 生成指引（降级不炸）。定位 = 态势感知 + 案例库，页头如实声明。
+    """
+    decl_card = (f'<div class="card cyc-decl"><p>{_CYC_DECL}</p></div>')
+    if not cyc:
+        return f"""
+<section id="cyc">
+  <h2><span class="sec-no">R3</span>周期推演（买卖点反推）<span class="h-sub">周期态势感知 + 52 转折点案例库 · 不产生信号</span></h2>
+  {decl_card}
+  <div class="card"><p class="empty">outputs/replay_current/cycle.json 不可读——跑
+  <code>.venv/bin/python -m intel.replay_refresh</code>（链尾自动导出周期推演数据集）后本页可用；
+  前置研究产物：outputs/n4_golden_pit/pits_catalog.csv（N4 27 坑）与
+  outputs/n10_cycle_audit/tops_catalog.csv（N10 25 顶）。</p></div>
+</section>"""
+
+    meta, px, points, phase, now_c = (cyc["meta"], cyc["px"], cyc["points"],
+                                      cyc["phase"], cyc["now"])
+    disc_end = date.fromisoformat(meta["discovery_end"])
+
+    # ---- 几何：对数 y（价格）+ 日期 x + 底部相位色带 ------------------------
+    px_dates = [date.fromisoformat(s) for s in px["d"]]
+    d0o, d1o = px_dates[0].toordinal(), px_dates[-1].toordinal()
+    dspan = max(1, d1o - d0o)
+    pw, ph_px = _VB_W - _ML - _MR, 330
+    closes = px["c"]
+    llo = math.log10(min(min(closes), min(p["c"] for p in points)))
+    lhi = math.log10(max(max(closes), max(p["c"] for p in points)))
+    pad = 0.05 * ((lhi - llo) or 1.0)
+    llo, lhi = llo - pad, lhi + pad
+    lspan = lhi - llo
+    y_bot = _MT + ph_px                    # 价格区底
+    y_axis = y_bot + 14                    # 年份轴标签
+    y_rate, h_rate = y_bot + 22, 16        # 利率相位横带
+    y_m2, h_m2 = y_bot + 42, 8             # M2 同比方向细带
+
+    def x(o: float) -> float:
+        return _ML + (o - d0o) / dspan * pw
+
+    def y(c: float) -> float:
+        return _MT + (1 - (math.log10(c) - llo) / lspan) * ph_px
+
+    parts: list[str] = []
+    # 网格：年份竖线 + 对数价位横线
+    for yr in range(px_dates[0].year + 1, px_dates[-1].year + 1):
+        xo = x(date(yr, 1, 1).toordinal())
+        parts.append(f'<line class="cyc-grid" x1="{xo:.1f}" x2="{xo:.1f}" '
+                     f'y1="{_MT}" y2="{y_bot}"/>'
+                     f'<text class="cyc-tick" x="{xo:.1f}" y="{y_axis}" '
+                     f'text-anchor="middle">{yr}</text>')
+    for tick in (10, 20, 50, 100, 200, 400):
+        if llo <= math.log10(tick) <= lhi:
+            ty = y(tick)
+            parts.append(f'<line class="cyc-grid" x1="{_ML}" x2="{_VB_W - _MR}" '
+                         f'y1="{ty:.1f}" y2="{ty:.1f}"/>'
+                         f'<text class="cyc-tick" x="{_ML - 6}" y="{ty + 3.5:.1f}" '
+                         f'text-anchor="end">{tick}</text>')
+
+    # 宏观相位色带（逐月矩形 + tooltip；数据缺月如实空白）
+    for r in phase:
+        yy, mm = int(r["m"][:4]), int(r["m"][5:7])
+        m0 = date(yy, mm, 1).toordinal()
+        m1 = (date(yy + 1, 1, 1) if mm == 12 else date(yy, mm + 1, 1)).toordinal()
+        x0, x1 = max(x(m0), _ML), min(x(m1), _VB_W - _MR)
+        if x1 <= x0:
+            continue
+        tip = (f'{r["m"]} · 利率相位 {_CYC_PH_LAB.get(r["ph"], "无数据")}'
+               f'（FEDFUNDS {_cyc_num(r["ff"], "%", 2, sign=False)}）· '
+               f'M2 同比 {_cyc_num(r["m2y"], "%", 1)}'
+               f'（{_CYC_DIR_LAB.get(r["m2d"], "无数据")}）')
+        if r["ph"]:
+            parts.append(f'<rect class="cyc-ph {esc(r["ph"])}" x="{x0:.1f}" '
+                         f'y="{y_rate}" width="{x1 - x0:.1f}" height="{h_rate}">'
+                         f"<title>{esc(tip)}</title></rect>")
+        if r["m2d"]:
+            parts.append(f'<rect class="cyc-m2 {esc(r["m2d"])}" x="{x0:.1f}" '
+                         f'y="{y_m2}" width="{x1 - x0:.1f}" height="{h_m2}">'
+                         f"<title>{esc(tip)}</title></rect>")
+    parts.append(f'<text class="cyc-bandlab" x="{_ML - 6}" '
+                 f'y="{y_rate + h_rate - 4}" text-anchor="end">利率</text>'
+                 f'<text class="cyc-bandlab" x="{_ML - 6}" '
+                 f'y="{y_m2 + h_m2 - 1}" text-anchor="end">M2</text>')
+
+    # 价格折线（周线降采样）
+    pts_path = " ".join(
+        f"{x(d.toordinal()):.1f},{y(c):.1f}" for d, c in zip(px_dates, closes))
+    parts.append(f'<polyline class="cyc-px" points="{pts_path}"/>')
+
+    # 顺推层（默认开，可关）：考场段灰底 + 规则信号圈（命中绿 / 误报橙）
+    rule_parts: list[str] = []
+    xe = x(disc_end.toordinal())
+    rule_parts.append(
+        f'<rect class="cyc-exam" x="{xe:.1f}" y="{_MT}" '
+        f'width="{x(d1o) - xe:.1f}" height="{ph_px}"><title>考场段 '
+        f'{disc_end} 之后：N10 规则雏形（坑侧 M2≥6.7∧曲线&gt;0、顶侧 就业≥0∧'
+        "长端上行）在两侧转折点上零触发——发现段签名实为时代标签，"
+        "宏观环境整体迁移后规则条件不再出现（N10 判决）</title></rect>"
+        f'<text class="cyc-exam-lab" x="{xe + 8:.1f}" y="{y_bot - 10}">考场段'
+        "（2023-07 起）：规则沉默——宏观时代迁移，N10 判决</text>")
+    for p in points:
+        if not p["rule"]["fire"]:
+            continue
+        xo = x(date.fromisoformat(p["d"]).toordinal())
+        yc = y(p["c"]) + (11 if p["k"] == "pit" else -11)
+        good = p["lb"] == "true"
+        tag = "规则命中（事后）" if good else "规则误报"
+        rule_parts.append(
+            f'<circle class="cyc-ring {"hit" if good else "miss"}" '
+            f'cx="{xo:.1f}" cy="{yc:.1f}" r="9"><title>{esc(p["d"])} '
+            f'{esc(_CYC_KIND_LAB[p["k"]])}规则触发 · {tag}'
+            "（发现段构建，in-sample）</title></circle>")
+    parts.append(f'<g id="cyc-rule">{"".join(rule_parts)}</g>')
+
+    # 52 转折点 marker（点选出依据档案卡）：坑▲（真金/假灰）顶▼（真红/假灰）
+    mk_parts: list[str] = []
+    for p in points:
+        xo = x(date.fromisoformat(p["d"]).toordinal())
+        yo = y(p["c"])
+        if p["k"] == "pit":
+            tri = (f'M{xo:.1f} {yo + 6:.1f} L{xo - 5:.1f} {yo + 16:.1f} '
+                   f'L{xo + 5:.1f} {yo + 16:.1f} Z')
+            cy_hit = yo + 11
+        else:
+            tri = (f'M{xo - 5:.1f} {yo - 16:.1f} L{xo + 5:.1f} {yo - 16:.1f} '
+                   f'L{xo:.1f} {yo - 6:.1f} Z')
+            cy_hit = yo - 11
+        mk_parts.append(
+            f'<g class="cyc-pt k-{p["k"]} lb-{esc(p["lb"])}" data-i="{p["i"]}" '
+            f'role="button" tabindex="0" aria-label="{esc(p["d"])} '
+            f'{esc(_CYC_LB_LAB[p["k"]].get(p["lb"], p["lb"]))}">'
+            f'<circle class="hit" cx="{xo:.1f}" cy="{cy_hit:.1f}" r="10"/>'
+            f'<path d="{tri}"/><title>{esc(_cyc_point_brief(p))}</title></g>')
+    parts.append("".join(mk_parts))
+
+    svg = (f'<svg class="cyc-svg" viewBox="0 0 {_VB_W} {_CYC_VB_H}" '
+           'preserveAspectRatio="xMidYMid meet" role="img" '
+           'aria-label="TSLA 8 年周期全景（对数轴）：52 转折点 + 宏观相位色带">'
+           + "".join(parts) + "</svg>")
+
+    # ---- 当前周期定位卡（常驻顶部） ----------------------------------------
+    nm = now_c["macro"]
+    asof = now_c.get("asof") or {}
+
+    def chip(k: str, v: str) -> str:
+        return (f'<span class="cyc-chip"><span class="k">{k}</span>'
+                f'<b>{v}</b></span>')
+
+    read_chips = "".join([
+        chip("利率相位", f'{_CYC_PH_LAB.get(nm.get("rate_phase"), "无数据")}'
+             f'（FEDFUNDS {_cyc_num(nm.get("fedfunds"), "%", 2, sign=False)} · '
+             f'6月 {_cyc_num(nm.get("fedfunds_chg_6m"), "pp")}）'),
+        chip("M2 同比", f'{_cyc_num(nm.get("m2_yoy"), "%", 1)}'
+             f'（{_CYC_DIR_LAB.get(nm.get("m2_yoy_dir"), "无数据")}）'),
+        chip("INDPRO 同比", f'{_cyc_num(nm.get("indpro_yoy"), "%", 1)}'
+             f'（{_CYC_DIR_LAB.get(nm.get("indpro_yoy_dir"), "无数据")}）'),
+        chip("MANEMP 6月", _cyc_num(nm.get("manemp_chg_6m"), "%")),
+        chip("DGS10 6月", _cyc_num(nm.get("dgs10_chg_6m"), "pp")),
+        chip("10Y−2Y", f'{_cyc_num(nm.get("t10y2y"), "pp")}'
+             f'（{_CYC_INV_LAB.get(nm.get("curve_inverted"), "无数据")}）'),
+    ])
+
+    def legs_txt(rule: dict, names: dict) -> tuple[str, bool | None]:
+        segs, all_ok = [], True
+        for k, leg in rule.items():
+            ok = leg.get("ok")
+            mark = "✓" if ok else "✗" if ok is not None else "?"
+            all_ok = (None if (ok is None or all_ok is None)
+                      else (all_ok and ok))
+            segs.append(f'{names.get(k, k)}≥{leg["th"]:g} {mark}'
+                        f'（{_cyc_num(leg.get("v"))}）')
+        return " ∧ ".join(segs), all_ok
+
+    pit_txt, pit_ok = legs_txt(now_c.get("pit_rule") or {},
+                               {"m2_yoy": "M2同比", "t10y2y": "曲线"})
+    top_txt, top_ok = legs_txt(now_c.get("top_rule") or {},
+                               {"manemp_chg_6m": "就业6月", "dgs10_chg_6m": "长端6月"})
+    verdict = {True: "名义满足", False: "不满足", None: "无数据"}
+    rule_line = (
+        f"规则雏形当前读数（仅陈列）：坑侧 {pit_txt} → <b>{verdict[pit_ok]}</b>；"
+        f"顶侧 {top_txt} → <b>{verdict[top_ok]}</b>。"
+        "——N10 判决：该规则考场段零触发、无前向区分力，以上读数<b>不构成信号</b>。")
+
+    sim_btns = []
+    for rank, s in enumerate(now_c.get("sim") or [], start=1):
+        p = points[s["i"]]
+        lb = _CYC_LB_LAB[p["k"]].get(p["lb"], p["lb"])
+        sim_btns.append(
+            f'<button type="button" class="cyc-simbtn" data-simsel="{p["i"]}">'
+            f'<span class="rk">{rank}</span>{esc(p["d"])} · {esc(lb)} · '
+            f'距离 {s["dist"]:g}</button>')
+    sim_html = ("".join(sim_btns) if sim_btns
+                else '<span class="muted">相似度不可算（当前宏观读数缺失）</span>')
+    asof_note = (f'宏观 as-of：月度序列至 {esc(str(asof.get("FEDFUNDS") or "无数据"))[:7]}'
+                 f'（vintage 近似，滞后 1 月）· DGS10 至 {esc(str(asof.get("DGS10") or "无数据"))} · '
+                 f'T10Y2Y 至 {esc(str(asof.get("T10Y2Y") or "无数据"))} · '
+                 f'价格截至 {esc(meta["price_through"])}')
+    now_card = f"""
+  <div class="card cyc-now">
+    <div class="cyc-now-h"><h3>当前周期定位</h3><span class="micro muted">{asof_note}</span></div>
+    <div class="cyc-chips">{read_chips}</div>
+    <p class="cyc-ruleline">{rule_line}</p>
+    <div class="cyc-sim"><span class="cyc-sim-h">当前宏观环境最像的历史转折点（{meta["n_points"]} 点池）：</span>
+      {sim_html}
+      <span class="cyc-sim-note">{esc(now_c.get("sim_note") or "")}——点击跳到该点档案。</span></div>
+  </div>"""
+
+    # ---- 依据档案卡（JS 填充）+ 图例 + 开关 --------------------------------
+    n_pit, n_top = meta.get("n_pit", "?"), meta.get("n_top", "?")
+    legend = (
+        '<div class="cyc-legend">'
+        '<span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M5 0 L0 10 L10 10 Z" fill="var(--accent)"/></svg>真坑</span>'
+        '<span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0 L10 0 L5 10 Z" fill="var(--crit)"/></svg>真顶</span>'
+        '<span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M5 0 L0 10 L10 10 Z" fill="var(--muted)" opacity=".75"/></svg>假坑/假顶（灰）</span>'
+        '<span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M5 1 L1 9 L9 9 Z" fill="none" stroke="var(--muted)" stroke-width="1.4"/></svg>中间态/窗口不足</span>'
+        '<span><svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--good)" stroke-width="1.6"/></svg>规则命中（发现段）</span>'
+        '<span><svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--warn)" stroke-width="1.6"/></svg>规则误报</span>'
+        '<span class="cyc-lg-band"><i class="ph-hiking"></i>加息 <i class="ph-plateau"></i>平台 <i class="ph-cutting"></i>降息</span>'
+        '<span class="cyc-lg-band"><i class="m2-up"></i>M2 上行 <i class="m2-down"></i>M2 下行</span>'
+        "</div>")
+
+    cyc_json = json.dumps(
+        {"points": points, "rules": meta.get("rules") or {},
+         "disc_end": meta["discovery_end"]},
+        separators=(",", ":"), ensure_ascii=False)
+
+    return f"""
+<section id="cyc">
+  <h2><span class="sec-no">R3</span>周期推演（买卖点反推）<span class="h-sub">{esc(str(n_pit))} 坑 + {esc(str(n_top))} 顶 = {meta["n_points"]} 转折点案例库 · 宏观相位 · 态势感知，不产生信号</span></h2>
+  {decl_card}
+  {now_card}
+  <div class="card chartcard">
+    <div class="cyc-controls">
+      <label class="cyc-toggle"><input type="checkbox" id="cyc-rulechk" checked>
+        顺推层：N10 规则雏形历史信号（坑侧 {esc((meta.get("rules") or {}).get("pit", ""))}；顶侧 {esc((meta.get("rules") or {}).get("top", ""))}）</label>
+      <span class="micro muted">发现段命中绿圈 / 误报橙圈 · 考场段整段灰底 = 规则沉默（失效可视化，本模式的诚实核心）</span>
+    </div>
+    <div class="tv-wrap cyc-wrap">{svg}</div>
+    {legend}
+    <div class="cyc-dossier card-inner" id="cyc-dossier">
+      <p class="empty">点选图中任意 ▲坑 / ▼顶（或上方相似转折点按钮），这里显示该点的依据档案：
+      日期/类型/深度或涨幅/之后走势 · 当时宏观（利率相位 · M2 · 库存周期 proxy · 长端 · 曲线）·
+      当时微观（空头 6 周变化 · 距 ATH）· N10 规则触发情况。</p>
+    </div>
+    <p class="footnote">数据：outputs/replay_current/cycle.json（intel/replay_refresh 链尾导出）——
+    坑目录 = N4 拆股修正后 27 坑（outputs/n4_golden_pit）；顶目录 = N10 预登记判据 25 顶
+    （outputs/n10_cycle_audit）；宏观 = FRED 六序列 vintage 近似（月度值滞后 1 月且含事后修订，
+    非当时实时可见值）；ISM PMI 已下架，库存周期用 INDPRO 同比 + MANEMP 6 月变化替代口径。
+    规则雏形阈值 M2≥6.67 为发现段合并中位数（弱数据依赖，如实标注）。
+    发现段/考场段分界 {esc(meta["discovery_end"])}（与 N3/N4/N10 口径一致）。缺列一律显示「无数据」。</p>
+  </div>
+  <script type="application/json" id="cyc-data">{cyc_json}</script>
 </section>"""
 
 
@@ -6052,6 +6372,110 @@ main > .sym-tabs { margin-top: 26px; }
   line-height: 1.65; padding-top: 2px; }
 .rm-cmp b { color: var(--ink-2); }
 .rmode { display: none; } .rmode.act { display: block; }
+
+/* ===== 周期推演（态势感知层）===== */
+#cyc .cyc-decl { padding: 10px 14px; border-left: 3px solid var(--accent);
+  background: var(--accent-wash); }
+#cyc .cyc-decl p { margin: 0; font: 400 13.5px/1.7 var(--font-serif);
+  color: var(--ink-2); }
+#cyc .cyc-decl b { color: var(--ink); }
+.cyc-now { margin-top: 12px; padding: 12px 14px; }
+.cyc-now-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 8px; }
+.cyc-now-h h3 { margin: 0; }
+.cyc-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.cyc-chip { display: inline-flex; align-items: baseline; gap: 6px;
+  border: 1px solid var(--border); border-radius: 4px; padding: 4px 9px;
+  background: var(--surface-2); font-size: 12px; }
+.cyc-chip .k { color: var(--muted); font-size: 11px; letter-spacing: .04em; }
+.cyc-chip b { font-family: var(--font-mono); font-weight: 600;
+  font-variant-numeric: tabular-nums; color: var(--ink); font-size: 12px; }
+.cyc-ruleline { margin: 10px 0 8px; font-size: 12px; color: var(--muted);
+  line-height: 1.7; }
+.cyc-ruleline b { color: var(--ink-2); }
+.cyc-sim { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  border-top: 1px dashed var(--border); padding-top: 10px; }
+.cyc-sim-h { font-size: 12.5px; color: var(--ink-2); font-weight: 600; }
+.cyc-simbtn { font: 12px var(--font-mono); font-variant-numeric: tabular-nums;
+  color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+.cyc-simbtn:hover { color: var(--accent); border-color: var(--accent); }
+.cyc-simbtn .rk { display: inline-block; margin-right: 6px; color: var(--accent);
+  font-weight: 700; }
+.cyc-sim-note { flex-basis: 100%; font-size: 11px; color: var(--muted); }
+.cyc-controls { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 12px 14px 4px; }
+.cyc-toggle { display: inline-flex; align-items: baseline; gap: 7px;
+  font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
+.cyc-toggle input { accent-color: var(--accent); }
+.cyc-wrap { padding: 4px 8px 0; }
+.cyc-svg { width: 100%; height: auto; display: block; }
+.cyc-grid { stroke: var(--grid); stroke-width: 1; }
+.cyc-tick { font: 10.5px var(--font-mono); fill: var(--muted); }
+.cyc-bandlab { font: 9px var(--font-mono); fill: var(--muted);
+  letter-spacing: .05em; }
+.cyc-px { fill: none; stroke: var(--ink-2); stroke-width: 1.6;
+  stroke-linejoin: round; }
+.cyc-ph.hiking { fill: var(--crit); opacity: .5; }
+.cyc-ph.plateau { fill: var(--muted); opacity: .28; }
+.cyc-ph.cutting { fill: var(--good); opacity: .5; }
+.cyc-m2.up { fill: var(--good); opacity: .45; }
+.cyc-m2.down { fill: var(--crit); opacity: .45; }
+.cyc-pt { cursor: pointer; }
+.cyc-pt .hit { fill: transparent; stroke: none; }
+.cyc-pt path { stroke: none; }
+.cyc-pt.k-pit.lb-true path { fill: var(--accent); }
+.cyc-pt.k-top.lb-true path { fill: var(--crit); }
+.cyc-pt.lb-false path { fill: var(--muted); opacity: .75; }
+.cyc-pt.lb-mid path, .cyc-pt.lb-trunc path { fill: none; stroke: var(--muted);
+  stroke-width: 1.4; }
+.cyc-pt:hover path { stroke: var(--ink); stroke-width: 1.2; }
+.cyc-pt.sel path { stroke: var(--ink); stroke-width: 1.8; }
+.cyc-pt:focus { outline: none; }
+.cyc-pt:focus-visible path { stroke: var(--link); stroke-width: 1.8; }
+#cyc-rule { transition: opacity .15s; }
+#cyc-rule.off { display: none; }
+.cyc-exam { fill: var(--muted); opacity: .13; }
+.cyc-exam-lab { font: 10.5px var(--font-mono); fill: var(--muted);
+  letter-spacing: .04em; }
+.cyc-ring { fill: none; stroke-width: 1.8; }
+.cyc-ring.hit { stroke: var(--good); }
+.cyc-ring.miss { stroke: var(--warn); }
+.cyc-legend { display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  padding: 8px 14px 0; font-size: 11.5px; color: var(--muted); }
+.cyc-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.cyc-lg-band i { display: inline-block; width: 14px; height: 8px;
+  border-radius: 1px; vertical-align: middle; margin: 0 2px 0 6px; }
+.cyc-lg-band i.ph-hiking { background: var(--crit); opacity: .5; }
+.cyc-lg-band i.ph-plateau { background: var(--muted); opacity: .28; }
+.cyc-lg-band i.ph-cutting { background: var(--good); opacity: .5; }
+.cyc-lg-band i.m2-up { background: var(--good); opacity: .45; }
+.cyc-lg-band i.m2-down { background: var(--crit); opacity: .45; }
+.cyc-dossier { margin: 12px 14px; border: 1px dashed var(--border);
+  border-radius: 5px; padding: 12px 14px; background: var(--surface-2);
+  min-height: 72px; }
+.cyc-dossier .empty { margin: 0; font-size: 12.5px; color: var(--muted);
+  line-height: 1.7; }
+.cyc-dz-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 10px; }
+.cyc-dz-date { font: 700 17px var(--font-mono); font-variant-numeric: tabular-nums;
+  color: var(--ink); letter-spacing: .03em; }
+.cyc-dz-lb { font-size: 13px; font-weight: 600; }
+.cyc-dz-lb.k-pit.lb-true { color: var(--accent-mark); }
+.cyc-dz-lb.k-top.lb-true { color: var(--crit-text); }
+.cyc-dz-lb.lb-false, .cyc-dz-lb.lb-mid, .cyc-dz-lb.lb-trunc { color: var(--muted); }
+.cyc-dz-seg { font: 11px var(--font-mono); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 3px; padding: 2px 7px; }
+.cyc-dz-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 18px; }
+@media (max-width: 900px) { .cyc-dz-grid { grid-template-columns: 1fr; } }
+.cyc-dz-t { font: 600 11px var(--font-mono); color: var(--accent);
+  letter-spacing: .12em; margin: 6px 0 4px; }
+.cyc-kv { display: flex; gap: 10px; padding: 3px 0; font-size: 12.5px;
+  border-bottom: 1px dotted var(--border); }
+.cyc-kv:last-child { border-bottom: none; }
+.cyc-kv .k { flex: none; width: 132px; color: var(--muted); }
+.cyc-kv .v { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
 .lg-tw .lg-line, .lg-tl .lg-line { font-weight: 600; }
 .lg-tw .lg-tag { background: var(--good-wash); border-color: var(--good);
   color: var(--good-text); }
@@ -6343,13 +6767,18 @@ _TV_JS = """
 
 # 视图切换 + 推演播放器（模拟探测页）。不经 %-格式化，直接拼接。
 _RP_JS = """
-/* 视图切换：实时值班｜模拟探测（页内再分两种推演模式）；location.hash 记忆
-   （#live / #replay 探测器推演 / #fullsys 全系统推演），meta refresh 后不丢 */
+/* 视图切换：实时值班｜模拟探测（页内再分三种推演模式）；location.hash 记忆
+   （#live / #detector 探测器 / #fullsys 全系统（旧 #replay 也落这里）/
+   #cycle 周期推演），meta refresh 后不丢 */
 (function () {
   var tabs = document.querySelectorAll(".vt");
   if (!tabs.length) return;
   var modes = document.querySelectorAll(".rm");
   var curMode = "full"; /* 默认进攻层（54 笔）；防守层（稀疏）经 #detector 显式进入 */
+  function modeHash() {
+    return curMode === "full" ? "fullsys"
+      : curMode === "cycle" ? "cycle" : "detector";
+  }
   function setView(v) {
     tabs.forEach(function (b) {
       var on = b.getAttribute("data-view") === v;
@@ -6378,22 +6807,23 @@ _RP_JS = """
     b.addEventListener("click", function () {
       var v = b.getAttribute("data-view");
       setView(v);
-      writeHash(v === "replay" ? (curMode === "full" ? "fullsys" : "detector") : v);
+      writeHash(v === "replay" ? modeHash() : v);
     });
   });
   modes.forEach(function (b) {
     b.addEventListener("click", function () {
       setMode(b.getAttribute("data-mode"));
-      writeHash(curMode === "full" ? "fullsys" : "detector");
+      writeHash(modeHash());
     });
   });
   var h = (location.hash || "").slice(1);
   /* 旧锚点 #replay 曾指探测器模式——用户浏览器/历史里残留它会一直拽回
      防守层（"3 年 2 次"误读根源）。现统一：#replay 也落全系统模式，
-     防守层只能经 #detector 显式进入。 */
+     防守层只能经 #detector 显式进入；周期推演经 #cycle 直达。 */
   if (h === "fullsys" || h === "replay") { setView("replay"); setMode("full"); }
   else if (h === "live") setView(h);
   else if (h === "detector") { setView("replay"); setMode("det"); }
+  else if (h === "cycle") { setView("replay"); setMode("cycle"); }
   else { try { setMode("full"); } catch (e) {} }
 })();
 /* 推演播放器：逐日回放 N3-H 考场；事件写入推演日志，播放不中断；播完弹总结 */
@@ -6812,6 +7242,124 @@ _FS_JS = """
 """
 
 
+# 周期推演：点选转折点 → 依据档案卡；顺推层开关；相似转折点按钮联动。
+# 不经 %-格式化，直接拼接。
+_CYC_JS = """
+/* 周期推演（态势感知）：52 转折点点选档案卡 + N10 规则顺推层开关 */
+(function () {
+  var sec = document.getElementById("cyc");
+  var dataEl = document.getElementById("cyc-data");
+  if (!sec || !dataEl) return;
+  var D = null;
+  try { D = JSON.parse(dataEl.textContent); } catch (e) {}
+  if (!D || !D.points) return;
+  var PH = { hiking: "加息中", plateau: "平台", cutting: "降息中" };
+  var DIR = { up: "上行", down: "下行" };
+  var INV = { inverted: "倒挂", normal: "正常" };
+  var LB = { pit: { "true": "真坑", "false": "假坑", mid: "中间态", trunc: "窗口不足" },
+             top: { "true": "真顶", "false": "假顶", mid: "中间态", trunc: "窗口不足" } };
+  var dossier = document.getElementById("cyc-dossier");
+  var chk = document.getElementById("cyc-rulechk");
+  var ruleG = document.getElementById("cyc-rule");
+  var LEG_NAME = { m2_yoy: "M2 同比", t10y2y: "10Y−2Y 利差",
+                   manemp_chg_6m: "MANEMP 6 月变化", dgs10_chg_6m: "DGS10 6 月变化" };
+
+  if (chk && ruleG) {
+    chk.addEventListener("change", function () {
+      ruleG.classList.toggle("off", !chk.checked);
+    });
+  }
+
+  function num(v, unit, nd, noSign) {
+    if (v === null || v === undefined) return "无数据";
+    var s = v.toFixed(nd === undefined ? 2 : nd);
+    if (!noSign && v >= 0) s = "+" + s;
+    return s + (unit || "");
+  }
+  function kv(k, v) {
+    return '<div class="cyc-kv"><span class="k">' + k + '</span><span class="v">' +
+      v + "</span></div>";
+  }
+  function dossierHtml(p) {
+    var lb = (LB[p.k] || {})[p.lb] || p.lb;
+    var m = p.macro || {}, mi = p.micro || {};
+    var head = '<div class="cyc-dz-head"><b class="cyc-dz-date">' + p.d + "</b>" +
+      '<span class="cyc-dz-lb lb-' + p.lb + " k-" + p.k + '">' +
+      (p.k === "pit" ? "▲ " : "▼ ") + lb + "</span>" +
+      '<span class="cyc-dz-seg">' + (p.seg === "disc" ? "发现段（签名构建期）"
+        : "考场段（样本外复验期）") + "</span></div>";
+    var move = kv(p.k === "pit" ? "坑深" : "60 日涨幅", num(p.mag, "%", 1)) +
+      kv("之后走势", "60 日内 max " + num(p.f60x, "%", 1) + " · min " +
+        num(p.f60n, "%", 1) +
+        (p.nfd !== null && p.nfd !== undefined && p.nfd < 60
+          ? "（前向窗口仅 " + p.nfd + " 日，窗口不足）" : ""));
+    var macro = kv("利率周期", (PH[m.rate_phase] || "无数据") + " · FEDFUNDS " +
+        num(m.fedfunds, "%", 2, true) + "（6 月 " + num(m.fedfunds_chg_6m, "pp") + "）") +
+      kv("流动性", "M2 同比 " + num(m.m2_yoy, "%", 1) + "（" +
+        (DIR[m.m2_yoy_dir] || "无数据") + "）") +
+      kv("库存周期 proxy", "INDPRO 同比 " + num(m.indpro_yoy, "%", 1) + "（" +
+        (DIR[m.indpro_yoy_dir] || "无数据") + "）· MANEMP 6 月 " +
+        num(m.manemp_chg_6m, "%")) +
+      kv("长端 / 曲线", "DGS10 6 月 " + num(m.dgs10_chg_6m, "pp") + " · 10Y−2Y " +
+        num(m.t10y2y, "pp") + "（" + (INV[m.curve_inverted] || "无数据") + "）");
+    var micro = kv("空头 6 周变化", num(mi.si6, "%", 1)) +
+      kv("距 ATH", num(mi.ath, "%", 1));
+    var r = p.rule || {}, legs = r.legs || {}, legTxt = [];
+    for (var k in legs) {
+      legTxt.push((LEG_NAME[k] || k) + " " +
+        (legs[k] === null ? "无数据" : legs[k] ? "✓" : "✗"));
+    }
+    var ruleTxt;
+    if (p.seg === "exam") {
+      ruleTxt = (r.fire ? "触发（罕见）" : "未触发") +
+        " —— 考场段整段规则沉默：宏观时代迁移，规则条件不再出现（N10 判决，" +
+        "失效可视化）。腿读数：" + legTxt.join(" · ");
+    } else {
+      ruleTxt = r.fire
+        ? ("触发（" + (p.lb === "true" ? "事后判命中" : "事后判误报") +
+           "，in-sample——发现段构建的规则在自家地盘的表现，不作数）")
+        : "未触发";
+      ruleTxt += " · 腿读数：" + legTxt.join(" · ");
+    }
+    var rule = kv((p.k === "pit" ? "坑侧规则雏形" : "顶侧规则雏形") + "（" +
+      ((D.rules || {})[p.k] || "") + "）", ruleTxt);
+    return head +
+      '<div class="cyc-dz-grid">' +
+      '<div class="cyc-dz-col"><div class="cyc-dz-t">走势</div>' + move + "</div>" +
+      '<div class="cyc-dz-col"><div class="cyc-dz-t">当时宏观（vintage 近似）</div>' +
+      macro + "</div>" +
+      '<div class="cyc-dz-col"><div class="cyc-dz-t">当时微观 + 规则</div>' +
+      micro + rule + "</div></div>";
+  }
+  var selG = null;
+  function select(i) {
+    var p = D.points[i];
+    if (!p || !dossier) return;
+    dossier.innerHTML = dossierHtml(p);
+    if (selG) selG.classList.remove("sel");
+    selG = sec.querySelector('.cyc-pt[data-i="' + i + '"]');
+    if (selG) selG.classList.add("sel");
+  }
+  sec.querySelectorAll(".cyc-pt").forEach(function (g) {
+    function go() { select(parseInt(g.getAttribute("data-i"), 10)); }
+    g.addEventListener("click", go);
+    g.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
+    });
+  });
+  sec.querySelectorAll("[data-simsel]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      select(parseInt(b.getAttribute("data-simsel"), 10));
+      var wrap = sec.querySelector(".cyc-wrap");
+      if (wrap && wrap.scrollIntoView) wrap.scrollIntoView(
+        { behavior: "smooth", block: "nearest" });
+    });
+  });
+  window.__cyc = { select: select, n: D.points.length };
+})();
+"""
+
+
 # what-if 沙盘：client 端即时重算（数据 = sandbox.json 预结算网格）。
 # 不经 %-格式化，直接拼接。
 _SBX_JS = """
@@ -7112,12 +7660,14 @@ def render(db_path: Path = DB_PATH) -> str:
         )
         fullsys_html = render_fullsys_view(load_fullsys_data(), replay_days,
                                            load_sandbox())
+        cycle_html = render_cycle_view(load_cycle_data())
         body.append(
             "<main>" + render_symbol_tabs() + render_view_tabs()
             + f'<div class="vw act" id="view-live">{"".join(rendered)}</div>'
             + f'<div class="vw" id="view-replay">{render_replay_modebar()}'
             + f'<div class="rmode act" id="rmode-det">{replay_html}</div>'
-            + f'<div class="rmode" id="rmode-full">{fullsys_html}</div></div>'
+            + f'<div class="rmode" id="rmode-full">{fullsys_html}</div>'
+            + f'<div class="rmode" id="rmode-cycle">{cycle_html}</div></div>'
             + "</main>"
         )
     finally:
@@ -7150,6 +7700,7 @@ def render(db_path: Path = DB_PATH) -> str:
         + _TV_JS
         + _RP_JS
         + _FS_JS
+        + _CYC_JS
         + _SBX_JS
         + _FEED_JS
         + "</script>\n</body>\n</html>\n"
