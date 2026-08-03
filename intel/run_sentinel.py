@@ -26,6 +26,7 @@ from intel.collectors.edgar_t0 import EdgarT0Collector
 from intel.collectors.fed import FedCollector
 from intel.collectors.finra_ats import FinraAtsCollector
 from intel.collectors.finra_short import FinraShortCollector
+from intel.collectors.macro_fred import MacroFredCollector
 from intel.collectors.news_rss import NewsRssCollector
 from intel.collectors.options_snapshot import OptionsSnapshotCollector
 from intel.collectors.polymarket import PolymarketCollector
@@ -42,6 +43,7 @@ COLLECTORS = [
     OptionsSnapshotCollector,
     FedCollector,
     EarningsCalCollector,
+    MacroFredCollector,
     UsptoCollector,
     YoutubeCollector,
     NewsRssCollector,
