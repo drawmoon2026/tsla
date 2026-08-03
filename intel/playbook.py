@@ -51,6 +51,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from intel.e18 import E18_ANN_L1_TXT  # E18 年化引用数字单一来源（intel/e18.py）
 from intel.store import DB_PATH
 
 try:  # 现价 / 252 日高 / 回撤——与仪表盘同源（E11 冻结口径）
@@ -1157,7 +1158,7 @@ def render() -> str:
                 "（E11 冻结，实盘引擎以昨日收盘 shift(1) 评估）；探测器 = N3-H "
                 "冻结规则前向值班（虚拟推演，不碰真钱）；E8-A 处于 shadow 白跑期"
                 "（≥8 周），全系统未上真钱——且 E18 全历史滚动校验（2020-2026 "
-                "十二折）判定同配方年化 −5.45% 为负，该策略线证据等级已降级"
+                f"十二折）判定同配方年化 {E18_ANN_L1_TXT} 为负，该策略线证据等级已降级"
                 "（docs/strategy-lab.md E18）。个人参数出自 data/intel/position.json，"
                 f"黄色 = {UNVERIFIED}。</div>"
                 "<div>历史频率 ≠ 概率预测：样本为 TSLA 2018-2026 单标的日线，"

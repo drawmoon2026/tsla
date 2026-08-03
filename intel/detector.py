@@ -34,6 +34,20 @@
 - RISK_OFF 触发记一条假想减仓单、解除记恢复单（detector_trades，含 yfinance
   TSLA 价格快照），周报判分用
 
+影子配置 C077（N9 残值落地 2026-08-03，只观察不出信号）：
+- 规则 = 空头单腿：up-jump（change_pct >= +10%，同主配置 J10 阈值与 N6 拆股
+  防护口径）act 日（发布次交易日）起 risk-off F30（30 个交易日，重叠顺延）；
+  无放风腿依赖——不依赖 Musk 数据，失明期照常运转，也无标定期
+- 出身与考绩（outputs/n9_frontier 存档）：N9 前沿扫描发现段判对率 71%（5/7，
+  现行同频 57%），但考场 3 段判对 67%、避险均值 -1.1%，v2 晋升三条线
+  （段数>=4 / 判对>=75% / 避险均值<0）只过一条——发现段优势未出场外复现，
+  不晋升
+- 处置 = 影子运转攒前向样本：每日在主配置评估之后同步评估（复用同一份
+  short_releases 与拆股防护），状态写 detector_shadow_state 独立表；
+  **不发事件、不记假想单、不上指挥卡**——纯数据积累。若前向表现追平主配置
+  再议升格（须另走 N 系列登记，不得在此暗改）
+- 历史状态不回填（前向纪律，2026-08-03 起累积）；历史表现查 outputs/n9_frontier
+
 用法：
     .venv/bin/python -m intel.detector --once     # 单跑一轮
     .venv/bin/python -m intel.detector_report     # 值班报告
@@ -59,6 +73,10 @@ ET = ZoneInfo("America/New_York")
 SHORT_JUMP_PCT = 10.0    # up-jump：空头利益双周 change_pct >= +10%
 LOOKBACK_BDAYS = 20      # 密集日回看窗（交易日）
 PERSIST_BDAYS = 20       # F20：触发日起 20 个交易日 risk-off，重叠触发顺延
+
+# ---- 影子配置 C077（N9 残值，只观察不出信号，非值班规则参数） ---------------
+SHADOW_CONFIG_ID = "C077"    # N9 前沿扫描工作点编号（J10 空头单腿 F30）
+SHADOW_PERSIST_BDAYS = 30    # F30：act 日起 30 个交易日 risk-off，重叠顺延
 
 # ---- 拆股防护（N6 复核加装，数据伪影防御，非规则参数） ----------------------
 # FINRA short_interest 为未复权股数：拆股跨期会产生假 up-jump（历史实例：
@@ -96,6 +114,19 @@ CREATE TABLE IF NOT EXISTS detector_state (
     triggered           INTEGER NOT NULL DEFAULT 0,  -- 本日是否命中触发（含顺延触发）
     risk_off_until      TEXT,               -- RISK_OFF 到期交易日（含）
     updated_utc         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS detector_shadow_state (
+    config_id        TEXT NOT NULL,      -- 影子配置编号（现仅 'C077'）
+    state_date       TEXT NOT NULL,      -- ET 交易日 YYYY-MM-DD
+    state            TEXT NOT NULL CHECK (state IN ('RISK_ON','RISK_OFF')),
+    short_settlement TEXT,               -- 最新已发布空头结算日
+    short_chg_pct    REAL,               -- 最新已发布空头 change_pct
+    triggered        INTEGER NOT NULL DEFAULT 0,  -- act 日=今日的新 up-jump 触发
+    risk_off_until   TEXT,               -- F30 到期交易日（含）；RISK_ON 为 NULL
+    n_upjumps_active INTEGER NOT NULL DEFAULT 0,  -- F30 窗仍生效的 up-jump 份数
+    updated_utc      TEXT NOT NULL,
+    PRIMARY KEY (config_id, state_date)  -- 独立表：主配置 detector_state 零改动
 );
 
 CREATE TABLE IF NOT EXISTS detector_trades (
@@ -266,6 +297,53 @@ def tsla_snapshot() -> tuple[float | None, str | None, str | None]:
         return None, None, "no price data"
     except Exception as e:  # noqa: BLE001
         return None, None, f"{type(e).__name__}: {e}"
+
+
+# ------------------------------------------------------------------ 影子配置
+
+
+def evaluate_shadow(conn, today: date, now_iso: str, shorts: list[dict]) -> dict:
+    """C077 影子评估：空头单腿 up-jump >= +10% × F30，只落库不出信号.
+
+    与主配置复用同一份 short_releases 结果与 N6 拆股防护口径（chg_pct >=
+    SPLIT_GUARD_PCT 的疑似伪影不触发影子）。无放风腿、无标定期，状态只有
+    RISK_ON / RISK_OFF；每个可信 up-jump 的 act 日（发布次交易日）起 F30，
+    重叠取最远到期（与主配置顺延语义一致）。状态为当日从发布史整体重算的
+    纯函数——只写 detector_shadow_state 当日行（同日重跑覆盖），不回填历史，
+    不发事件、不记假想单、不上指挥卡。
+    """
+    until_best: str | None = None
+    triggered = False
+    n_active = 0
+    for s in shorts:
+        if not (SHORT_JUMP_PCT <= s["chg_pct"] < SPLIT_GUARD_PCT):
+            continue  # 未达 J10 或疑似拆股伪影（N6 防护同口径）
+        act = next_bday_after(_et_date(s["pub_time_utc"]))
+        if act > today:
+            continue  # act 未到，尚不生效
+        until = str(mcal.add_trading_days(act, SHADOW_PERSIST_BDAYS - 1))
+        if until >= str(today):
+            n_active += 1
+        if act == today:
+            triggered = True
+        until_best = max(until_best or "", until)
+    state = "RISK_OFF" if (until_best and until_best >= str(today)) else "RISK_ON"
+    latest = shorts[-1] if shorts else None
+    conn.execute(
+        """INSERT OR REPLACE INTO detector_shadow_state
+           (config_id, state_date, state, short_settlement, short_chg_pct,
+            triggered, risk_off_until, n_upjumps_active, updated_utc)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (SHADOW_CONFIG_ID, str(today), state,
+         latest["settlement"] if latest else None,
+         latest["chg_pct"] if latest else None,
+         int(triggered),
+         until_best if state == "RISK_OFF" else None,
+         n_active, now_iso),
+    )
+    conn.commit()
+    return {"state": state,
+            "until": until_best if state == "RISK_OFF" else None}
 
 
 # ------------------------------------------------------------------ 状态机
@@ -442,13 +520,23 @@ def evaluate(conn, now: datetime | None = None) -> dict:
             )
             conn.commit()
 
+    # -- 影子配置 C077（N9 残值）：主配置评估完毕后同步评估，纯观察不出信号；
+    #    失败只入 note，不影响值班主路径
+    try:
+        sh = evaluate_shadow(conn, today, now_iso, shorts)
+        shadow_note = (f" shadow[{SHADOW_CONFIG_ID}]={sh['state']}"
+                       + (f"→{sh['until']}" if sh["until"] else "") + "(观察)")
+    except Exception as e:  # noqa: BLE001
+        shadow_note = f" shadow[{SHADOW_CONFIG_ID}]=ERROR({type(e).__name__}: {e})"
+
     return {"state": state, "switched": switched, "n_new_events": n_new + n_guard,
             "note": f"{state} baseline={baseline_days}/{CALIB_BDAYS}(有效)"
                     + (f" thr={thr:.1f}" if thr is not None else "")
                     + (f" until={until}" if state == "RISK_OFF" else "")
                     + (" 腿B失明(blind：窗口内无成功采集，不入基线不判定)"
                        if leg_b_blind else "")
-                    + (f" split_guard={n_guard}" if n_guard else "")}
+                    + (f" split_guard={n_guard}" if n_guard else "")
+                    + shadow_note}
 
 
 # ------------------------------------------------------------------ 组件封装

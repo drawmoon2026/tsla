@@ -1,6 +1,7 @@
 """N3 因果探测器 — 值班报告 CLI.
 
-板块：当前状态 / 两腿最新读数 / 标定进度 / 历史状态切换 / 假想单判分。
+板块：当前状态 / 两腿最新读数 / 标定进度 / 历史状态切换 / 假想单判分 /
+影子配置 C077（N9 残值，只观察不出信号，见 intel/detector.py 文件头）。
 判分口径与 N3-H 推演日记同源：减仓→恢复期间 B&H 收益 < -6bp（往返成本线）
 记"对"；未平仓单用当前价（yfinance）算浮动判分，取价失败则如实标注。
 
@@ -19,7 +20,8 @@ import numpy as np
 from intel import store
 from intel.detector import (
     CALIB_BDAYS, COST_LINE, DENSE_QUANTILE, DENSE_REF_COUNT, LOOKBACK_BDAYS,
-    PERSIST_BDAYS, SHORT_JUMP_PCT, baseline_from_rows, tsla_snapshot,
+    PERSIST_BDAYS, SHADOW_CONFIG_ID, SHADOW_PERSIST_BDAYS, SHORT_JUMP_PCT,
+    baseline_from_rows, tsla_snapshot,
 )
 
 
@@ -145,6 +147,53 @@ def main() -> None:
                 L.append("    → 未平仓：无现价，暂不判分")
         if n_right + n_wrong:
             L.append(f"  战绩：{n_right} 对 / {n_wrong} 错（已平仓配对）")
+    L.append("")
+
+    # ---------------- 影子配置 C077（N9 残值，只观察不出信号） ----------------
+    L.append(f"—— 影子配置 {SHADOW_CONFIG_ID}"
+             f"（空头单腿 up-jump >= +{SHORT_JUMP_PCT:.0f}% × "
+             f"F{SHADOW_PERSIST_BDAYS}，无放风腿）——")
+    if not _has(conn, "detector_shadow_state"):
+        L.append("  （尚未运转——detector_shadow_state 表不存在）")
+    else:
+        srows = conn.execute(
+            "SELECT * FROM detector_shadow_state WHERE config_id=? ORDER BY state_date",
+            (SHADOW_CONFIG_ID,)).fetchall()
+        if not srows:
+            L.append("  （尚无状态行）")
+        else:
+            last = srows[-1]
+            L.append(f"  当前状态：{last['state_date']}  {last['state']}"
+                     + (f"（F{SHADOW_PERSIST_BDAYS} 至 {last['risk_off_until']}）"
+                        if last["risk_off_until"] else "")
+                     + "  —— 观察中·不出信号")
+            # 历史段数：连续 RISK_OFF 行为一段（前向累积，不回填历史）
+            n_seg, prev_s = 0, None
+            for r in srows:
+                if r["state"] == "RISK_OFF" and prev_s != "RISK_OFF":
+                    n_seg += 1
+                prev_s = r["state"]
+            L.append(f"  前向累积：{len(srows)} 个交易日行（自 {srows[0]['state_date']} 起，"
+                     f"不回填历史），risk-off 段 {n_seg} 段；"
+                     "发现/考场历史表现见 outputs/n9_frontier 存档")
+            # 与主配置的分歧日（主配置标定期无信号，单列不计分歧）
+            div, n_calib = [], 0
+            for r in srows:
+                m = conn.execute(
+                    "SELECT state FROM detector_state WHERE state_date=?",
+                    (r["state_date"],)).fetchone()
+                if m is None:
+                    continue
+                if m["state"] == "CALIBRATING":
+                    n_calib += 1
+                elif m["state"] != r["state"]:
+                    div.append(f"{r['state_date']}(主{m['state']}/影{r['state']})")
+            L.append(f"  与主配置分歧日：{len(div)} 天"
+                     + (f" —— {'，'.join(div)}" if div else "")
+                     + (f"；另有 {n_calib} 天主配置在标定期（无信号，影子照常运转）"
+                        if n_calib else ""))
+            L.append("  升格纪律：前向表现追平主配置再议，须另走 N 系列登记；"
+                     "影子不发事件、不记假想单、不上指挥卡")
     conn.close()
     print("\n".join(L))
 

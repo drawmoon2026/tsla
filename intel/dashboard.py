@@ -84,6 +84,7 @@ from zoneinfo import ZoneInfo
 
 from intel.store import DB_PATH
 from intel import market_calendar as mcal  # 统一 NYSE 交易日历（口径修正 2026-08-02）
+from intel.e18 import E18_ANN_L1_TXT, E18_ANN_L2_TXT  # E18 年化引用数字单一来源
 from intel import scoring  # 四维评分 v0（查询层实时算，不回写库）
 
 try:  # 价格上下文（yfinance 增量 + S2 读数）；导入失败降级为"取价失败"
@@ -372,8 +373,17 @@ def load_detector(conn: sqlite3.Connection) -> dict | None:
         blind_days.update(k for k, v in win.items() if v is None)
     cur = dict(cur)
     cur["blind_skipped"] = len(blind_days)
+    # 影子配置 C077（N9 残值，只观察不出信号）：最新一行，表缺失/无行 → None
+    shadow = None
+    if has_table(conn, "detector_shadow_state"):
+        srow = conn.execute(
+            """SELECT * FROM detector_shadow_state WHERE config_id='C077'
+               ORDER BY state_date DESC LIMIT 1"""
+        ).fetchone()
+        if srow is not None:
+            shadow = dict(srow)
     return {"cur": cur, "switches": switches, "trades": trades,
-            "blind_days": sorted(blind_days)}
+            "blind_days": sorted(blind_days), "shadow": shadow}
 
 
 def load_health(conn: sqlite3.Connection, sources: dict) -> list[dict]:
@@ -1010,7 +1020,8 @@ def load_mc_leverage_note() -> str:
         if not blk or not con:
             return "蒙特卡洛注脚缺失——先跑 research/e17a_montecarlo.py。"
         return (
-            f"L=2 历史路径 +32.1%；蒙特卡洛中位 "
+            f"L=2 历史路径 +32.1%（留出顺风窗口；E18 全历史口径 L=2 年化 "
+            f"{E18_ANN_L2_TXT} 为负）；蒙特卡洛中位 "
             f"{float(blk['ann_med']) * 100:+.1f}%、亏损年概率 "
             f"{float(blk['p_loss_year']) * 100:.1f}%（块抽样口径）；崩盘污染注入"
             f"口径中位 {float(con['ann_med']) * 100:+.1f}%、亏损年 "
@@ -2229,7 +2240,10 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
       <div><div class="bt">口径</div>
         <p><b>Walk-forward</b>：考场段（2023-07 → 2026-07）未参与规则发现，探测器逐日只见
         当日开盘前信息（空头看发布日、发帖看前一日）；回放即重演当时视野，无事后修饰。
-        失明期（Musk 归档止于 2025-05-08 后）灰显，无触发 ≠ 判定安全。</p></div>
+        失明期（Musk 归档止于 2025-05-08 后）灰显，无触发 ≠ 判定安全。
+        <b>成本假设</b>：假想买卖按状态生效日开盘执行，费 1bp + 滑点 2bp 每边
+        （research/n3h_deduction.py，与 src/common/execution 同口径）；
+        收益数字不含税与资金占用。</p></div>
     </div>
   </div>"""
 
@@ -2274,7 +2288,8 @@ def render_replay_view(days: list[dict] | None, price_dates: list[date],
     if app:
         ov_p, bh_p = app["ov"] * 100, app["bh"] * 100
         ret_v = f'{ov_p:+.1f}% <span class="sub">vs 裸持 {bh_p:+.1f}%</span>'
-        ret_line = (f"覆盖策略（risk-off 转现金，开盘执行含成本）考场总收益 <b>{ov_p:+.1f}%</b> "
+        ret_line = (f"覆盖策略（risk-off 转现金，开盘执行·费 1bp+滑点 2bp/边，"
+                    f"不含税与资金占用）考场总收益 <b>{ov_p:+.1f}%</b> "
                     f"vs 裸持有 <b>{bh_p:+.1f}%</b>，少亏/多赚 <b>{ov_p - bh_p:+.1f}pp</b>"
                     + (f"（切换 {app['switches']:.0f} 次 · risk-off {app['off_days']:.0f} 交易日）。"
                        if app.get("switches") is not None and app.get("off_days") is not None
@@ -2397,8 +2412,8 @@ def render_replay_modebar() -> str:
         '<span class="rm-cmp"><b>探测器推演 = 防守层</b>：稀疏出手，只为躲开特定'
         "类型的大跌（3 年考场仅 2 段避险、4 次假想买卖）；"
         "<b>全系统推演 = 进攻层</b>：E8-A 高频小额抄底 + 双开关"
-        "（留出 10 个月 54 笔）。——「系统 3 年只交易 2 次」是只看防守层的误读，"
-        "两层并行、各管一件事。</span></div>"
+        "（留出 10 个月 54 笔；E18 全历史为负）。——「系统 3 年只交易 2 次」"
+        "是只看防守层的误读，两层并行、各管一件事。</span></div>"
     )
 
 
@@ -2455,6 +2470,10 @@ def render_sandbox(sbx: dict | None) -> str:
         <span id="sbx-try">尚未改动参数（当前显示 = 冻结基线）。</span>
         你在<b>同一段历史</b>上翻组合——尝试越多，好看结果越可能只是运气（多重比较）。
         <b>冻结基线（{esc(base_lab)}）是唯一经过完整协议验证的配置</b>，其余任何组合均无验证效力。</div>
+      <div class="fs-e18warn">⚠ <b>E18 全历史滚动校验（2020-2026 十二折）：同配方年化
+        L=1 {E18_ANN_L1_TXT} / L=2 {E18_ANN_L2_TXT}，为负</b>——本沙盘窗口（留出 + 前向）
+        是同配方的顺风段，下表任何好看读数（正年化/高胜率）都系统性偏乐观，勿外推
+        （outputs/e18_rolling · docs/strategy-lab.md E18）。</div>
       <div class="sbx-controls">
         <div class="sbx-ctl">
           <div class="sbx-k">GATE 阈值（事件按 GBDT prob 过滤）</div>
@@ -2486,18 +2505,22 @@ def render_sandbox(sbx: dict | None) -> str:
           <div class="sbx-cherry sbx-levwarn" id="sbx-levwarn" hidden>
             <b>杠杆放大的是未证实的期望</b>（54 笔，9 月 shadow 裁决前不构成依据）
             ——L 只等比放大每笔盈亏与回撤，不产生任何新证据；E18 全历史口径下
-            同配方本就为负（L=1 −5.45% / L=2 −10.96%），常态口径下杠杆放大的是亏损。</div>
+            同配方本就为负（L=1 {E18_ANN_L1_TXT} / L=2 {E18_ANN_L2_TXT}），
+            常态口径下杠杆放大的是亏损。</div>
           <div class="sbx-hint">融资成本按 E17-A 轨结论忽略（6.5%/年按实际持仓
             秒数计，54 笔合计 &lt;4bp——日内持仓短）；保证金/爆仓口径见
             outputs/e17_ab。{esc(load_mc_leverage_note())}
-            <b>全历史滚动口径（E18，2020-2026 十二折）：L=1 年化 −5.45% /
-            L=2 −10.96%</b>（outputs/e18_rolling）——沙盘与蒙特卡洛均基于
+            <b>全历史滚动口径（E18，2020-2026 十二折）：L=1 年化 {E18_ANN_L1_TXT} /
+            L=2 {E18_ANN_L2_TXT}</b>（outputs/e18_rolling）——沙盘与蒙特卡洛均基于
             留出顺风窗口，读数系统性偏乐观。</div>
         </div>
       </div>
       <div class="sbx-tblwrap"><table class="sbx-tbl">
-        <thead><tr><th>配置</th><th>成交</th><th>胜率</th><th>总收益</th>
-          <th>年化*</th><th>最大回撤†</th></tr></thead>
+        <thead><tr><th>配置</th><th>成交</th>
+          <th title="高胜率大半来自 tp0.5%/sl2% 障碍几何——随机入场同几何下胜率约 60%（E9 随机基线）；胜率≠期望，见 E9/E18">胜率‡</th>
+          <th>总收益</th>
+          <th title="按顺风窗口折算——E18 全历史口径同配方年化 L=1 {E18_ANN_L1_TXT} / L=2 {E18_ANN_L2_TXT} 为负，勿外推">年化*</th>
+          <th>最大回撤†</th></tr></thead>
         <tbody>
           <tr class="sbx-cur"><td id="sbx-c-cfg">{esc(base_lab)}</td>
             <td class="num" id="sbx-c-n">{esc(base_n)}</td>
@@ -2525,9 +2548,12 @@ def render_sandbox(sbx: dict | None) -> str:
       <p class="sbx-note">口径：每事件按所选几何独立悲观结算（detail_trade 同机制：费
         1bp/边 + 滑点 2bp、TP 限价需严格穿越、SL 停损市价含跳空、同 bar 双触发算 SL、
         timeout 48×5m、日内强平），流内非重叠按各几何自己的出场 bar 贪心重排；事件全集 =
-        gate 通过的 {n_ev} 个入场（62 留出 + {n_fwd} 前向）。*年化按沙盘窗口实际
+        gate 通过的 {n_ev} 个入场（62 留出 + {n_fwd} 前向）。‡高胜率大半来自
+        tp0.5%/sl2% 障碍几何——随机入场同几何下胜率约 60%（E9 随机基线），
+        胜率≠期望，见 E9/E18。*年化按沙盘窗口实际
         {int(w["cal_days"])} 天复利折算——与总结卡「留出段 10 个月口径」年化不同源，
-        对比请看总收益。†最大回撤为逐笔平仓口径（bar 级盯市回撤会更深，见总结卡；
+        对比请看总收益；本列出自顺风窗口，E18 全历史口径同配方年化为负（见顶部警示）。
+        †最大回撤为逐笔平仓口径（bar 级盯市回撤会更深，见总结卡；
         沙盘不逐组合算盯市路径）。杠杆行：每笔净收益 ×L 后复利（融资成本忽略，
         见杠杆区注脚）；基线行恒为 L=1。尝试计数存于本浏览器 localStorage，跨会话累计。</p>
     </div>
@@ -2826,7 +2852,7 @@ def render_fullsys_view(data: dict | None,
         事后网格</b>（n=62），Bonferroni 校正后不显著（bootstrap p 0.04–0.28）；
         崩盘段（2021-10→2023-01）门反选 −31.4%，S2 只截后续损失（削减 78%）、救不了
         顶部 27 个交易日——仅方向性证据。<b>E18 全历史滚动校验（2020-2026 十二折重训）
-        判定同配方年化 −5.45%（L=2 −10.96%）为负</b>——留出段 +15.2% 属顺风窗口，
+        判定同配方年化 {E18_ANN_L1_TXT}（L=2 {E18_ANN_L2_TXT}）为负</b>——留出段 +15.2% 属顺风窗口，
         证据等级整体降级（docs/strategy-lab.md E18）。</p></div>
       <div><div class="bt">口径</div>
         <p>交易流 = models/e8a/holdout_ref.csv 62 笔入场 × E9 <b>悲观结算</b>重放
@@ -2901,13 +2927,14 @@ def render_fullsys_view(data: dict | None,
       (1{s2["total"] * 100:+.2f}%)^(12/10) − 1；按实际 {s["window"]["cal_days"]} 天算
       ≈ {ann_act:+.1f}%。假想推演口径，含悲观成本，不含税与资金占用。</span></div>
     <div class="fs-e18warn">⚠ <b>全历史滚动校验（E18，2020-2026 十二折）同配方年化
-      <span class="num">−5.45%</span></b>：留出段为顺风窗口，此数字不代表多周期常态
+      <span class="num">{E18_ANN_L1_TXT}</span></b>：留出段为顺风窗口，此数字不代表多周期常态
       （outputs/e18_rolling · docs/strategy-lab.md E18）。</div>
     <div class="rs-grid">
       <div class="rs-cell"><div class="rs-k">交易笔数（留出段）</div>
         <div class="rs-v num">{n_kept_h} 笔 <span class="sub">≈{n_kept_h / 10:.1f} 笔/月（10 个月口径）</span></div></div>
-      <div class="rs-cell"><div class="rs-k">胜率（留出段）</div>
-        <div class="rs-v num">{s2["wr"] * 100:.1f}% <span class="sub">{wins_h}/{n_kept_h}；S2 前 62 笔 {alls["wr"] * 100:.1f}%</span></div></div>
+      <div class="rs-cell" title="随机入场在 tp0.5%/sl2% 障碍几何下胜率即约 60%（E9 随机基线）——高胜率大半是几何产物，胜率≠期望"><div class="rs-k">胜率（留出段）</div>
+        <div class="rs-v num">{s2["wr"] * 100:.1f}% <span class="sub">{wins_h}/{n_kept_h}；S2 前 62 笔 {alls["wr"] * 100:.1f}%</span>
+        <span class="sub">高胜率大半来自 tp0.5%/sl2% 障碍几何（随机入场约 60%）——胜率≠期望，见 E9/E18</span></div></div>
       <div class="rs-cell"><div class="rs-k">出场分布</div>
         <div class="rs-v num" style="font-size:13px">{dist_txt}</div></div>
       <div class="rs-cell"><div class="rs-k">最大回撤</div>
@@ -2926,7 +2953,7 @@ def render_fullsys_view(data: dict | None,
       Bonferroni 校正后不显著（bootstrap p 0.04–0.28），S2 过滤后的 +12.04% 亦含选择偏差；
       ③ 策略 2026-07-24 冻结、shadow 前向验证（≥8 周）进行中，效力由前向裁决；
       ④ <b>E18 全历史滚动校验</b>（2020-07 → 2026-07 十二折滚动重训）同配方年化
-      <b>−5.45%</b>（L=2 −10.96%）——多周期常态为负，头条年化只描述留出顺风窗口——本页全部为
+      <b>{E18_ANN_L1_TXT}</b>（L=2 {E18_ANN_L2_TXT}）——多周期常态为负，头条年化只描述留出顺风窗口——本页全部为
       假想推演，<b>不构成任何上钱依据</b>。</div>
   </div>"""
 
@@ -4628,6 +4655,18 @@ def render_detector(data: dict | None, now: datetime, wait_html: str = "",
         "RISK_ON 读作「未见空头知情型风险」——本探测器仅覆盖此一类下跌，"
         "不是持仓建议；广谱回撤防线见「今日合议」S2 读数。"
     )
+    # 影子配置一行小字（N9 残值，只观察不出信号；无行则整行隐藏）
+    shadow = data.get("shadow")
+    shadow_html = ""
+    if shadow:
+        shadow_html = (
+            '<p class="footnote">影子配置 C077（空头单腿F30）：'
+            f'状态 {esc(shadow["state"])}'
+            + (f'，F30 至 {esc(shadow["risk_off_until"])}'
+               if shadow.get("risk_off_until") else "")
+            + f'（观察中·不出信号）· 状态日 {esc(shadow["state_date"])} · '
+            "N9 残值前向影子，无 Musk 依赖（失明期照常运转），不发事件不记假想单</p>"
+        )
     return f"""
 <section>
   <h2><span class="sec-no">__NO__</span>态势总览<span class="h-sub">N3-H 冻结规则 · 探测器状态机 · 两腿读数 · 前向虚拟推演</span></h2>
@@ -4648,6 +4687,7 @@ def render_detector(data: dict | None, now: datetime, wait_html: str = "",
   <div class="card det-more">
     {_det_trades_html(data["trades"], now)}
     <p class="footnote">{footnote}</p>
+    {shadow_html}
   </div>
 </section>"""
 

@@ -16,7 +16,7 @@ gate 通过的入场事件）预结算参数网格：
 
 诚实护栏（导出侧）：
 - 冻结组合逐笔收益必须与 trades.csv 完全一致（1e-9），否则中止；
-- 冻结基线（gate 0.4325 / tp0.5/sl2 / S2 开）在留出段的 n/WR/total 必须与
+- 冻结基线（gate = meta.json 冻结值 / tp0.5/sl2 / S2 开）在留出段的 n/WR/total 必须与
   research/e8a_trades_export.EXP_S2 存档一致，否则中止——保证沙盘基线行
   与总结卡数字同源同值。
 
@@ -168,7 +168,10 @@ def export_sandbox(bars=None, bs=None) -> Path:
                        "e": str(row["entry_et"])[-5:], "c": cs})
 
     # ---- 冻结基线：与存档/总结卡同源核对（漂移即中止，绝不静默） ------------
-    base_rets, base_blk = _greedy(events, GATE_UI["default"], frozen_ci, True)
+    # 基线 gate 用 models/e8a/meta.json 的冻结值（0.43250235…），不用 UI 默认
+    # 0.4325——当前二者对已过门事件集结果相同，但语义上基线必须跟冻结件走，
+    # 防未来事件集/门槛变更时静默偏离（integrity_audit_0802 P1-F）。
+    base_rets, base_blk = _greedy(events, gate_frozen, frozen_ci, True)
     baseline = _stats(base_rets, base_blk, cal_days)
     hold_rets = [ev["c"][frozen_ci][1] for ev in events
                  if ev["seg"] == "holdout" and not ev["s2"]]
