@@ -28,8 +28,12 @@ data/intel/dashboard.html：内联全部 CSS/JS，无外部依赖，浏览器直
 板块（等宽序号按实际渲染顺序编排）：
   顶栏：TSLA 现价与最近涨跌 / 生成时刻 / 最后事件入库时刻 / 最后轮询时刻
      （>30 分钟标红）+ 主题切换；<meta refresh> 每 5 分钟自动重载
-  01 今日合议（每日决策卡：现价 · S2 开关读数（距 252 日高回撤，E11 冻结口径）·
-     探测器状态与标定倒计时 · 策略线 shadow 健康 · 规则合成的综合一句话）
+  01 今日指挥（每日指挥卡，roadmap#1 升级：大字三态指令（synthesize_order 规则
+     合成，--selftest 覆盖）+ 依据链 + 持仓语境（position.json 换算，示例值显著
+     提示）+ 昨日变化行 + 今日盯盘价位表（S2 解除/触发线 · −10%/−20% 档 ·
+     探测器两腿（出闸后）· 本周日历事件，每行"到了会怎样"）+ 当日 if-then
+     微棋谱（与 playbook.html 同源换算，未设参数红字明示无预案）+
+     底层读数四格（现价 · S2 · 探测器 · 策略线）与综合一句话收进次级折叠）
   02 晨间简报（自上次开盘以来：新 T0/T1 事件 · 探测器状态变化 · S2 读数变化 ·
      shadow 各策略昨晚会话（shadow_status.json）· 事件日历条（财报/FOMC/
      FINRA 空头发布/标定期满，未来 7 天高亮、30 天窗口）；无变化如实说无）
@@ -107,6 +111,11 @@ try:
 except Exception:  # noqa: BLE001
     SPLIT_GUARD_PCT_V = 50.0
 DENSE_QUANT_TXT = f"{DENSE_QUANTILE:.4f}"
+
+try:  # 棋谱页函数复用（指挥卡分支价位/金额换算与 playbook.html 同源，不复制口径）
+    from intel import playbook as _pb
+except Exception:  # noqa: BLE001
+    _pb = None  # type: ignore[assignment]
 
 OUT_PATH = DB_PATH.parent / "dashboard.html"
 
@@ -2992,14 +3001,99 @@ def render_fullsys_view(data: dict | None,
 
 # ------------------------------------------------------- 今日合议（决策卡）
 
-def render_consensus(det: dict | None, px: dict | None, shadow: dict,
-                     now: datetime) -> str:
-    """① 今日合议：现价 · S2 开关读数 · 探测器 · 策略线 · 综合一句话.
+def synthesize_order(s2: dict | None, det_state: str | None,
+                     sell_line_set: bool, sell_hit: bool) -> tuple[str, str]:
+    """今日指令三态合成（纯函数，--selftest 覆盖）.
 
-    roadmap #1 / P0-1：把"我今天该怎么办"放在第一屏。规则合成，不引入新判断；
-    诚实优先——无建议时明说无建议，并给出恢复时间预估。
-    S2 = E11 压测过的全系统最强开关（距 252 交易日滚动高点回撤 >20% → 停用买入），
-    从今天起由仪表盘每次生成时计算。
+    优先级：探测器 RISK_OFF（窄谱避险生效）> 数据缺席 > 卖出线触发 >
+    S2 触发（持有观望·不加仓）/ S2 解除（加仓只跟 E8-A 信号）。
+    产出为参谋部口径的三段式命令（" · " 分隔）；不引入新判断，只把既有
+    开关状态翻译成当日可执行的一句话。返回 (指令文本, 语气色 good/warn/crit)。
+    """
+    if det_state == "RISK_OFF":
+        return "避险生效 · 不加仓 · 假想减仓值班（真仓跟随未批·无预案）", "crit"
+    if s2 is None:
+        return "数据缺席 · 先人工核对回撤 · 今日不下新指令", "crit"
+    if sell_line_set and sell_hit:
+        head = "持有观望 · 不加仓" if s2["triggered"] else "持有 · 加仓只跟 E8-A 信号"
+        return head + " · 容忍线已破——执行既定纪律", "crit"
+    if s2["triggered"]:
+        return "持有观望 · 不加仓 · 今日无卖出触发", "warn"
+    return "持有 · 加仓只跟 E8-A 信号 · 今日无卖出触发", "good"
+
+
+def _order_selftest() -> None:
+    """指令三态逻辑单测：S2 触发态 / 解除态 / 探测器 risk-off 态 + 边界。"""
+    s2_on, s2_off = {"triggered": True}, {"triggered": False}
+    cases = [
+        # S2 触发态（当前局面：探测器标定中）
+        ((s2_on, "CALIBRATING", False, False),
+         ("持有观望 · 不加仓 · 今日无卖出触发", "warn")),
+        ((s2_on, "RISK_ON", False, False),
+         ("持有观望 · 不加仓 · 今日无卖出触发", "warn")),
+        # S2 解除态
+        ((s2_off, "RISK_ON", False, False),
+         ("持有 · 加仓只跟 E8-A 信号 · 今日无卖出触发", "good")),
+        ((s2_off, "CALIBRATING", False, False),
+         ("持有 · 加仓只跟 E8-A 信号 · 今日无卖出触发", "good")),
+        # 探测器 risk-off 态（优先级最高，无论 S2）
+        ((s2_on, "RISK_OFF", False, False),
+         ("避险生效 · 不加仓 · 假想减仓值班（真仓跟随未批·无预案）", "crit")),
+        ((s2_off, "RISK_OFF", False, False),
+         ("避险生效 · 不加仓 · 假想减仓值班（真仓跟随未批·无预案）", "crit")),
+        # 数据缺席 / 卖出线
+        ((None, "CALIBRATING", False, False),
+         ("数据缺席 · 先人工核对回撤 · 今日不下新指令", "crit")),
+        ((s2_on, "CALIBRATING", True, True),
+         ("持有观望 · 不加仓 · 容忍线已破——执行既定纪律", "crit")),
+        ((s2_off, "RISK_ON", True, True),
+         ("持有 · 加仓只跟 E8-A 信号 · 容忍线已破——执行既定纪律", "crit")),
+        ((s2_off, "RISK_ON", True, False),
+         ("持有 · 加仓只跟 E8-A 信号 · 今日无卖出触发", "good")),
+    ]
+    for args, want in cases:
+        got = synthesize_order(*args)
+        assert got == want, f"synthesize_order{args} = {got!r}，期望 {want!r}"
+    print(f"_order_selftest: {len(cases)} cases OK")
+
+
+def _load_position_safe() -> dict:
+    """position.json（经 playbook.load_position 补默认）；全部失败给空 dict。"""
+    try:
+        if _pb is not None:
+            return _pb.load_position()
+        return json.loads(
+            (PROJECT_ROOT / "data" / "intel" / "position.json")
+            .read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _cmd_row(k: str, v: str, d: str, to: str, cls: str = "") -> str:
+    return (f'<div class="cmd-row{cls}"><span class="k">{k}</span>'
+            f'<span class="v num">{v}</span><span class="d num">{d}</span>'
+            f'<span class="to">{to}</span></div>')
+
+
+_CAL_EFFECT = {  # 日历事件「到了会怎样」（指挥卡一句话口径）
+    "fomc": "宏观波动日——系统无宏观规则（探测器盲区），广谱防线仍只有 S2",
+    "earnings": "财报日——无财报专用规则，事件进情报流与 AI 解读，人工过目",
+    "finra": "腿 A 数据更新——change ≥+10% 且当日 Musk 密集即构成探测器触发条件",
+    "calib": "探测器出闸——恢复正式避险信号资格，两腿读数当日起生效",
+}
+
+
+def render_command(conn: sqlite3.Connection, det: dict | None, px: dict | None,
+                   shadow: dict, finra: list[dict] | None,
+                   cal: tuple[list[dict], list[dict]], now: datetime) -> str:
+    """① 今日指挥：大字指令（三态）· 依据链 · 昨日变化 · 盯盘价位表 ·
+    if-then 微棋谱 · 持仓语境 · 底层读数四格（次级）.
+
+    roadmap #1 / P0-1 升级：合议卡只给读数，指挥卡给"今天怎么做"——即便在
+    等待局面也输出可执行指令（持有观望/不加仓/无卖出触发），价位表把每条
+    防线换算成具体数字与"到了会怎样"。规则合成，不引入新判断；诚实优先——
+    无建议时明说无建议。分支价位/金额换算复用 intel/playbook.py（同源口径）。
+    S2 = E11 压测过的全系统最强开关（距 252 交易日滚动高点回撤 >20% → 停用买入）。
     """
     today_et = now.astimezone(ET).date()
     s2 = (px or {}).get("s2")
@@ -3188,16 +3282,305 @@ def render_consensus(det: dict | None, px: dict | None, shadow: dict,
         )
     verdict = "；".join(bits) + verdict_tail
 
+    # ================= 指挥层（在四格读数与综合句之上合成，不引入新判断） =====
+
+    # ---- 持仓语境（position.json，经 playbook 同源换算）
+    pos = _load_position_safe()
+    av = float(pos.get("account_value_usd") or 100000)
+    pos_pct = float(pos.get("position_pct") or 0)
+    pos_val = av * pos_pct / 100
+    live = px.get("live_price") if px else None
+    if live is None and px and px.get("closes"):
+        live = px["closes"][-1]
+    sh_n = pos_val / live if live else 0.0
+    ab = pos.get("add_budget_pct")
+    ab_usd = av * ab / 100 if ab is not None else None
+    trim, pain = pos.get("trim_line_pct"), pos.get("max_pain_pct")
+    av_demo = (pos.get("_status") or {}).get("account_value_usd") == "示例值·请改为真实"
+
+    def usd(v: float) -> str:
+        return f"${v:,.0f}"
+
+    # ---- 卖出线状态（个人参数：trim/max_pain，距 252 日高口径，与棋谱同源）
+    H = s2["high"] if s2 else None
+    ratio = _pb.S2_RATIO if _pb is not None else 0.8
+    release = H * ratio if H else None
+    sell_line_set = trim is not None or pain is not None
+    sell_hit = False
+    if H and live:
+        for p in (trim, pain):
+            if p is not None and live <= H * (1 + p / 100):
+                sell_hit = True
+
+    # ---- 大字指令（三态，纯函数合成，--selftest 覆盖）
+    order, tone = synthesize_order(s2, det_state, sell_line_set, sell_hit)
+    order_html = '<span class="sep">·</span>'.join(
+        f"<span>{esc(seg)}</span>" for seg in order.split(" · "))
+
+    # ---- 依据链（一行小字：每段指令的出处）
+    why_bits = []
+    if s2:
+        why_bits.append(
+            f"S2 {s2['drawdown_pct']:+.1f}%"
+            + (f"（触发·超线 {abs(s2['margin_pp']):.1f}pp，E11：买入停用区）"
+               if s2["triggered"] else
+               f"（未触发·余量 {s2['margin_pp']:.1f}pp）"))
+    else:
+        why_bits.append("S2 读数缺席（取价失败）")
+    if det_state == "CALIBRATING":
+        bd_n = int(det["cur"].get("baseline_days") or 0) if det else 0
+        why_bits.append(f"探测器标定 {bd_n}/{CALIB_BDAYS}"
+                        + (f"（{det_eta} 出闸）" if det_eta else ""))
+    elif det_state == "RISK_OFF":
+        why_bits.append("探测器 RISK_OFF（假想减仓，窄谱）")
+    elif det_state == "RISK_ON":
+        why_bits.append("探测器值班中·未见目标风险（窄谱）")
+    else:
+        why_bits.append("探测器无状态")
+    if e8a:
+        why_bits.append("E8-A shadow 值班"
+                        + ("·S2 停用区不发买入" if (e8a.get("s2") or {}).get("off")
+                           else f"·本会话 {e8a.get('signals', 0)} 信号")
+                        + "（E18 校验为负·已降级）")
+    else:
+        why_bits.append("买入侧 shadow 无输出")
+    why_bits.append("减仓线/容忍线未设置" if not sell_line_set
+                    else "卖出线已设·未触及" if not sell_hit else "卖出线已触及")
+
+    # ---- 昨日变化行（与上一交易日比：现价 · S2 · 新 T0/T1 · N8 判分）
+    open_utc = last_market_open(now)
+    since_iso = open_utc.isoformat(timespec="seconds")
+    delta_chips = []
+    if px and px.get("chg_pct") is not None:
+        chg_v = px["chg_pct"]
+        delta_chips.append(
+            f'现价 <b class="{"good-text" if chg_v >= 0 else "crit-text"}">'
+            f"{chg_v:+.2f}%</b>（{esc(str(px.get('chg_date') or '—'))}）")
+    else:
+        delta_chips.append('现价变动 <b class="crit-text">不可得</b>')
+    prev_s2 = None
+    if px and s2_reading is not None and len(px.get("closes") or []) > 31:
+        try:
+            prev_s2 = s2_reading(px["dates"][:-1], px["closes"][:-1])
+        except Exception:  # noqa: BLE001
+            prev_s2 = None
+    if s2 and prev_s2:
+        dpp = s2["drawdown_pct"] - prev_s2["drawdown_pct"]
+        delta_chips.append(
+            f"S2 {prev_s2['drawdown_pct']:+.1f}% → <b>{s2['drawdown_pct']:+.1f}%</b>"
+            f"（{dpp:+.1f}pp）")
+    elif s2:
+        delta_chips.append(f"S2 <b>{s2['drawdown_pct']:+.1f}%</b>（无前值可比）")
+    n_hi_new = 0
+    if has_table(conn, "events") and has_table(conn, "sources"):
+        r = conn.execute(
+            """SELECT COUNT(*) FROM events e JOIN sources s ON s.source_id = e.source_id
+               WHERE s.tier IN ('T0','T1') AND e.source_id != 'detector'
+                 AND e.observed_time_utc >= ?""", (since_iso,)).fetchone()
+        n_hi_new = int(r[0] or 0)
+    delta_chips.append(f"新 T0/T1 事件 <b>{n_hi_new}</b> 条")
+    if has_table(conn, "interp_scores"):
+        nsc = {r[0]: r[1] for r in conn.execute(
+            """SELECT score_1d, COUNT(*) FROM interp_scores
+               WHERE scored_utc >= ? AND score_1d IN ('hit','miss')
+               GROUP BY score_1d""", (since_iso,))}
+        n_pend = conn.execute("SELECT COUNT(*) FROM interp_scores "
+                              "WHERE score_1d = 'pending'").fetchone()[0]
+        if nsc:
+            delta_chips.append(
+                f'N8 新判 <b class="good-text">{nsc.get("hit", 0)}✓</b>/'
+                f'<b class="crit-text">{nsc.get("miss", 0)}✗</b>')
+        else:
+            delta_chips.append(f"N8 无新判（{n_pend} 条待判）")
+    delta_html = "".join(f'<span class="dch">{c}</span>' for c in delta_chips)
+
+    # ---- 今日盯盘价位表（每行：价位 · 距现价 · 到了会怎样）
+    watch_rows: list[str] = []
+    if s2 and live:
+        d10, d20 = live * 0.9, live * 0.8
+        dd_of = lambda p: (p / H - 1) * 100  # noqa: E731
+        dist = lambda p: f"{(p / live - 1) * 100:+.1f}%"  # noqa: E731
+        ab_note = (f"；可启用加仓预算 {usd(ab_usd)}（分 3-4 笔逐笔跟信号）"
+                   if ab_usd is not None else "；加仓预算未设置")
+        if s2["triggered"]:
+            watch_rows.append(_cmd_row(
+                "S2 解除线（252 日高 × 0.8）", f"{release:,.2f}", dist(release),
+                "收盘站上 → S2 解除，E8-A 恢复买入发信号资格"
+                "（E18 全历史校验为负·已降级）" + ab_note, " hot"))
+        else:
+            watch_rows.append(_cmd_row(
+                "S2 触发线（252 日高 × 0.8）", f"{release:,.2f}", dist(release),
+                "收盘跌破 → S2 触发，E8-A 停用买入、加仓预算冻结（E11 冻结口径，"
+                "以日收盘评估）", " hot"))
+        watch_rows.append(_cmd_row(
+            "现价 −10% 档", f"{d10:,.2f}", "−10.0%",
+            ("到了 → 系统无新增动作（S2 已在触发态）" if s2["triggered"]
+             else f"到了 → 距 252 日高 {dd_of(d10):+.1f}%，逼近 S2 线")
+            + f"；持仓重估 ≈{usd(sh_n * d10)}；E13 浅坑干预参考区"))
+        watch_rows.append(_cmd_row(
+            "现价 −20% 档", f"{d20:,.2f}", "−20.0%",
+            f"到了 → 无加码/抄底规则（N4/N5 判死，不猜底）；持仓重估 "
+            f"≈{usd(sh_n * d20)}；E13 深坑干预参考区"))
+        watch_rows.append(_cmd_row(
+            f"252 日高（{esc(str(s2['high_date']))}）", f"{H:,.2f}", dist(H),
+            "收复 → 创新高，S2 线随之上移（新高 × 0.8）；系统在高位不做减仓预测"
+            "（E10）"))
+    else:
+        watch_rows.append(_cmd_row(
+            "价位表", "无法计算", "—",
+            '<b class="crit-text">取价失败或序列不足——今天没人替你算防线价位，'
+            "这是缺口不是安全</b>", " hot"))
+    # 探测器两腿读数（已出闸值班才有触发距离；标定期内不列，出闸日在日历行）
+    if det and det_state in ("RISK_ON", "RISK_OFF"):
+        cur0 = det["cur"]
+        sc = cur0.get("short_chg_pct")
+        if sc is not None:
+            watch_rows.append(_cmd_row(
+                "探测器腿 A · 空头 change（最新期）", f"{sc:+.2f}%",
+                f"距 +{SHORT_JUMP_PCT:.0f}% 线 {SHORT_JUMP_PCT - sc:.1f}pp",
+                "下期发布 ≥+10% → 腿 A 命中（须与腿 B 同窗且发布早于密集日结束）"))
+        thr0, mc0 = cur0.get("dense_thr"), cur0.get("musk_count")
+        if mc0 is not None:
+            watch_rows.append(_cmd_row(
+                "探测器腿 B · Musk 当日计数", f"{mc0:g} 帖",
+                (f"距阈值 {max(0, thr0 - mc0):g} 帖" if thr0 is not None else "阈值未定"),
+                f"当日 > {thr0:g} 帖 → 腿 B 命中（nitter 口径，基线分位映射）"
+                if thr0 is not None else "阈值缺失——腿 B 无法判定"))
+    # 今日与本周日历事件（复用晨间简报日历，≤7 天窗口；无事件时报最近一场）
+    n_cal_rows = 0
+    for it in cal[0]:
+        d_away = (it["date"] - today_et).days
+        if d_away > 7:
+            continue
+        n_cal_rows += 1
+        watch_rows.append(_cmd_row(
+            f'{esc(it["label"])}', esc(str(it["date"])),
+            "今天" if d_away == 0 else f"{d_away} 天后",
+            _CAL_EFFECT.get(it["kind"], esc(it["detail"])),
+            " hot" if d_away == 0 else ""))
+    if n_cal_rows == 0:
+        upcoming = cal[0] + cal[1]
+        if upcoming:
+            nx = upcoming[0]
+            watch_rows.append(_cmd_row(
+                "本周日历", "无事件", "—",
+                f"最近一场：{esc(nx['label'])} {esc(str(nx['date']))}"
+                f"（{(nx['date'] - today_et).days} 天后）——"
+                + _CAL_EFFECT.get(nx["kind"], esc(nx["detail"]))))
+        else:
+            watch_rows.append(_cmd_row(
+                "本周日历", "无事件", "—",
+                f"未来 {CAL_HORIZON_D} 天窗口内无已知日历事件"))
+
+    # ---- 今日 if-then 微棋谱（从棋谱分支逻辑抽当日相关 3-5 条，动态计算）
+    pb_rows: list[str] = []
+    if s2 and live:
+        if s2["triggered"]:
+            pb_rows.append(_pb_row(
+                f"收盘 ≥ <b>{release:,.2f}</b>（S2 解除线，较现价 {dist(release)}）",
+                "S2 解除——E8-A 恢复买入发信号资格（E18 全历史校验为负·证据已降级）"
+                + (f"；加仓预算 {ab:g}% ≈ <b>{usd(ab_usd)}</b> 解锁，分 3-4 笔"
+                   f"（每笔 ≤{usd(ab_usd / 3)}）逐笔跟信号，不追价"
+                   if ab_usd is not None else "；加仓预算未设置"),
+                "E11 · E8-A"))
+        else:
+            pb_rows.append(_pb_row(
+                f"收盘跌破 <b>{release:,.2f}</b>（S2 触发线，较现价 {dist(release)}）",
+                "S2 触发——E8-A 停用买入、加仓预算冻结；已建仓位按持有处理"
+                "（系统无择时卖出规则，E10）",
+                "E11"))
+        if pain is not None:
+            pain_price = H * (1 + pain / 100)
+            pb_rows.append(_pb_row(
+                f"收盘跌破 <b>{pain_price:,.2f}</b>（你的容忍线，252 日高 {pain:+.0f}%）",
+                f"执行事先批准的减仓/清仓纪律——若清仓即卖 {sh_n:.0f} 股 "
+                f"≈ {usd(sh_n * pain_price)} @线价",
+                "个人参数"))
+        else:
+            pb_rows.append(_pb_row(
+                "跌破你的容忍线",
+                '<b class="crit-text">未设置——此分支无预案</b>'
+                '（<a href="playbook.html">棋谱页参数说明 ↗</a> · '
+                "data/intel/position.json max_pain_pct；E5 的 −30% 强平对照 54 例"
+                "全部恶化收益，设线属风险偏好而非统计优势）",
+                "个人参数"))
+    # 下期空头 up-jump × Musk 密集（探测器分支；标定期内注明仅记录）
+    nxt_pub = None
+    settles = []
+    for s_raw in ([finra[-1]["settle"]] if finra else []) + \
+                 [((det or {}).get("cur") or {}).get("short_settlement")]:
+        try:
+            settles.append(date.fromisoformat(str(s_raw)))
+        except (TypeError, ValueError):
+            pass
+    if settles:
+        try:
+            nxt_pub = next_short_period(max(settles))[1]
+        except (TypeError, ValueError):
+            nxt_pub = None
+    calib_tail = ""
+    if det_state == "CALIBRATING":
+        calib_tail = ("——<b class=\"warn-text\">标定期内（"
+                      + (f"{det_eta} 出闸前" if det_eta else "出闸前")
+                      + "）仅记录不触发</b>；探测器出闸后此分支将正式触发避险")
+    pb_rows.append(_pb_row(
+        f"下期空头数据（预计 <b>{nxt_pub}</b> 发布）change ≥ +{SHORT_JUMP_PCT:.0f}% "
+        "<b>且</b>当日 Musk 密集"
+        if nxt_pub else
+        f"下期空头 change ≥ +{SHORT_JUMP_PCT:.0f}% <b>且</b>当日 Musk 密集",
+        f"探测器 RISK_OFF {PERSIST_BDAYS} 交易日 + 假想减仓单"
+        f"（全仓→现金口径，不碰真钱）{calib_tail}",
+        "N3-H 冻结规则"))
+    pb_rows.append(_pb_row(
+        f"下期空头 change ≥ +{SPLIT_GUARD_PCT_V:.0f}%",
+        "不自动触发——转拆股防护人工复核（历史 +345.8%/+202.2% 均为拆股伪影）",
+        "N6 SPLIT_GUARD"))
+    if s2 and live:
+        pb_rows.append(_pb_row(
+            f"跌至 <b>{live * 0.9:,.2f}</b> / <b>{live * 0.8:,.2f}</b>"
+            "（现价 −10% / −20% 档）",
+            "系统无卖出/加码新动作（E10 择时输持有 · N4 不猜底）；E13 干预参考与"
+            '更深分支见 <a href="playbook.html">完整棋谱 ↗</a>',
+            "E10 · N4"))
+
+    # ---- 持仓语境行
+    pos_bits = [
+        f"你的持仓 ≈ <b>{usd(pos_val)}</b>（约 {sh_n:.0f} 股"
+        + (f" @{live:,.2f}" if live else "") + f"）· 仓位 {pos_pct:g}%",
+        f"月入金 {usd(float(pos.get('monthly_inflow_usd') or 0))}（E13 口径）",
+    ]
+    if ab_usd is not None:
+        pos_bits.append(f"S2 解除后可动用加仓预算 <b>{usd(ab_usd)}</b>（{ab:g}%·待批准）")
+    demo_pill = (
+        '<span class="pill sm warn"><span class="dot"></span>账户权益 '
+        f"{usd(av)} 为示例值——金额换算失真，改 data/intel/position.json</span>"
+        if av_demo else f"账户权益 {usd(av)}")
+    pos_html = "".join(f"<span>{b}</span>" for b in pos_bits) + demo_pill
+
     return f"""
 <section>
-  <h2><span class="sec-no">__NO__</span>今日合议<span class="h-sub">每日决策卡 · {esc(str(today_et))}（ET） · 规则合成 · 诚实优先：无建议时明说无建议</span></h2>
-  <div class="card cx">
-    <div class="cx-grid">{cell_px}{cell_s2}{cell_det}{cell_sh}</div>
-    <p class="statement cx-verdict">综合：{verdict}。</p>
-    <p class="footnote">S2 定义（E11 冻结口径，研究原文 research/e11_bear_switch.py）：
-    收盘距 252 交易日滚动高点回撤超过 −20% → 停用买入策略；历史压测中是唯一显著改善
-    崩盘段亏损的开关，滞后指标、只防大势不防急跌。本卡由仪表盘每次生成时用最新价格
-    计算——S2 从今天起每天有人算。四格中任何一格标红即为当日需要人眼确认的缺口。</p>
+  <h2><span class="sec-no">__NO__</span>今日指挥<span class="h-sub">每日指挥卡 · {esc(str(today_et))}（ET） · 指令由 S2 / 探测器 / 卖出线规则合成 · 诚实优先：无建议时明说无建议</span></h2>
+  <div class="card cx cmd">
+    <div class="cmd-order {tone}">{order_html}</div>
+    <div class="cmd-why">依据：{esc(" / ".join(why_bits))}</div>
+    <div class="cmd-pos">{pos_html}</div>
+    <div class="cmd-sec">较上一交易日（{esc(open_utc.astimezone(ET).strftime("%m-%d %H:%M"))} ET 开盘起）</div>
+    <div class="cmd-delta">{delta_html}</div>
+    <div class="cmd-sec">今日盯盘价位 · 到了会怎样</div>
+    <div class="cmd-table">{"".join(watch_rows)}</div>
+    <div class="cmd-sec">今日 if-then 微棋谱（当日相关分支 · 价位与 <a href="playbook.html">棋谱页 ↗</a> 同源换算）</div>
+    <div class="playbook">{"".join(pb_rows)}</div>
+    <details class="cmd-more">
+      <summary>底层读数四格（现价 · S2 · 探测器 · 策略线）与综合一句话——指令的原始输入</summary>
+      <div class="cx-grid">{cell_px}{cell_s2}{cell_det}{cell_sh}</div>
+      <p class="statement cx-verdict">综合：{verdict}。</p>
+    </details>
+    <p class="footnote">指令为规则合成（synthesize_order，--selftest 覆盖三态），不引入新判断：
+    S2 定义（E11 冻结口径，research/e11_bear_switch.py）= 收盘距 252 交易日滚动高点回撤超过
+    −20% → 停用买入策略，滞后指标、只防大势不防急跌；探测器为窄谱避险（不覆盖空头回补型/
+    宏观型下跌，历史证据 2 段 p=0.14）；E8-A 策略线 E18 全历史校验为负、证据等级已降级。
+    价位随现价变动，以收盘确认为准；金额按 position.json 换算（account_value 为示例值时失真）。
+    四格中任何一格标红即为当日需要人眼确认的缺口。</p>
   </div>
 </section>"""
 
@@ -5029,6 +5412,46 @@ h3 { font: 600 13.5px var(--font-sans); margin: 0 0 6px; color: var(--ink-2); }
 .cx-ref { font-size: 11.5px; color: var(--muted); line-height: 1.55; }
 .cx-verdict { margin: 14px 2px 6px; }
 
+/* ===== 01 今日指挥（命令卡：大字指令 + 紧凑价位表 + 微棋谱） ===== */
+.cmd { padding: 18px 20px 8px; }
+.cmd-order { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px;
+  margin: 2px 0 10px; padding: 12px 18px; border-left: 4px solid var(--accent);
+  background: var(--accent-wash); border-radius: 0 6px 6px 0;
+  font: 700 26px/1.4 var(--font-serif); letter-spacing: .1em; color: var(--ink); }
+.cmd-order .sep { color: var(--accent); font-weight: 400; }
+.cmd-order.good { border-left-color: var(--good); background: var(--good-wash); }
+.cmd-order.warn { border-left-color: var(--warn); background: var(--warn-wash); }
+.cmd-order.crit { border-left-color: var(--crit); background: var(--crit-wash); }
+@media (max-width: 640px){ .cmd-order { font-size: 19px; gap: 3px 10px; } }
+.cmd-why { font: 12px/1.7 var(--font-mono); color: var(--muted); margin: 0 2px 10px; }
+.cmd-pos { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center;
+  font-size: 12.5px; color: var(--ink-2); margin: 0 2px 4px; }
+.cmd-pos b { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.cmd-sec { font: 600 11px var(--font-mono); letter-spacing: .16em; color: var(--accent);
+  margin: 16px 2px 6px; text-transform: uppercase; }
+.cmd-delta { display: flex; flex-wrap: wrap; gap: 6px 8px; }
+.cmd-delta .dch { font-family: var(--font-mono); font-size: 11.5px;
+  font-variant-numeric: tabular-nums; border: 1px solid var(--border);
+  border-radius: 3px; padding: 2px 9px; color: var(--ink-2); white-space: nowrap; }
+.cmd-delta .dch b { font-weight: 600; }
+.cmd-table { border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  background: var(--surface-2); }
+.cmd-row { display: grid; align-items: baseline; gap: 10px; padding: 7px 12px;
+  grid-template-columns: minmax(160px, .95fr) 96px 108px minmax(240px, 2.1fr);
+  border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.cmd-row:last-child { border-bottom: none; }
+.cmd-row.hot { background: var(--warn-wash); }
+.cmd-row .k { color: var(--ink-2); }
+.cmd-row .v { font-weight: 600; color: var(--ink); }
+.cmd-row .d { color: var(--muted); }
+.cmd-row .to { color: var(--muted); line-height: 1.55; }
+@media (max-width: 820px){ .cmd-row { grid-template-columns: minmax(0,1fr) 92px 90px; }
+  .cmd-row .to { grid-column: 1 / -1; padding-left: 2px; } }
+.cmd-more { margin-top: 16px; }
+.cmd-more summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.cmd-more summary:hover { color: var(--ink-2); }
+.cmd-more .cx-grid { margin-top: 10px; }
+
 /* ===== 01 态势总览 hero ===== */
 .hero { display: grid; grid-template-columns: 264px minmax(0,1fr) 300px; gap: 0;
   overflow: hidden; }
@@ -6613,10 +7036,10 @@ def render(db_path: Path = DB_PATH) -> str:
         for h in health_rows:
             h["score4"] = score4_avgs.get(h["source_id"])
         extras, nitter_alert = load_health_extras(conn, health_rows, now)
+        cal = load_calendar(conn, finra, det, now)
         sections = [
-            render_consensus(det, px, shadow, now),
-            render_morning_brief(conn, det, px, now,
-                                 load_calendar(conn, finra, det, now)),
+            render_command(conn, det, px, shadow, finra, cal, now),
+            render_morning_brief(conn, det, px, now, cal),
             render_detector(det, now, render_waitboard(det, px, finra, now),
                             nitter_alert),
             symbol_block,
@@ -6690,11 +7113,13 @@ def main() -> None:
     ap.add_argument("--db", type=Path, default=DB_PATH, help="sentinel.sqlite 路径")
     ap.add_argument("--out", type=Path, default=OUT_PATH, help="输出 HTML 路径")
     ap.add_argument("--selftest", action="store_true",
-                    help="单元自测：calib_eta 出闸日 + watchdog pill 加固（P1-2）")
+                    help="单元自测：calib_eta 出闸日 + watchdog pill 加固（P1-2）"
+                         "+ 指挥卡指令三态（synthesize_order）")
     args = ap.parse_args()
     if args.selftest:
         _calib_eta_selftest()
         _watchdog_pill_selftest()
+        _order_selftest()
         return
     if not args.db.exists():
         raise SystemExit(f"数据库不存在：{args.db}（先跑哨兵采集）")
