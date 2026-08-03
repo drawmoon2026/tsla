@@ -6349,7 +6349,7 @@ _RP_JS = """
   var tabs = document.querySelectorAll(".vt");
   if (!tabs.length) return;
   var modes = document.querySelectorAll(".rm");
-  var curMode = "det";
+  var curMode = "full"; /* 默认进攻层（54 笔）；防守层（稀疏）经 #detector 显式进入 */
   function setView(v) {
     tabs.forEach(function (b) {
       var on = b.getAttribute("data-view") === v;
@@ -6378,22 +6378,23 @@ _RP_JS = """
     b.addEventListener("click", function () {
       var v = b.getAttribute("data-view");
       setView(v);
-      writeHash(v === "replay" && curMode === "full" ? "fullsys" : v);
+      writeHash(v === "replay" ? (curMode === "full" ? "fullsys" : "detector") : v);
     });
   });
   modes.forEach(function (b) {
     b.addEventListener("click", function () {
       setMode(b.getAttribute("data-mode"));
-      writeHash(curMode === "full" ? "fullsys" : "replay");
+      writeHash(curMode === "full" ? "fullsys" : "detector");
     });
   });
   var h = (location.hash || "").slice(1);
-  if (h === "fullsys") { setView("replay"); setMode("full"); }
-  else if (h === "replay" || h === "live") setView(h);
+  /* 旧锚点 #replay 曾指探测器模式——用户浏览器/历史里残留它会一直拽回
+     防守层（"3 年 2 次"误读根源）。现统一：#replay 也落全系统模式，
+     防守层只能经 #detector 显式进入。 */
+  if (h === "fullsys" || h === "replay") { setView("replay"); setMode("full"); }
+  else if (h === "live") setView(h);
   else if (h === "detector") { setView("replay"); setMode("det"); }
-  /* 无 hash 进入推演视图时默认全系统模式（进攻层 54 笔）——
-     探测器（防守层，天生稀疏）降为次选，防"3 年 2 次"误读 */
-  if (!h) { try { setMode("full"); } catch (e) {} }
+  else { try { setMode("full"); } catch (e) {} }
 })();
 /* 推演播放器：逐日回放 N3-H 考场；事件写入推演日志，播放不中断；播完弹总结 */
 (function () {
