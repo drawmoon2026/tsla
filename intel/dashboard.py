@@ -183,7 +183,7 @@ DET_STATE = {
 DET_EVIDENCE = (
     "证据等级：历史推演 2 段全对，但块 bootstrap p=0.14——仅方向性证据；"
     "窄谱过滤器，对空头回补型/宏观型下跌失明"
-    "（如 2024-12→2025-04 的 −53.8% 整段无信号）。广谱回撤防线看「今日合议」S2 读数。"
+    "（如 2024-12→2025-04 的 −53.8% 整段无信号）。广谱回撤开关（S2，暴露削减器）看「今日合议」读数。"
     "触发频率（≈2 段/3 年）已经 N9 全参数扫描验证（144 配置）：提频每一步以判对率跌破 60% 为代价，"
     "全网格精度 ≥70% 的工作点频率与现行相同——稀疏是该信号的自然产率，非参数保守。"
     "高频交易信号看「全系统推演」（进攻层，≈5.4 笔/月）。"
@@ -1988,7 +1988,9 @@ def render_waitboard(det: dict | None, px: dict | None,
             ))
             rows.append(_pb_row(
                 f"S2 当前 {dd:+.1f}%，若进一步恶化",
-                "维持停用——E8-A 崩盘段系统性反选，S2 是唯一压测通过的截断",
+                "维持停用——E8-A 崩盘段系统性反选，S2 是唯一过压测的暴露削减器"
+                "（价值=削减负期望流的暴露次数，无选时成分：E18 放行 181 笔 "
+                "−18.1bp/笔 差于拦截 365 笔 −11.2bp/笔）",
                 "E11 S2",
             ))
         else:
@@ -2439,7 +2441,8 @@ def render_replay_modebar() -> str:
         '<span class="rm-cmp"><b>探测器推演 = 防守层</b>：稀疏出手，只为躲开特定'
         "类型的大跌（3 年考场仅 2 段避险、4 次假想买卖）；"
         "<b>全系统推演 = 进攻层</b>：E8-A 高频小额抄底 + 双开关"
-        "（留出 10 个月 54 笔；E18 全历史为负）。——「系统 3 年只交易 2 次」"
+        f"（留出顺风窗 10 个月 54 笔｜E18 全历史滚动同配方年化 {E18_ANN_L1_TXT}）。"
+        "——「系统 3 年只交易 2 次」"
         "是只看防守层的误读，两层并行、各管一件事。"
         "<b>周期推演 = 态势感知层</b>：52 个历史转折点案例库 + 宏观相位——"
         "只帮你看清位置，不产生信号（N10 判决）。</span></div>"
@@ -2950,14 +2953,17 @@ def render_fullsys_view(data: dict | None,
   <div class="rp-sum" id="fs-sum" hidden role="dialog" aria-label="全系统推演总结">
     <div class="rs-h"><span>{sum_title}</span>
       <button class="rp-btn" id="fs-sum-close" type="button">关闭</button></div>
-    <div class="fs-ann"><span class="fs-ann-k">年化收益率（留出段口径）</span>
-      <span class="fs-ann-v num">≈ {ann10:+.1f}%</span>
-      <span class="fs-ann-sub">口径：留出 10 个月总收益 {s2["total"] * 100:+.2f}% 复利年化
-      (1{s2["total"] * 100:+.2f}%)^(12/10) − 1；按实际 {s["window"]["cal_days"]} 天算
-      ≈ {ann_act:+.1f}%。假想推演口径，含悲观成本，不含税与资金占用。</span></div>
-    <div class="fs-e18warn">⚠ <b>全历史滚动校验（E18，2020-2026 十二折）同配方年化
-      <span class="num">{E18_ANN_L1_TXT}</span></b>：留出段为顺风窗口，此数字不代表多周期常态
-      （outputs/e18_rolling · docs/strategy-lab.md E18）。</div>
+    <div class="fs-ann2">
+      <div class="fs-ann2-cell hg"><span class="fs-ann2-k">留出段年化（顺风窗）</span>
+        <span class="fs-ann2-v num">≈ {ann10:+.1f}%</span></div>
+      <div class="fs-ann2-cell hc"><span class="fs-ann2-k">全历史滚动年化（E18 十二折）</span>
+        <span class="fs-ann2-v num">{E18_ANN_L1_TXT}</span></div>
+    </div>
+    <p class="fs-ann2-note">口径注：左 = 留出 10 个月总收益 {s2["total"] * 100:+.2f}% 复利年化
+      (1{s2["total"] * 100:+.2f}%)^(12/10) − 1，按实际 {s["window"]["cal_days"]} 天算
+      ≈ {ann_act:+.1f}%——同配方的顺风窗口；右 = E18 同配方 2020-07 → 2026-07 十二折滚动重训
+      （outputs/e18_rolling · docs/strategy-lab.md E18）。两数并读，顺风窗读数不代表多周期常态。
+      假想推演口径，含悲观成本，不含税与资金占用。</p>
     <div class="rs-grid">
       <div class="rs-cell"><div class="rs-k">交易笔数（留出段）</div>
         <div class="rs-v num">{n_kept_h} 笔 <span class="sub">≈{n_kept_h / 10:.1f} 笔/月（10 个月口径）</span></div></div>
@@ -2982,7 +2988,7 @@ def render_fullsys_view(data: dict | None,
       Bonferroni 校正后不显著（bootstrap p 0.04–0.28），S2 过滤后的 +12.04% 亦含选择偏差；
       ③ 策略 2026-07-24 冻结、shadow 前向验证（≥8 周）进行中，效力由前向裁决；
       ④ <b>E18 全历史滚动校验</b>（2020-07 → 2026-07 十二折滚动重训）同配方年化
-      <b>{E18_ANN_L1_TXT}</b>（L=2 {E18_ANN_L2_TXT}）——多周期常态为负，头条年化只描述留出顺风窗口——本页全部为
+      <b>{E18_ANN_L1_TXT}</b>（L=2 {E18_ANN_L2_TXT}）——多周期常态为负，头条左数只描述留出顺风窗口——本页全部为
       假想推演，<b>不构成任何上钱依据</b>。</div>
   </div>"""
 
@@ -3426,7 +3432,7 @@ def _cmd_row(k: str, v: str, d: str, to: str, cls: str = "") -> str:
 
 
 _CAL_EFFECT = {  # 日历事件「到了会怎样」（指挥卡一句话口径）
-    "fomc": "宏观波动日——系统无宏观规则（探测器盲区），广谱防线仍只有 S2",
+    "fomc": "宏观波动日——系统无宏观规则（探测器盲区），广谱侧仅有 S2 暴露削减器（无选时成分）",
     "earnings": "财报日——无财报专用规则，事件进情报流与 AI 解读，人工过目",
     "finra": "腿 A 数据更新——change ≥+10% 且当日 Musk 密集即构成探测器触发条件",
     "calib": "探测器出闸——恢复正式避险信号资格，两腿读数当日起生效",
@@ -3443,7 +3449,9 @@ def render_command(conn: sqlite3.Connection, det: dict | None, px: dict | None,
     等待局面也输出可执行指令（持有观望/不加仓/无卖出触发），价位表把每条
     防线换算成具体数字与"到了会怎样"。规则合成，不引入新判断；诚实优先——
     无建议时明说无建议。分支价位/金额换算复用 intel/playbook.py（同源口径）。
-    S2 = E11 压测过的全系统最强开关（距 252 交易日滚动高点回撤 >20% → 停用买入）。
+    S2 = E11 过压测的暴露削减器（距 252 交易日滚动高点回撤 >20% → 停用买入；
+    价值=削减负期望流的暴露次数，无选时成分——E18 六年：放行流 −18.1bp/笔
+    差于拦截流 −11.2bp/笔，见 rebuttal_review B6）。
     """
     today_et = now.astimezone(ET).date()
     s2 = (px or {}).get("s2")
@@ -3596,7 +3604,8 @@ def render_command(conn: sqlite3.Connection, det: dict | None, px: dict | None,
         if s2["triggered"]:
             bits.append(
                 f"<b class=\"crit-text\">S2 已触发</b>（回撤 {s2['drawdown_pct']:+.1f}%，"
-                "超过 −20% 线）——广谱回撤防线亮红，E11 压测口径下属买入策略停用区"
+                "超过 −20% 线）——广谱回撤开关亮红（暴露削减器，无选时成分），"
+                "E11 压测口径下属买入策略停用区"
             )
         else:
             bits.append(
@@ -3628,7 +3637,8 @@ def render_command(conn: sqlite3.Connection, det: dict | None, px: dict | None,
     if s2 and s2["triggered"]:
         verdict_tail = (
             "——系统无正式买卖信号，但 <b class=\"crit-text\">S2 广谱开关处于触发区</b>"
-            "（唯一已通过压测的实时可算防线）；其余两路无输出，供人工判断"
+            "（唯一过压测的实时可算暴露削减器——价值=削减负期望流的暴露次数，"
+            "无选时成分）；其余两路无输出，供人工判断"
         )
     verdict = "；".join(bits) + verdict_tail
 
@@ -4973,7 +4983,7 @@ def render_detector(data: dict | None, now: datetime, wait_html: str = "",
         "表盘进度语义：标定期 = 基线累积（设计稿方案）；RISK_ON = 放风腿密度占比、"
         "避险期 = F 窗行进度（设计稿未预留正式期方案，自定口径）。"
         "RISK_ON 读作「未见空头知情型风险」——本探测器仅覆盖此一类下跌，"
-        "不是持仓建议；广谱回撤防线见「今日合议」S2 读数。"
+        "不是持仓建议；广谱回撤开关（S2，暴露削减器）见「今日合议」读数。"
     )
     # 影子配置一行小字（N9 残值，只观察不出信号；无行则整行隐藏）
     shadow = data.get("shadow")
@@ -6498,15 +6508,21 @@ main > .sym-tabs { margin-top: 26px; }
 .fs-blkrow td { color: var(--muted); }
 .fs-blknote { font-size: 11px; color: var(--muted); margin: 8px 10px 10px;
   line-height: 1.6; }
-.fs-ann { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
-  border: 1px solid var(--good); background: var(--good-wash); border-radius: 6px;
-  padding: 9px 14px; margin: 10px 0 2px; }
-.fs-ann-k { font: 600 10px var(--font-mono); letter-spacing: .08em;
+.fs-ann2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  margin: 10px 0 2px; }
+.fs-ann2-cell { display: flex; flex-direction: column; gap: 2px;
+  border-radius: 6px; padding: 9px 14px; }
+.fs-ann2-cell.hg { border: 1px solid var(--good); background: var(--good-wash); }
+.fs-ann2-cell.hc { border: 1px solid var(--crit); background: var(--crit-wash); }
+.fs-ann2-k { font: 600 10px var(--font-mono); letter-spacing: .08em;
   color: var(--muted); }
-.fs-ann-v { font-size: 21px; font-weight: 800; color: var(--good-text);
+.fs-ann2-v { font-size: 21px; font-weight: 800;
   font-variant-numeric: tabular-nums; }
-.fs-ann-sub { flex: 1 1 260px; font-size: 11px; color: var(--muted);
-  line-height: 1.55; }
+.fs-ann2-cell.hg .fs-ann2-v { color: var(--good-text); }
+.fs-ann2-cell.hc .fs-ann2-v { color: var(--crit-text); }
+.fs-ann2-note { font-size: 11px; color: var(--muted); line-height: 1.6;
+  margin: 6px 0 2px; }
+@media (max-width: 560px) { .fs-ann2 { grid-template-columns: 1fr; } }
 .fs-e18warn { border: 1px solid var(--crit); border-left-width: 4px;
   background: var(--crit-wash); border-radius: 6px; padding: 9px 14px;
   margin: 8px 0 2px; font-size: 12.5px; font-weight: 600;

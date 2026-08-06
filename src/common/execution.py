@@ -8,7 +8,12 @@ pessimistic — see docs/review-2026-07-23/):
   is the open (gap-through), not the stop price; adverse slippage on top.
 - Take profit is a limit order: it needs a strict crossing (high > tp for
   longs) to fill at tp, or fills at the open when the bar opens beyond it.
-- If one bar touches both TP and SL, SL wins (worst case for the trader).
+  A bar that OPENS at/beyond TP fills the limit at the open immediately —
+  an SL touched later inside that same bar cannot pre-empt it (rebuttal
+  review 2026-08-06 R2 fix; zero historical occurrences in all archived
+  streams, so no archived number moves).
+- Otherwise, if one bar touches both TP and SL, SL wins (worst case for
+  the trader).
 - Fees are charged per side; entry gets adverse slippage.
 """
 
@@ -69,18 +74,24 @@ def settle_bracket(
     for ts, row in window.iterrows():
         o, h, l = float(row["Open"]), float(row["High"]), float(row["Low"])
         if direction == 1:
+            gap_tp = o >= tp_px
             gap_sl = o <= sl_px
             sl_hit = gap_sl or l <= sl_px
-            tp_hit = o >= tp_px or h > tp_px
+            tp_hit = gap_tp or h > tp_px
             sl_fill = min(o, sl_px) * (1 - cost.slip)
             tp_fill = max(o, tp_px)
         else:
+            gap_tp = o <= tp_px
             gap_sl = o >= sl_px
             sl_hit = gap_sl or h >= sl_px
-            tp_hit = o <= tp_px or l < tp_px
+            tp_hit = gap_tp or l < tp_px
             sl_fill = max(o, sl_px) * (1 + cost.slip)
             tp_fill = min(o, tp_px)
 
+        if gap_tp:  # bar opens at/beyond the TP limit: fills at the open
+            # immediately; an intrabar SL later in the bar cannot pre-empt it
+            hit, exit_px, exit_time = "tp", tp_fill, ts
+            break
         if sl_hit:  # SL priority: pessimistic when both touch in one bar
             hit, exit_px, exit_time = "sl", sl_fill, ts
             break

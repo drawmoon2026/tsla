@@ -506,7 +506,8 @@ def build_tree(live: float, s2: dict, pos: dict, det: dict | None,
             node("up", "②-A-2", "RISK_OFF 解除 / 未触发（RISK_ON）",
                 acts=[act_sys("N3-H",
                     "维持/恢复——注意 RISK_ON ≠ 安全：历史上 2024-12→2025-04 "
-                    "的 -53.8% 整段无信号（盲区常驻声明），广谱防线仍看 S2")]),
+                    "的 -53.8% 整段无信号（盲区常驻声明），广谱侧仍看 S2"
+                    "（暴露削减器，无选时成分）")]),
         ])
 
     gate_s = (f"GBDT 门槛 {meta['gate']:.4f}，几何 tp +{meta['tp']:.1f}% / "
